@@ -18,10 +18,14 @@ import { SupplierController } from '../controllers/supplier.controller.js';
 import { SalesController } from '../controllers/sales.controller.js';
 import { VoucherController } from '../controllers/voucher.controller.js';
 import { PaymentController } from '../controllers/payment.controller.js';
+import { AuthController } from '../controllers/auth.controller.js';
 import { ExchangeRateService } from '../services/exchange-rate.service.js';
 import { FiscalReportService } from '../services/fiscal-report.service.js';
 
 export const apiRouter = Router();
+
+// --- AUTENTICACIÓN PÚBLICA ---
+apiRouter.post('/auth/login', AuthController.login);
 
 // --- WEBHOOK PÚBLICO (Verificación criptográfica con X-Signature-SHA256) ---
 apiRouter.post('/payments/webhooks', PaymentController.handleWebhook);
