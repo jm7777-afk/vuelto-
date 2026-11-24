@@ -11,6 +11,7 @@ import {
   SafeAreaView,
   StatusBar,
   ScrollView,
+  Image,
 } from 'react-native';
 import { useCartStore, CartLine } from '../../stores/cart.store';
 import { useAuthStore } from '../../stores/auth.store';
@@ -341,6 +342,10 @@ export const PosCheckoutScreen: React.FC = () => {
       <View style={styles.header}>
         <View>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <Image
+              source={require('../../../assets/vuelto-icon.jpg')}
+              style={{ width: 26, height: 26, borderRadius: 6 }}
+            />
             <Text style={styles.title}>VUELTO POS</Text>
             {isVendedor ? (
               <View style={styles.roleBadgeVendedor}>

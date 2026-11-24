@@ -10,6 +10,7 @@ import {
   SafeAreaView,
   StatusBar,
   Linking,
+  Image,
 } from 'react-native';
 import { useAuthStore } from '../../stores/auth.store';
 
@@ -157,6 +158,10 @@ export const MobileAdminDashboard: React.FC = () => {
       <View style={styles.header}>
         <View>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <Image
+              source={require('../../../assets/vuelto-icon.jpg')}
+              style={{ width: 26, height: 26, borderRadius: 6 }}
+            />
             <Text style={styles.title}>VUELTO ADMIN</Text>
             <View style={styles.adminPill}>
               <Text style={styles.adminPillText}>👑 TOTAL</Text>

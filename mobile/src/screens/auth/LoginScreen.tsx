@@ -11,6 +11,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   ScrollView,
+  Image,
 } from 'react-native';
 import { MobileApiService } from '../../services/api.service';
 import { MobileUserProfile, useAuthStore } from '../../stores/auth.store';
@@ -89,6 +90,10 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
         <ScrollView contentContainerStyle={styles.scrollContent}>
           {/* Logo y Marca Vuelto */}
           <View style={styles.brandContainer}>
+            <Image
+              source={require('../../../assets/vuelto-logo.jpg')}
+              style={{ width: 180, height: 50, resizeMode: 'contain', marginBottom: 8, borderRadius: 8 }}
+            />
             <Text style={styles.brandTitle}>
               vuelto<Text style={styles.brandDot}>.</Text>
             </Text>

@@ -1811,7 +1811,18 @@ export const App: React.FC = () => {
       <div style={{ minHeight: '100vh', backgroundColor: '#071F27', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
         <div style={{ width: '100%', maxWidth: '440px', backgroundColor: '#0B3B49', borderRadius: '24px', border: '1px solid #155E75', padding: '36px', boxShadow: '0 25px 50px -12px rgba(0,0,0,0.6)' }}>
           <div style={{ textAlign: 'center', marginBottom: '28px' }}>
-            <h1 style={{ fontSize: '42px', fontWeight: '900', color: '#FFFFFF', letterSpacing: '2px', lineHeight: 1 }}>
+            <img
+              src="/vuelto-logo.jpg"
+              alt="Vuelto Logo"
+              style={{
+                height: '70px',
+                objectFit: 'contain',
+                margin: '0 auto 16px auto',
+                display: 'block',
+                borderRadius: '8px',
+              }}
+            />
+            <h1 style={{ fontSize: '38px', fontWeight: '900', color: '#FFFFFF', letterSpacing: '2px', lineHeight: 1 }}>
               vuelto<span style={{ color: '#A3E635' }}>.</span>
             </h1>
             <p style={{ fontSize: '11px', color: '#A3E635', fontWeight: '700', letterSpacing: '2px', marginTop: '6px' }}>
@@ -1938,7 +1949,12 @@ export const App: React.FC = () => {
           >
             <Menu size={24} />
           </button>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <img
+              src="/vuelto-icon.jpg"
+              alt="Vuelto"
+              style={{ width: '28px', height: '28px', borderRadius: '6px', objectFit: 'cover' }}
+            />
             <span style={{ fontSize: '18px', fontWeight: 'bold', color: '#FFFFFF', letterSpacing: '1px' }}>vuelto<span style={{ color: '#A3E635' }}>.</span></span>
             <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', backgroundColor: isVendedor ? '#10B98122' : '#0284C722', color: isVendedor ? '#A3E635' : '#38BDF8', fontWeight: 'bold' }}>
               {isVendedor ? 'Cajero' : 'Admin'}
@@ -1973,9 +1989,11 @@ export const App: React.FC = () => {
         >
           <div style={{ marginBottom: '16px' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '6px' }}>
-              <div style={{ padding: '8px', borderRadius: '8px', backgroundColor: '#0284C7', color: '#FFFFFF' }}>
-                <Store size={22} />
-              </div>
+              <img
+                src="/vuelto-icon.jpg"
+                alt="Vuelto"
+                style={{ width: '38px', height: '38px', borderRadius: '10px', objectFit: 'cover' }}
+              />
               <div>
                 <h1 style={{ fontSize: '20px', fontWeight: 'bold', color: '#FFFFFF', lineHeight: 1 }}>vuelto<span style={{ color: '#A3E635' }}>.</span></h1>
                 <span style={{ fontSize: '10px', color: '#A3E635', fontWeight: 'bold' }}>● Supabase Cloud Conectada</span>
@@ -3859,6 +3877,11 @@ export const App: React.FC = () => {
       {completedSaleModal && (
         <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px', zIndex: 1000 }}>
           <div style={{ width: '100%', maxWidth: '500px', backgroundColor: '#0B3B49', borderRadius: '20px', padding: '28px', border: '1px solid #10B981', boxShadow: '0 25px 50px -12px rgba(0,0,0,0.7)', textAlign: 'center' }}>
+            <img
+              src="/vuelto-logo.jpg"
+              alt="Vuelto Logo"
+              style={{ height: '42px', objectFit: 'contain', margin: '0 auto 14px auto', display: 'block', borderRadius: '6px' }}
+            />
             <div style={{ width: '56px', height: '56px', borderRadius: '28px', backgroundColor: '#10B98122', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px', color: '#10B981' }}>
               <CheckCircle size={32} />
             </div>

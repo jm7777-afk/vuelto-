@@ -1,5 +1,7 @@
 import PDFDocument from 'pdfkit';
 import { Buffer } from 'buffer';
+import path from 'path';
+import fs from 'fs';
 
 export interface ReceiptData {
   tenant: {
@@ -78,6 +80,17 @@ export class ReceiptService {
       doc.on('data', (chunk) => chunks.push(chunk));
       doc.on('end', () => resolve(Buffer.concat(chunks)));
       doc.on('error', (err) => reject(err));
+
+      // 0. Logo Oficial Vuelto
+      const logoPath = path.resolve(process.cwd(), 'public/vuelto-icon.jpg');
+      if (fs.existsSync(logoPath)) {
+        try {
+          doc.image(logoPath, (226 - 36) / 2, 8, { width: 36 });
+          doc.moveDown(2);
+        } catch {
+          // Continuar si hay error de renderizado de imagen
+        }
+      }
 
       // 1. Encabezado
       doc.fontSize(10).font('Helvetica-Bold').text(data.tenant.tradeName.toUpperCase(), { align: 'center' });
