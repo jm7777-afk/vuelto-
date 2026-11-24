@@ -517,3 +517,113 @@ export const auditLogs = pgTable(
     index('idx_audit_tenant_action').on(table.tenantId, table.action, table.createdAt),
   ]
 );
+
+// 22. Tenant Configurations (Reglas de mora, preferencias)
+export const tenantConfigurations = pgTable(
+  'tenant_configurations',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .unique()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    lateFeePercentage: numeric('late_fee_percentage', { precision: 5, scale: 2 }).default('5.00').notNull(),
+    lateFeeGraceDays: integer('late_fee_grace_days').default(3).notNull(),
+    autoApplyLateFee: boolean('auto_apply_late_fee').default(true).notNull(),
+    currencyPreference: varchar('currency_preference', { length: 10 }).default('USD').notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  }
+);
+
+// 23. Purchase Orders (Pedidos / Órdenes de Compra a Proveedores)
+export const purchaseOrders = pgTable(
+  'purchase_orders',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    supplierId: uuid('supplier_id')
+      .notNull()
+      .references(() => suppliers.id, { onDelete: 'restrict' }),
+    orderNumber: varchar('order_number', { length: 30 }).notNull(), // ej. 'OC-2026-0001'
+    status: varchar('status', { length: 25 }).default('DRAFT').notNull(), // 'DRAFT', 'SENT_WHATSAPP', 'RECEIVED', 'CANCELLED'
+    expectedDeliveryDate: timestamp('expected_delivery_date', { withTimezone: true }),
+    totalEstimatedUsd: numeric('total_estimated_usd', { precision: 14, scale: 4 }).default('0.0000').notNull(),
+    notes: text('notes'),
+    receivedAt: timestamp('received_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('uq_tenant_order_number').on(table.tenantId, table.orderNumber),
+    index('idx_orders_tenant_status').on(table.tenantId, table.status),
+  ]
+);
+
+// 24. Purchase Order Lines
+export const purchaseOrderLines = pgTable(
+  'purchase_order_lines',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    orderId: uuid('order_id')
+      .notNull()
+      .references(() => purchaseOrders.id, { onDelete: 'cascade' }),
+    productId: uuid('product_id')
+      .notNull()
+      .references(() => products.id, { onDelete: 'restrict' }),
+    quantityOrdered: numeric('quantity_ordered', { precision: 12, scale: 3 }).notNull(),
+    quantityReceived: numeric('quantity_received', { precision: 12, scale: 3 }).default('0.000').notNull(),
+    unitCostUsd: numeric('unit_cost_usd', { precision: 14, scale: 4 }).notNull(),
+    subtotalUsd: numeric('subtotal_usd', { precision: 14, scale: 4 }).notNull(),
+  }
+);
+
+// 25. Receivable Payments (Abonos de Cobranza)
+export const receivablePayments = pgTable(
+  'receivable_payments',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    customerId: uuid('customer_id')
+      .notNull()
+      .references(() => customers.id, { onDelete: 'restrict' }),
+    paymentMethod: varchar('payment_method', { length: 30 }).notNull(), // 'CASH_USD', 'PAGO_MOVIL', 'TRANSFER', 'DEBIT_CARD'
+    amountUsd: numeric('amount_usd', { precision: 14, scale: 2 }).notNull(),
+    amountBs: numeric('amount_bs', { precision: 14, scale: 2 }).notNull(),
+    rateValue: numeric('rate_value', { precision: 14, scale: 4 }).notNull(),
+    lateFeeAppliedUsd: numeric('late_fee_applied_usd', { precision: 14, scale: 2 }).default('0.00').notNull(),
+    referenceNumber: varchar('reference_number', { length: 60 }),
+    notes: text('notes'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('idx_receivable_customer').on(table.tenantId, table.customerId, table.createdAt),
+  ]
+);
+
+// 26. Financial Transactions (Flujo de Caja, Gastos Operativos y Finanzas)
+export const financialTransactions = pgTable(
+  'financial_transactions',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+    type: varchar('type', { length: 20 }).notNull(), // 'INGRESO', 'EGRESO'
+    category: varchar('category', { length: 40 }).notNull(), // 'VENTAS', 'PAGO_PROVEEDOR', 'NOMINA', 'ALQUILER', 'SERVICIOS', 'MANTENIMIENTO', 'IMPUESTOS', 'OTROS'
+    description: text('description').notNull(),
+    amountUsd: numeric('amount_usd', { precision: 14, scale: 2 }).notNull(),
+    amountBs: numeric('amount_bs', { precision: 14, scale: 2 }).notNull(),
+    rateValue: numeric('rate_value', { precision: 14, scale: 4 }).notNull(),
+    referenceNumber: varchar('reference_number', { length: 60 }),
+    transactionDate: timestamp('transaction_date', { withTimezone: true }).defaultNow().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('idx_fin_tx_date').on(table.tenantId, table.type, table.transactionDate),
+  ]
+);

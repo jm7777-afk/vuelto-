@@ -141,4 +141,35 @@ export class InventoryService {
       .leftJoin(productStock, eq(products.id, productStock.productId))
       .where(eq(products.tenantId, tenantId));
   }
+
+  static async getKardex(tenantId: string, productId?: string, limit = 50) {
+    let query = db
+      .select({
+        id: inventoryMovements.id,
+        productId: inventoryMovements.productId,
+        productName: products.name,
+        movementType: inventoryMovements.movementType,
+        quantity: inventoryMovements.quantity,
+        unitCostUsd: inventoryMovements.unitCostUsd,
+        referenceType: inventoryMovements.referenceType,
+        reason: inventoryMovements.reason,
+        createdAt: inventoryMovements.createdAt,
+      })
+      .from(inventoryMovements)
+      .innerJoin(products, eq(inventoryMovements.productId, products.id))
+      .where(
+        productId
+          ? and(eq(inventoryMovements.tenantId, tenantId), eq(inventoryMovements.productId, productId))
+          : eq(inventoryMovements.tenantId, tenantId)
+      )
+      .orderBy(sql`${inventoryMovements.createdAt} DESC`)
+      .limit(limit);
+
+    return await query;
+  }
+
+  static async getLowStock(tenantId: string) {
+    const allStock = await this.getStock(tenantId);
+    return allStock.filter((s) => parseFloat(s.quantity || '0') <= 5);
+  }
 }

@@ -37,4 +37,32 @@ export class ProductController {
       next(err);
     }
   }
+
+  static async update(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = String(req.params.id);
+      const updated = await ProductService.update(req.tenantId!, id, req.body);
+      if (!updated) {
+        res.status(404).json({ code: 'PRODUCT_NOT_FOUND', message: 'Producto no encontrado' });
+        return;
+      }
+      res.json(updated);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  static async delete(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = String(req.params.id);
+      const deleted = await ProductService.delete(req.tenantId!, id);
+      if (!deleted) {
+        res.status(404).json({ code: 'PRODUCT_NOT_FOUND', message: 'Producto no encontrado' });
+        return;
+      }
+      res.json({ status: 'ok', message: 'Producto desactivado del inventario' });
+    } catch (err) {
+      next(err);
+    }
+  }
 }

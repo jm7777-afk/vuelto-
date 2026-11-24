@@ -68,4 +68,32 @@ export class SupplierController {
       next(err);
     }
   }
+
+  static async update(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = String(req.params.id);
+      const updated = await SupplierService.update(req.tenantId!, id, req.body);
+      if (!updated) {
+        res.status(404).json({ code: 'NOT_FOUND', message: 'Proveedor no encontrado' });
+        return;
+      }
+      res.json(updated);
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  static async delete(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = String(req.params.id);
+      const deleted = await SupplierService.delete(req.tenantId!, id);
+      if (!deleted) {
+        res.status(404).json({ code: 'NOT_FOUND', message: 'Proveedor no encontrado' });
+        return;
+      }
+      res.json({ status: 'ok', message: 'Proveedor desactivado' });
+    } catch (err) {
+      next(err);
+    }
+  }
 }

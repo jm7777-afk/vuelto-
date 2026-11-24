@@ -16,7 +16,7 @@ import { useAuthStore } from '../../stores/auth.store';
 export const MobileAdminDashboard: React.FC = () => {
   const { user, toggleMode, logout } = useAuthStore();
 
-  const [activeSection, setActiveSection] = useState<'STOCK' | 'DEBTS' | 'SALES' | 'RATES' | 'USERS'>('STOCK');
+  const [activeSection, setActiveSection] = useState<'STOCK' | 'ORDERS' | 'DEBTS' | 'SUPPLIERS' | 'SALES' | 'RATES' | 'USERS'>('STOCK');
 
   // Configuración de Mora Administrativa
   const [lateFeePercent, setLateFeePercent] = useState('5.0');
@@ -29,6 +29,38 @@ export const MobileAdminDashboard: React.FC = () => {
   // Estado para nuevo vendedor
   const [newCashierUsername, setNewCashierUsername] = useState('');
   const [newCashierName, setNewCashierName] = useState('');
+
+  // Estado para nuevo pedido a proveedor
+  const [newOrderSupName, setNewOrderSupName] = useState('Empresas Polar C.A.');
+  const [newOrderSupPhone, setNewOrderSupPhone] = useState('04141234567');
+  const [newOrderProdName, setNewOrderProdName] = useState('Harina PAN Blanca 1kg');
+  const [newOrderQty, setNewOrderQty] = useState('50');
+  const [newOrderCost, setNewOrderCost] = useState('0.95');
+
+  // Estado para nuevo proveedor
+  const [newSupName, setNewSupName] = useState('');
+  const [newSupRif, setNewSupRif] = useState('');
+  const [newSupPhone, setNewSupPhone] = useState('');
+
+  // Lista de Pedidos
+  const [ordersList, setOrdersList] = useState([
+    {
+      id: 'oc-1',
+      number: 'OC-2026-0001',
+      supplier: 'Empresas Polar C.A.',
+      phone: '04141234567',
+      totalUsd: 114.00,
+      status: 'SENT_WHATSAPP',
+      items: '60 unids Harina PAN + 20 unids Aceite Mazeite',
+    },
+  ]);
+
+  // Lista de Proveedores
+  const [suppliersList, setSuppliersList] = useState([
+    { id: 's-1', name: 'Empresas Polar C.A.', rif: 'J-000413129', phone: '04141234567', creditDays: 15 },
+    { id: 's-2', name: 'Pepsico Alimentos Venezuela', rif: 'J-300854128', phone: '04160001122', creditDays: 21 },
+    { id: 's-3', name: 'Distribuidora Lácteos Los Andes', rif: 'G-200055441', phone: '04129876543', creditDays: 7 },
+  ]);
 
   const handleAdjustStock = () => {
     if (!adjustProductId || !adjustQty || !adjustReason) {
@@ -54,6 +86,42 @@ export const MobileAdminDashboard: React.FC = () => {
     setNewCashierName('');
   };
 
+  const handleCreateOrder = () => {
+    const qty = parseFloat(newOrderQty) || 10;
+    const cost = parseFloat(newOrderCost) || 1.0;
+    const total = qty * cost;
+    const newOrd = {
+      id: `oc-${Date.now()}`,
+      number: `OC-2026-${Math.floor(1000 + Math.random() * 9000)}`,
+      supplier: newOrderSupName,
+      phone: newOrderSupPhone,
+      totalUsd: total,
+      status: 'DRAFT',
+      items: `${qty} unids x ${newOrderProdName}`,
+    };
+    setOrdersList([newOrd, ...ordersList]);
+    Alert.alert('Orden Creada', `Orden ${newOrd.number} registrada para ${newOrd.supplier}.`);
+  };
+
+  const handleCreateSupplier = () => {
+    if (!newSupName || !newSupRif || !newSupPhone) {
+      Alert.alert('Datos Incompletos', 'Nombre, RIF y Teléfono son obligatorios.');
+      return;
+    }
+    const newSup = {
+      id: `sup-${Date.now()}`,
+      name: newSupName,
+      rif: newSupRif,
+      phone: newSupPhone,
+      creditDays: 15,
+    };
+    setSuppliersList([...suppliersList, newSup]);
+    Alert.alert('Proveedor Guardado', `Proveedor "${newSup.name}" agregado.`);
+    setNewSupName('');
+    setNewSupRif('');
+    setNewSupPhone('');
+  };
+
   const handleWhatsAppDebtReminder = (customer: any) => {
     const surcharge = customer.isOverdue ? (customer.balanceDueUsd * (parseFloat(lateFeePercent) / 100)) : 0;
     const totalToPay = customer.balanceDueUsd + surcharge;
@@ -62,6 +130,15 @@ export const MobileAdminDashboard: React.FC = () => {
     const url = `https://wa.me/${cleanPhone}?text=${encodeURIComponent(msg)}`;
     Linking.openURL(url).catch(() => {
       Alert.alert('WhatsApp', `Mensaje generado:\n\n${msg}`);
+    });
+  };
+
+  const handleWhatsAppOrder = (order: any) => {
+    const msg = `*ORDEN DE COMPRA: ${order.number}*\nComercio: ${user?.businessName}\nProveedor: ${order.supplier}\n\n*Pedido:* ${order.items}\n*Total Estimado:* $${order.totalUsd.toFixed(2)} USD\n\nAgradecemos confirmación de despacho.`;
+    const cleanPhone = order.phone.replace(/\D/g, '');
+    const url = `https://wa.me/${cleanPhone}?text=${encodeURIComponent(msg)}`;
+    Linking.openURL(url).catch(() => {
+      Alert.alert('WhatsApp', msg);
     });
   };
 
@@ -109,14 +186,14 @@ export const MobileAdminDashboard: React.FC = () => {
 
       {/* Barra de Navegación por Pestañas */}
       <View style={styles.navBar}>
-        {(['STOCK', 'DEBTS', 'SALES', 'RATES', 'USERS'] as const).map((sec) => (
+        {(['STOCK', 'ORDERS', 'DEBTS', 'SUPPLIERS', 'SALES', 'RATES', 'USERS'] as const).map((sec) => (
           <TouchableOpacity
             key={sec}
             style={[styles.navItem, activeSection === sec && styles.navItemActive]}
             onPress={() => setActiveSection(sec)}
           >
             <Text style={[styles.navText, activeSection === sec && styles.navTextActive]}>
-              {sec === 'STOCK' ? 'Inventario' : sec === 'DEBTS' ? 'Cobranzas' : sec === 'SALES' ? 'Ventas' : sec === 'RATES' ? 'Tasas' : 'Cajeros'}
+              {sec === 'STOCK' ? 'Stock' : sec === 'ORDERS' ? 'Pedidos' : sec === 'DEBTS' ? 'Cobros' : sec === 'SUPPLIERS' ? 'Proveed.' : sec === 'SALES' ? 'Ventas' : sec === 'RATES' ? 'Tasas' : 'Cajeros'}
             </Text>
           </TouchableOpacity>
         ))}
@@ -204,7 +281,94 @@ export const MobileAdminDashboard: React.FC = () => {
           </View>
         )}
 
-        {/* SECCIÓN 2: CUENTAS POR COBRAR & MORA CONFIGURABLE */}
+        {/* SECCIÓN 2: PEDIDOS A PROVEEDORES (PURCHASE ORDERS) */}
+        {activeSection === 'ORDERS' && (
+          <View>
+            <Text style={styles.sectionTitle}>Órdenes de Compra a Proveedores</Text>
+            <Text style={styles.sectionDesc}>
+              Crea pedidos de reposición, envíalos por WhatsApp y cárgalos a stock al recibirlos.
+            </Text>
+
+            {/* Crear Pedido */}
+            <View style={styles.card}>
+              <Text style={styles.cardHeader}>Crear Nueva Orden de Compra</Text>
+              <Text style={styles.fieldLabel}>Proveedor:</Text>
+              <TextInput
+                style={styles.input}
+                value={newOrderSupName}
+                onChangeText={setNewOrderSupName}
+              />
+              <Text style={styles.fieldLabel}>Teléfono WhatsApp:</Text>
+              <TextInput
+                style={styles.input}
+                value={newOrderSupPhone}
+                onChangeText={setNewOrderSupPhone}
+              />
+              <Text style={styles.fieldLabel}>Producto a Solicitar:</Text>
+              <TextInput
+                style={styles.input}
+                value={newOrderProdName}
+                onChangeText={setNewOrderProdName}
+              />
+              <View style={{ flexDirection: 'row', gap: 10 }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.fieldLabel}>Cantidad:</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={newOrderQty}
+                    onChangeText={setNewOrderQty}
+                    keyboardType="numeric"
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.fieldLabel}>Costo Pactado ($):</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={newOrderCost}
+                    onChangeText={setNewOrderCost}
+                    keyboardType="numeric"
+                  />
+                </View>
+              </View>
+              <TouchableOpacity style={styles.primaryBtn} onPress={handleCreateOrder}>
+                <Text style={styles.primaryBtnText}>Guardar Orden de Compra</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Listado de Pedidos */}
+            <View style={styles.card}>
+              <Text style={styles.cardHeader}>Órdenes Emitidas</Text>
+              {ordersList.map((ord) => (
+                <View key={ord.id} style={styles.debtCard}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.customerName}>{ord.number}</Text>
+                    <Text style={styles.customerDoc}>{ord.supplier} ({ord.items})</Text>
+                    <Text style={[styles.debtAmount, { color: '#10B981' }]}>Total: ${ord.totalUsd.toFixed(2)} USD</Text>
+                    <Text style={{ fontSize: 10, color: ord.status === 'RECEIVED' ? '#10B981' : '#38BDF8', fontWeight: 'bold', marginTop: 2 }}>
+                      Estatus: {ord.status}
+                    </Text>
+                  </View>
+                  <View style={{ gap: 6 }}>
+                    <TouchableOpacity style={styles.waCobroBtn} onPress={() => handleWhatsAppOrder(ord)}>
+                      <Text style={styles.waCobroBtnText}>📲 WhatsApp</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.waCobroBtn, { backgroundColor: '#0284C7' }]}
+                      onPress={() => {
+                        Alert.alert('Mercancía Recibida', `Stock de ${ord.number} ingresado a almacén.`);
+                        setOrdersList(ordersList.map((o) => (o.id === ord.id ? { ...o, status: 'RECEIVED' } : o)));
+                      }}
+                    >
+                      <Text style={styles.waCobroBtnText}>Recibir</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ))}
+            </View>
+          </View>
+        )}
+
+        {/* SECCIÓN 3: CUENTAS POR COBRAR & MORA CONFIGURABLE */}
         {activeSection === 'DEBTS' && (
           <View>
             <Text style={styles.sectionTitle}>Cobranzas & Recargo por Mora</Text>
@@ -266,7 +430,70 @@ export const MobileAdminDashboard: React.FC = () => {
           </View>
         )}
 
-        {/* SECCIÓN 3: VENTAS Y REIMPRESIÓN */}
+        {/* SECCIÓN 4: PROVEEDORES (CRUD) */}
+        {activeSection === 'SUPPLIERS' && (
+          <View>
+            <Text style={styles.sectionTitle}>Directorio de Proveedores</Text>
+            <Text style={styles.sectionDesc}>
+              Consulta y contacta directamente a las empresas distribuidoras por WhatsApp.
+            </Text>
+
+            <View style={styles.card}>
+              <Text style={styles.cardHeader}>Registrar Nuevo Proveedor</Text>
+              <Text style={styles.fieldLabel}>Razón Social:</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="ej. Distribuidora El Sol C.A."
+                placeholderTextColor="#64748B"
+                value={newSupName}
+                onChangeText={setNewSupName}
+              />
+              <Text style={styles.fieldLabel}>RIF:</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="J-123456789"
+                placeholderTextColor="#64748B"
+                value={newSupRif}
+                onChangeText={setNewSupRif}
+              />
+              <Text style={styles.fieldLabel}>Teléfono WhatsApp:</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="04141234567"
+                placeholderTextColor="#64748B"
+                value={newSupPhone}
+                onChangeText={setNewSupPhone}
+              />
+              <TouchableOpacity style={styles.primaryBtn} onPress={handleCreateSupplier}>
+                <Text style={styles.primaryBtnText}>Guardar Proveedor</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.card}>
+              <Text style={styles.cardHeader}>Proveedores Activos</Text>
+              {suppliersList.map((sup) => (
+                <View key={sup.id} style={styles.debtCard}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.customerName}>{sup.name}</Text>
+                    <Text style={styles.customerDoc}>RIF: {sup.rif} • Plazo: {sup.creditDays} días</Text>
+                    <Text style={{ fontSize: 12, color: '#38BDF8', marginTop: 2 }}>{sup.phone}</Text>
+                  </View>
+                  <TouchableOpacity
+                    style={styles.waCobroBtn}
+                    onPress={() => {
+                      const url = `https://wa.me/${sup.phone.replace(/\D/g, '')}?text=Hola+${encodeURIComponent(sup.name)}`;
+                      Linking.openURL(url).catch(() => Alert.alert('WhatsApp', sup.phone));
+                    }}
+                  >
+                    <Text style={styles.waCobroBtnText}>📲 Chat</Text>
+                  </TouchableOpacity>
+                </View>
+              ))}
+            </View>
+          </View>
+        )}
+
+        {/* SECCIÓN 5: VENTAS Y REIMPRESIÓN */}
         {activeSection === 'SALES' && (
           <View>
             <Text style={styles.sectionTitle}>Últimas Facturas Fiscales</Text>
@@ -296,7 +523,7 @@ export const MobileAdminDashboard: React.FC = () => {
           </View>
         )}
 
-        {/* SECCIÓN 4: TASAS DE CAMBIO OFICIALES */}
+        {/* SECCIÓN 6: TASAS DE CAMBIO OFICIALES */}
         {activeSection === 'RATES' && (
           <View>
             <Text style={styles.sectionTitle}>Tasas de Cambio Oficiales BCV</Text>
@@ -317,7 +544,7 @@ export const MobileAdminDashboard: React.FC = () => {
           </View>
         )}
 
-        {/* SECCIÓN 5: GESTIÓN DE CAJEROS EN VIVO */}
+        {/* SECCIÓN 7: GESTIÓN DE CAJEROS EN VIVO */}
         {activeSection === 'USERS' && (
           <View>
             <Text style={styles.sectionTitle}>Supervisión de Vendedores</Text>
@@ -411,13 +638,13 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     backgroundColor: '#0F172A',
     paddingVertical: 6,
-    paddingHorizontal: 8,
+    paddingHorizontal: 4,
     borderBottomWidth: 1,
     borderBottomColor: '#1E293B',
   },
-  navItem: { flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: 6 },
+  navItem: { flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: 4 },
   navItemActive: { backgroundColor: '#1E293B' },
-  navText: { color: '#94A3B8', fontSize: 12, fontWeight: '600' },
+  navText: { color: '#94A3B8', fontSize: 11, fontWeight: '600' },
   navTextActive: { color: '#38BDF8', fontWeight: 'bold' },
 
   content: { flex: 1, padding: 14 },

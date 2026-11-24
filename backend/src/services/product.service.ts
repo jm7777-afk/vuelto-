@@ -178,4 +178,43 @@ export class ProductService {
       .where(eq(products.tenantId, tenantId))
       .orderBy(products.name);
   }
+
+  static async update(
+    tenantId: string,
+    id: string,
+    data: {
+      name?: string;
+      costPriceUsd?: number;
+      salePriceUsd?: number;
+      taxRate?: number;
+      isExempt?: boolean;
+      minStockAlert?: number;
+      isActive?: boolean;
+    }
+  ) {
+    const updateData: any = { updatedAt: new Date() };
+    if (data.name !== undefined) updateData.name = data.name.trim();
+    if (data.costPriceUsd !== undefined) updateData.costPriceUsd = data.costPriceUsd.toFixed(4);
+    if (data.salePriceUsd !== undefined) updateData.salePriceUsd = data.salePriceUsd.toFixed(4);
+    if (data.taxRate !== undefined) updateData.taxRate = data.taxRate.toFixed(2);
+    if (data.isExempt !== undefined) updateData.isExempt = data.isExempt;
+    if (data.minStockAlert !== undefined) updateData.minStockAlert = data.minStockAlert.toFixed(3);
+    if (data.isActive !== undefined) updateData.isActive = data.isActive;
+
+    const [updated] = await db
+      .update(products)
+      .set(updateData)
+      .where(and(eq(products.tenantId, tenantId), eq(products.id, id)))
+      .returning();
+    return updated || null;
+  }
+
+  static async delete(tenantId: string, id: string) {
+    const [deleted] = await db
+      .update(products)
+      .set({ isActive: false, updatedAt: new Date() })
+      .where(and(eq(products.tenantId, tenantId), eq(products.id, id)))
+      .returning();
+    return deleted || null;
+  }
 }

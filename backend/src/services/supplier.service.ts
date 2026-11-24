@@ -117,4 +117,39 @@ export class SupplierService {
       .where(and(eq(contactInteractions.tenantId, tenantId), eq(contactInteractions.supplierId, supplierId)))
       .orderBy(sql`${contactInteractions.createdAt} DESC`);
   }
+
+  static async update(
+    tenantId: string,
+    id: string,
+    data: {
+      name?: string;
+      phone?: string;
+      email?: string;
+      address?: string;
+      isActive?: boolean;
+    }
+  ) {
+    const updateData: any = { updatedAt: new Date() };
+    if (data.name !== undefined) updateData.name = data.name.trim();
+    if (data.phone !== undefined) updateData.phone = VenezuelaUtils.normalizePhone(data.phone);
+    if (data.email !== undefined) updateData.email = data.email;
+    if (data.address !== undefined) updateData.address = data.address;
+    if (data.isActive !== undefined) updateData.isActive = data.isActive;
+
+    const [updated] = await db
+      .update(suppliers)
+      .set(updateData)
+      .where(and(eq(suppliers.tenantId, tenantId), eq(suppliers.id, id)))
+      .returning();
+    return updated || null;
+  }
+
+  static async delete(tenantId: string, id: string) {
+    const [deleted] = await db
+      .update(suppliers)
+      .set({ isActive: false, updatedAt: new Date() })
+      .where(and(eq(suppliers.tenantId, tenantId), eq(suppliers.id, id)))
+      .returning();
+    return deleted || null;
+  }
 }
