@@ -1,9 +1,9 @@
 import React, { useEffect } from 'react';
 import { View, StyleSheet } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import { useAuthStore } from './src/stores/auth.store.js';
-import { PosCheckoutScreen } from './src/screens/pos/PosCheckoutScreen.js';
-import { MobileAdminDashboard } from './src/screens/admin/MobileAdminDashboard.js';
+import { useAuthStore } from './src/stores/auth.store';
+import { PosCheckoutScreen } from './src/screens/pos/PosCheckoutScreen';
+import { MobileAdminDashboard } from './src/screens/admin/MobileAdminDashboard';
 
 export default function App() {
   const { user, activeMode, setAuth } = useAuthStore();

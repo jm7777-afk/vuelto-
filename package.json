@@ -3,11 +3,6 @@
   "version": "1.0.0",
   "private": true,
   "description": "Vuelto - Plataforma SaaS multi-tenant de facturación e inventario para comercios en Venezuela",
-  "workspaces": [
-    "backend",
-    "mobile",
-    "web"
-  ],
   "scripts": {
     "build:backend": "npm --prefix backend run build",
     "build:web": "npm --prefix web run build",

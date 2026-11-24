@@ -11,9 +11,9 @@ import {
   SafeAreaView,
   StatusBar,
 } from 'react-native';
-import { useCartStore, CartLine } from '../../stores/cart.store.js';
-import { useAuthStore } from '../../stores/auth.store.js';
-import { NativeShareService } from '../../services/share.service.js';
+import { useCartStore, CartLine } from '../../stores/cart.store';
+import { useAuthStore } from '../../stores/auth.store';
+import { NativeShareService } from '../../services/share.service';
 
 export const PosCheckoutScreen: React.FC = () => {
   const { user, toggleMode } = useAuthStore();

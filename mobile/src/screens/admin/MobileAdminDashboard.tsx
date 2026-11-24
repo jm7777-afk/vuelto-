@@ -10,7 +10,7 @@ import {
   SafeAreaView,
   StatusBar,
 } from 'react-native';
-import { useAuthStore } from '../../stores/auth.store.js';
+import { useAuthStore } from '../../stores/auth.store';
 
 export const MobileAdminDashboard: React.FC = () => {
   const { user, toggleMode } = useAuthStore();
