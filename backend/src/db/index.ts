@@ -9,11 +9,14 @@ const isSslRequired =
   env.DATABASE_URL.includes('supabase.co') ||
   env.DATABASE_URL.includes('pooler.supabase.com') ||
   env.DATABASE_URL.includes('render.com') ||
-  env.DATABASE_URL.includes('sslmode=require') ||
+  env.DATABASE_URL.includes('sslmode') ||
   env.NODE_ENV === 'production';
 
+// Limpiar sslmode de la URL para que pg respete rejectUnauthorized: false con los certificados de Supabase
+const sanitizedConnectionString = env.DATABASE_URL.replace(/[?&]sslmode=[^&]+/, '');
+
 export const pool = new Pool({
-  connectionString: env.DATABASE_URL,
+  connectionString: sanitizedConnectionString,
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
