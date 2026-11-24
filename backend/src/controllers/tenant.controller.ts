@@ -13,7 +13,7 @@ export class TenantController {
 
   static async getById(req: Request, res: Response, next: NextFunction) {
     try {
-      const { id } = req.params;
+      const id = String(req.params.id);
       const tenant = await TenantService.getTenantById(id);
       if (!tenant) {
         res.status(404).json({ code: 'TENANT_NOT_FOUND', message: 'Negocio no encontrado' });
@@ -37,7 +37,7 @@ export class TenantController {
 
   static async update(req: Request, res: Response, next: NextFunction) {
     try {
-      const { id } = req.params;
+      const id = String(req.params.id);
       const superAdminUserId = req.user?.id || '00000000-0000-0000-0000-000000000000';
       const updated = await TenantService.updateTenant(superAdminUserId, id, req.body);
       if (!updated) {
@@ -52,7 +52,7 @@ export class TenantController {
 
   static async toggleActive(req: Request, res: Response, next: NextFunction) {
     try {
-      const { id } = req.params;
+      const id = String(req.params.id);
       const { isActive } = req.body;
       const superAdminUserId = req.user?.id || '00000000-0000-0000-0000-000000000000';
       const updated = await TenantService.toggleTenantActive(superAdminUserId, id, Boolean(isActive));

@@ -1,16 +1,3 @@
-// Cálculo y normalización de EAN-13 válido (Módulo 10 GS1)
-const ensureValidEan13 = (raw: string): string => {
-  const digits = raw.replace(/\D/g, '').slice(0, 12);
-  const padded = digits.padEnd(12, '0');
-  let sum = 0;
-  for (let i = 0; i < 12; i++) {
-    const d = parseInt(padded[i], 10);
-    sum += i % 2 === 0 ? d : d * 3;
-  }
-  const check = (10 - (sum % 10)) % 10;
-  return padded + check;
-};
-
 import React, { useState, useEffect, useRef } from 'react';
 import ReactDOM from 'react-dom/client';
 import {
@@ -59,154 +46,22 @@ import {
   FileSpreadsheet,
 } from 'lucide-react';
 
-// Tipos Principales
-interface UserProfile {
-  id: string;
-  tenantId: string;
-  username: string;
-  fullName: string;
-  roleId: string;
-  businessName: string;
-}
-
-interface ProductItem {
-  id: string;
-  name: string;
-  barcode: string;
-  sku: string;
-  category: string;
-  unitOfMeasure?: string;
-  supplier: string;
-  supplierPhone: string;
-  costPriceUsd: number;
-  salePriceUsd: number;
-  taxRate: number;
-  stock: number;
-  minStockAlert: number;
-  lastPurchaseDate: string;
-  inflationDeltaPercent: number;
-}
-
-interface TenantItem {
-  id: string;
-  slug: string;
-  businessName: string;
-  tradeName: string;
-  documentType: 'J' | 'G' | 'V' | 'E';
-  documentNumber: string;
-  fiscalAddress: string;
-  phone: string;
-  email: string;
-  isSpecialTaxpayer: boolean;
-  internalBarcodePrefix: string;
-  isActive: boolean;
-  usersCount?: number;
-  productsCount?: number;
-  invoicesCount?: number;
-  totalSalesUsd?: number;
-  createdAt: string;
-}
-
-interface SupplierItem {
-  id: string;
-  name: string;
-  documentType: 'J' | 'G' | 'V' | 'E';
-  documentNumber: string;
-  phone: string;
-  email: string;
-  address: string;
-  creditDays: number;
-  isActive: boolean;
-}
-
-interface PurchaseOrderItem {
-  id: string;
-  orderNumber: string;
-  supplierId: string;
-  supplierName: string;
-  supplierPhone: string;
-  status: 'DRAFT' | 'SENT_WHATSAPP' | 'RECEIVED' | 'CANCELLED';
-  expectedDeliveryDate: string;
-  totalEstimatedUsd: number;
-  notes: string;
-  createdAt: string;
-  lines: Array<{ productName: string; qty: number; unitCostUsd: number; subtotalUsd: number }>;
-}
-
-interface KardexMovementItem {
-  id: string;
-  productName: string;
-  movementType: 'IN' | 'OUT' | 'ADJUSTMENT' | 'SALE' | 'RETURN';
-  quantity: number;
-  unitCostUsd: number;
-  reason: string;
-  createdAt: string;
-  user: string;
-}
-
-interface CustomerDebt {
-  id: string;
-  name: string;
-  document: string;
-  phone: string;
-  balanceDueUsd: number;
-  dueDate: string;
-  isOverdue: boolean;
-  lateDays: number;
-  surchargeUsd: number;
-  waived?: boolean;
-}
-
-interface ReceivablePaymentRecord {
-  id: string;
-  customerName: string;
-  customerDoc: string;
-  amountUsd: number;
-  amountBs: number;
-  paymentMethod: string;
-  referenceNumber: string;
-  createdAt: string;
-  notes: string;
-}
-
-interface FinancialTransactionItem {
-  id: string;
-  type: 'INGRESO' | 'EGRESO';
-  category: string;
-  description: string;
-  amountUsd: number;
-  amountBs: number;
-  referenceNumber: string;
-  createdAt: string;
-}
-
-interface SaleRecord {
-  id: string;
-  invoiceFormattedNumber: string;
-  createdAt: string;
-  customerName: string;
-  customerDoc: string;
-  cashierName: string;
-  totalUsd: number;
-  totalBs: number;
-  rateValue: number;
-  status: 'COMPLETADA' | 'ANULADA';
-  items: { name: string; qty: number; priceUsd: number; subtotalUsd: number; taxRate: number }[];
-  taxes: { base16: number; base8: number; exempt: number; tax16: number; tax8: number; igtf3: number };
-}
-
-interface CashierStatus {
-  id: string;
-  name: string;
-  username: string;
-  status: 'ONLINE' | 'IDLE' | 'OFFLINE';
-  openCartsCount: number;
-  salesTodayCount: number;
-  salesTodayUsd: number;
-  salesTodayBs: number;
-  lastAction: string;
-  lastActionTime: string;
-}
+import { ensureValidEan13 } from './utils/ean';
+import type {
+  UserProfile,
+  ProductItem,
+  TenantItem,
+  SupplierItem,
+  PurchaseOrderItem,
+  KardexMovementItem,
+  CustomerDebt,
+  ReceivablePaymentRecord,
+  FinancialTransactionItem,
+  SaleRecord,
+  CashierStatus,
+  PosCartLine,
+  PosTicket,
+} from './types';
 
 const DEFAULT_BCV_RATE = 52.50;
 
@@ -493,42 +348,7 @@ export const App: React.FC = () => {
     ? +(parseFloat(customRateInput) || bcvRate)
     : bcvRate;
 
-  // Estado del Carrito y Terminal POS
-  interface PosCartLine {
-    productId: string;
-    name: string;
-    barcode: string;
-    priceUsd: number;
-    qty: number;
-    unitOfMeasure?: string;
-    isExempt: boolean;
-    taxRate: number;
-  }
-
-  // FICHERO MULTICLIENTE / TICKETS EN ESPERA
-  interface PosTicket {
-    id: string;
-    ticketNumber: number;
-    label: string;
-    customer: {
-      id: string;
-      name: string;
-      documentType: string;
-      documentNumber: string;
-      phone: string;
-      balanceDue: number;
-      isSpecialMoraCustomer: boolean;
-    };
-    cartLines: PosCartLine[];
-    paymentMethod: 'CASH_USD' | 'PAGO_MOVIL' | 'DEBIT_CARD' | 'TRANSFER' | 'CREDIT_DEBT';
-    cashAmountUsd: string;
-    pagoMovilBank: string;
-    pagoMovilPhone: string;
-    pagoMovilRef: string;
-    adminApproved: boolean;
-    createdAt: string;
-  }
-
+  // Estado del Carrito y Terminal POS (Interfaces importadas desde ./types)
   const [posCustomerList, setPosCustomerList] = useState([
     { id: 'c0', name: 'Consumidor Final', documentType: 'V', documentNumber: '00000000', phone: '', balanceDue: 0, isSpecialMoraCustomer: false },
     { id: 'c1', name: 'Automercado Miranda C.A.', documentType: 'J', documentNumber: '401234567', phone: '+584121112233', balanceDue: 145.50, isSpecialMoraCustomer: true },
