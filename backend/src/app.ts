@@ -15,7 +15,7 @@ export const createApp = () => {
   // Parser con captura de rawBody para verificación estricta de webhooks HMAC-SHA256
   app.use(
     express.json({
-      verify: (req: any, _res, buf) => {
+      verify: (req: any, _res: any, buf: any) => {
         req.rawBody = buf;
       },
     })
