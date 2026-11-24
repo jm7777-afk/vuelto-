@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "Vuelto",
+    "slug": "vuelto-pos",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#0F172A"
+    },
+    "android": {
+      "package": "ve.vuelto.pos",
+      "versionCode": 1,
+      "permissions": [
+        "CAMERA",
+        "BLUETOOTH",
+        "BLUETOOTH_ADMIN",
+        "BLUETOOTH_CONNECT",
+        "BLUETOOTH_SCAN"
+      ]
+    }
+  }
+}

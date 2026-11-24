@@ -1,0 +1,30 @@
+{
+  "name": "vuelto-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Vuelto - Plataforma SaaS multi-tenant de facturación e inventario para comercios en Venezuela",
+  "workspaces": [
+    "backend",
+    "mobile",
+    "web"
+  ],
+  "scripts": {
+    "build:backend": "npm --prefix backend run build",
+    "build:web": "npm --prefix web run build",
+    "start:backend": "npm --prefix backend start",
+    "dev:backend": "npm --prefix backend run dev",
+    "test:backend": "npm --prefix backend test"
+  },
+  "keywords": [
+    "venezuela",
+    "pos",
+    "seniat",
+    "facturacion",
+    "inventario",
+    "multi-tenant",
+    "react-native",
+    "express"
+  ],
+  "author": "Vuelto Team",
+  "license": "UNLICENSED"
+}

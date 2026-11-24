@@ -1,0 +1,1191 @@
+openapi: 3.0.3
+info:
+  title: Vuelto API
+  description: |
+    API REST multi-tenant para la plataforma SaaS de facturación e inventario **Vuelto**.
+    Diseñada específicamente para comercios en Venezuela.
+    - Autenticación JWT con rotación y extracción estricta de `tenant_id`.
+    - Soporte bimoneda (USD / VEF) con tasa BCV congelada por venta.
+    - Generación de comprobantes ESC/POS y PDF para Share Sheet nativo en móvil.
+    - Módulo de contacto e interacciones obligatorio en MVP.
+    - Soporte nativo para el problema del vuelto (Pago Móvil, Monedero y Vales de Cambio).
+  version: 1.0.0
+servers:
+  - url: /api/v1
+    description: Servidor Base API v1
+
+security:
+  - BearerAuth: []
+
+paths:
+  /auth/login:
+    post:
+      summary: Iniciar sesión
+      description: Autentica un usuario y devuelve par de tokens (Access Token corto + Refresh Token rotativo).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                  example: cajero1
+                password:
+                  type: string
+                  format: password
+                  example: Password123!
+      responses:
+        '200':
+          description: Autenticación exitosa
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+  /auth/refresh:
+    post:
+      summary: Rotar refresh token
+      description: Recibe el refresh token y emite un nuevo par de tokens.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken:
+                  type: string
+      responses:
+        '200':
+          description: Token refrescado exitosamente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+  /auth/me:
+    get:
+      summary: Perfil de usuario autenticado
+      description: Devuelve la identidad del usuario y los datos básicos de su tenant.
+      responses:
+        '200':
+          description: Datos de usuario
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+
+  /products:
+    get:
+      summary: Listar productos con stock consolidado
+      parameters:
+        - name: search
+          in: query
+          schema:
+            type: string
+          description: Búsqueda por nombre o SKU
+        - name: category_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: is_active
+          in: query
+          schema:
+            type: boolean
+            default: true
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ProductWithStock'
+                  total:
+                    type: integer
+    post:
+      summary: Crear producto (ADMIN)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProductInput'
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+
+  /products/{id}:
+    get:
+      summary: Obtener producto por ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductWithStock'
+    patch:
+      summary: Actualizar producto (ADMIN)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProductInput'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+
+  /products/barcode/{barcode}:
+    get:
+      summary: Buscar producto por código de barras (Cámara / Escáner)
+      description: Endpoint optimizado para POS móvil. Rate limit permisivo (120 req/min).
+      parameters:
+        - name: barcode
+          in: path
+          required: true
+          schema:
+            type: string
+            example: '7591234567890'
+      responses:
+        '200':
+          description: Producto encontrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductWithStock'
+        '404':
+          description: Código de barras no registrado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code:
+                    type: string
+                    example: PRODUCT_NOT_FOUND
+                  message:
+                    type: string
+                  barcode:
+                    type: string
+
+  /customers/lookup:
+    get:
+      summary: Búsqueda rápida de clientes por documento o teléfono
+      description: Usado desde el modal de venta para evitar duplicados antes del registro rápido.
+      parameters:
+        - name: document_number
+          in: query
+          schema:
+            type: string
+            example: '12345678'
+        - name: document_type
+          in: query
+          schema:
+            type: string
+            enum: [V, E, J, G, P]
+        - name: phone
+          in: query
+          schema:
+            type: string
+            example: '04141234567'
+      responses:
+        '200':
+          description: Resultado de búsqueda (null si no existe)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  found:
+                    type: boolean
+                  customer:
+                    $ref: '#/components/schemas/Customer'
+
+  /customers/quick:
+    post:
+      summary: Registro rápido de cliente desde móvil (Bottom Sheet de Venta)
+      description: Requiere tipo, número y nombre. Valida RIF Módulo 11 sin bloquear la venta.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuickCustomerInput'
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Customer'
+
+  /customers:
+    get:
+      summary: Listar clientes y saldos
+      parameters:
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: with_balance_due
+          in: query
+          schema:
+            type: boolean
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Customer'
+    post:
+      summary: Crear cliente completo (Admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCustomerInput'
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Customer'
+
+  /customers/{id}/contacts:
+    post:
+      summary: Asociar persona de contacto a cliente
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateContactInput'
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerContact'
+
+  /customers/{id}/interactions:
+    get:
+      summary: Historial de interacciones con cliente
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ContactInteraction'
+    post:
+      summary: Registrar interacción con cliente (Inmutable)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateInteractionInput'
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContactInteraction'
+
+  /suppliers:
+    get:
+      summary: Listar proveedores
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Supplier'
+    post:
+      summary: Registrar proveedor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSupplierInput'
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Supplier'
+
+  /suppliers/{id}/contacts:
+    post:
+      summary: Asociar persona de contacto a proveedor
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateContactInput'
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerContact'
+
+  /suppliers/{id}/interactions:
+    get:
+      summary: Historial de interacciones con proveedor
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ContactInteraction'
+    post:
+      summary: Registrar interacción con proveedor (Inmutable)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateInteractionInput'
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContactInteraction'
+
+  /inventory/stock:
+    get:
+      summary: Consulta de stock consolidado
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ProductStockItem'
+
+  /inventory/movements:
+    post:
+      summary: Registrar entrada, salida o ajuste de stock (Genera Kardex y Auditoría)
+      description: Accesible por ADMIN desde Web y Modo Administrador Móvil.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateInventoryMovementInput'
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InventoryMovement'
+
+  /sales:
+    post:
+      summary: Confirmación de venta (Atómica e Idempotente)
+      description: |
+        Endpoint central de cobro.
+        - Valida stock y recalcula totales obligatoriamente en servidor.
+        - Emite correlativo de factura consecutivo sin saltos mediante bloqueo pesimista.
+        - Genera movimiento de inventario OUT.
+        - Registra el pago (soportando efectivo USD/Bs, Pago Móvil, Monedero o Vales).
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSaleInput'
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SaleResponse'
+        '400':
+          description: Totales calculados no coinciden o datos inválidos
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Stock insuficiente o colisión de idempotencia
+
+  /sales/{id}/receipt/pdf:
+    get:
+      summary: Descargar PDF de factura para Share Sheet nativo móvil
+      description: Devuelve el archivo binario PDF (application/pdf) optimizado para ticket térmico o visualización móvil.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Archivo PDF
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+
+  /sales/{id}/receipt/escpos:
+    post:
+      summary: Obtener bytecode ESC/POS para impresión Bluetooth móvil
+      description: Genera y devuelve el payload binario en Base64 con el formateo para ticket de 58 mm u 80 mm.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                paper_width:
+                  type: integer
+                  enum: [58, 80]
+                  default: 58
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  paper_width:
+                    type: integer
+                  base64_data:
+                    type: string
+                    description: Comandos ESC/POS codificados en Base64
+
+  /sales/{id}/audit-share:
+    post:
+      summary: Registrar auditoría de factura compartida mediante Share Sheet
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [result]
+              properties:
+                result:
+                  type: string
+                  enum: [share_sheet_opened, share_cancelled, share_error]
+                channel:
+                  type: string
+                  default: POS_MOBILE
+      responses:
+        '200':
+          description: Auditoría registrada
+
+  /vouchers/redeem:
+    post:
+      summary: Redimir un vale de cambio (Vuelto en Vale Impreso)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [voucher_code]
+              properties:
+                voucher_code:
+                  type: string
+                  example: 'VALE-8F3A-92BC'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChangeVoucher'
+
+  /exchange-rates/current:
+    get:
+      summary: Obtener tasas de cambio oficiales actuales (BCV y paralelas)
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CurrentRatesResponse'
+
+  /payments/c2p/intent:
+    post:
+      summary: Crear intención de cobro Pago Móvil C2P
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePaymentIntentInput'
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentIntentResponse'
+
+  /payments/webhooks:
+    post:
+      summary: Webhook firmado de pasarela de pago móvil
+      security: []
+      parameters:
+        - name: X-Signature-SHA256
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Webhook procesado exitosamente
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    UnauthorizedError:
+      description: Token ausente, inválido o expirado
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+  schemas:
+    ApiError:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: UNAUTHORIZED
+        message:
+          type: string
+          example: 'Acceso no autorizado o token expirado'
+        details:
+          type: object
+
+    AuthResponse:
+      type: object
+      properties:
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+        expiresIn:
+          type: integer
+          example: 900
+        user:
+          $ref: '#/components/schemas/UserProfile'
+
+    UserProfile:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        roleId:
+          type: string
+          enum: [SUPER_ADMIN, ADMIN, VENDEDOR, CONSULTA]
+        username:
+          type: string
+        fullName:
+          type: string
+        businessName:
+          type: string
+
+    Product:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        sku:
+          type: string
+        name:
+          type: string
+        costPriceUsd:
+          type: string
+        salePriceUsd:
+          type: string
+        taxRate:
+          type: string
+          example: '16.00'
+        isExempt:
+          type: boolean
+        minStockAlert:
+          type: string
+        isActive:
+          type: boolean
+
+    ProductWithStock:
+      allOf:
+        - $ref: '#/components/schemas/Product'
+        - type: object
+          properties:
+            currentStock:
+              type: string
+              example: '25.000'
+            barcodes:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  barcode:
+                    type: string
+                  barcodeType:
+                    type: string
+                  isPrimary:
+                    type: boolean
+
+    CreateProductInput:
+      type: object
+      required: [name, salePriceUsd]
+      properties:
+        sku:
+          type: string
+        name:
+          type: string
+        categoryId:
+          type: string
+          format: uuid
+        costPriceUsd:
+          type: number
+          default: 0
+        salePriceUsd:
+          type: number
+        taxRate:
+          type: number
+          default: 16.0
+        isExempt:
+          type: boolean
+          default: false
+        barcodes:
+          type: array
+          items:
+            type: object
+            required: [barcode, barcodeType]
+            properties:
+              barcode:
+                type: string
+              barcodeType:
+                type: string
+                enum: [EAN13, EAN8, CODE128, UPC, INTERNAL]
+              isPrimary:
+                type: boolean
+
+    UpdateProductInput:
+      type: object
+      properties:
+        name:
+          type: string
+        salePriceUsd:
+          type: number
+        costPriceUsd:
+          type: number
+        taxRate:
+          type: number
+        isExempt:
+          type: boolean
+        isActive:
+          type: boolean
+
+    Customer:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        documentType:
+          type: string
+          enum: [V, E, J, G, P]
+        documentNumber:
+          type: string
+        name:
+          type: string
+        phone:
+          type: string
+        email:
+          type: string
+        fiscalAddress:
+          type: string
+        creditLimit:
+          type: string
+        balanceDue:
+          type: string
+        createdVia:
+          type: string
+          enum: [POS_QUICK, ADMIN, IMPORT]
+
+    QuickCustomerInput:
+      type: object
+      required: [documentType, documentNumber, name]
+      properties:
+        documentType:
+          type: string
+          enum: [V, E, J, G, P]
+        documentNumber:
+          type: string
+          example: '12345678'
+        name:
+          type: string
+          example: 'Juan Pérez'
+        phone:
+          type: string
+          example: '04141234567'
+
+    CreateCustomerInput:
+      allOf:
+        - $ref: '#/components/schemas/QuickCustomerInput'
+        - type: object
+          properties:
+            email:
+              type: string
+            fiscalAddress:
+              type: string
+            creditLimit:
+              type: number
+              default: 0
+
+    CustomerContact:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        phone:
+          type: string
+        email:
+          type: string
+        roleTitle:
+          type: string
+        notes:
+          type: string
+
+    CreateContactInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        phone:
+          type: string
+        email:
+          type: string
+        roleTitle:
+          type: string
+        notes:
+          type: string
+
+    ContactInteraction:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        channel:
+          type: string
+          enum: [LLAMADA, VISITA, NOTA, WHATSAPP, EMAIL]
+        summary:
+          type: string
+        result:
+          type: string
+        nextFollowupAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+
+    CreateInteractionInput:
+      type: object
+      required: [channel, summary, result]
+      properties:
+        channel:
+          type: string
+          enum: [LLAMADA, VISITA, NOTA, WHATSAPP, EMAIL]
+        summary:
+          type: string
+        result:
+          type: string
+        nextFollowupAt:
+          type: string
+          format: date-time
+
+    Supplier:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        documentType:
+          type: string
+        documentNumber:
+          type: string
+        name:
+          type: string
+        phone:
+          type: string
+        email:
+          type: string
+
+    CreateSupplierInput:
+      type: object
+      required: [documentType, documentNumber, name, phone]
+      properties:
+        documentType:
+          type: string
+          enum: [J, G, V, E]
+        documentNumber:
+          type: string
+        name:
+          type: string
+        phone:
+          type: string
+        email:
+          type: string
+        address:
+          type: string
+
+    ProductStockItem:
+      type: object
+      properties:
+        productId:
+          type: string
+          format: uuid
+        productName:
+          type: string
+        warehouseId:
+          type: string
+        quantity:
+          type: string
+
+    CreateInventoryMovementInput:
+      type: object
+      required: [warehouseId, productId, movementType, quantity, reason]
+      properties:
+        warehouseId:
+          type: string
+          format: uuid
+        productId:
+          type: string
+          format: uuid
+        movementType:
+          type: string
+          enum: [IN, OUT, ADJUSTMENT]
+        quantity:
+          type: number
+        unitCostUsd:
+          type: number
+        reason:
+          type: string
+
+    InventoryMovement:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        movementType:
+          type: string
+        quantity:
+          type: string
+        unitCostUsd:
+          type: string
+        reason:
+          type: string
+        createdAt:
+          type: string
+
+    CreateSaleInput:
+      type: object
+      required: [customerId, exchangeRateId, lines, payments]
+      properties:
+        customerId:
+          type: string
+          format: uuid
+        warehouseId:
+          type: string
+          format: uuid
+        exchangeRateId:
+          type: string
+          format: uuid
+        lines:
+          type: array
+          items:
+            type: object
+            required: [productId, quantity, unitPriceUsd]
+            properties:
+              productId:
+                type: string
+                format: uuid
+              quantity:
+                type: number
+              unitPriceUsd:
+                type: number
+        payments:
+          type: array
+          items:
+            type: object
+            required: [paymentMethod, currency, amount]
+            properties:
+              paymentMethod:
+                type: string
+                enum: [CASH_USD, CASH_BS, PAGO_MOVIL, DEBIT_CARD, CREDIT_DEBT, TRANSFER, VUELTO_WALLET, CHANGE_VOUCHER]
+              currency:
+                type: string
+                enum: [USD, VES]
+              amount:
+                type: number
+              referenceNumber:
+                type: string
+              voucherCode:
+                type: string
+        vueltoOption:
+          type: object
+          properties:
+            type:
+              type: string
+              enum: [CASH, WALLET_CREDIT, CHANGE_VOUCHER, PAGO_MOVIL]
+            amountUsd:
+              type: number
+            pagoMovilPhone:
+              type: string
+            pagoMovilBank:
+              type: string
+
+    SaleResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        invoiceFormattedNumber:
+          type: string
+          example: 'A-00000042'
+        rateValue:
+          type: string
+          example: '52.5000'
+        totalAmountUsd:
+          type: string
+          example: '15.50'
+        totalAmountBs:
+          type: string
+          example: '813.75'
+        igtfAmountUsd:
+          type: string
+        vueltoIssued:
+          type: object
+          properties:
+            type:
+              type: string
+            amountUsd:
+              type: string
+            amountBs:
+              type: string
+            voucherCode:
+              type: string
+
+    ChangeVoucher:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+          example: 'VALE-8F3A-92BC'
+        amountUsd:
+          type: string
+        status:
+          type: string
+          enum: [ACTIVE, REDEEMED, EXPIRED]
+        expiresAt:
+          type: string
+
+    CurrentRatesResponse:
+      type: object
+      properties:
+        bcv:
+          type: object
+          properties:
+            id:
+              type: string
+            rate:
+              type: string
+              example: '52.50'
+            fetchedAt:
+              type: string
+        paralelo:
+          type: object
+          properties:
+            id:
+              type: string
+            rate:
+              type: string
+              example: '61.20'
+            fetchedAt:
+              type: string
+
+    CreatePaymentIntentInput:
+      type: object
+      required: [amountBs, customerPhone, customerDocType, customerDocNumber]
+      properties:
+        amountBs:
+          type: number
+        customerPhone:
+          type: string
+        customerDocType:
+          type: string
+        customerDocNumber:
+          type: string
+
+    PaymentIntentResponse:
+      type: object
+      properties:
+        intentId:
+          type: string
+        status:
+          type: string
+        paymentUrl:
+          type: string

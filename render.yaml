@@ -1,0 +1,44 @@
+services:
+  # Backend API REST - Node.js / Express 5 / Drizzle ORM
+  - type: web
+    name: vuelto-api
+    runtime: node
+    rootDir: backend
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: vuelto-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: MOCK_PAYMENT_ENABLED
+        value: "true"
+
+  # Frontend Web Admin - React SPA (Vite)
+  - type: web
+    name: vuelto-admin
+    runtime: static
+    rootDir: web
+    plan: free
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist
+    envVars:
+      - key: VITE_API_URL
+        fromService:
+          type: web
+          name: vuelto-api
+          property: host
+
+databases:
+  - name: vuelto-db
+    databaseName: vuelto
+    user: vuelto_user
+    plan: free
