@@ -3,6 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import { apiRouter } from './routes/api.routes.js';
 import { errorHandler } from './middlewares/error.middleware.js';
+import { pool } from './db/index.js';
 
 export const createApp = () => {
   const app = express();
@@ -20,14 +21,30 @@ export const createApp = () => {
     })
   );
 
-  // Healthcheck
-  app.get('/health', (_req, res) => {
-    res.json({
-      status: 'ok',
-      service: 'vuelto-api',
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime(),
-    });
+  // Healthcheck con validación en vivo de Base de Datos
+  app.get('/health', async (_req, res) => {
+    try {
+      const client = await pool.connect();
+      await client.query('SELECT 1');
+      client.release();
+
+      res.json({
+        status: 'ok',
+        service: 'vuelto-api',
+        database: 'connected',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+      });
+    } catch (err: any) {
+      res.status(503).json({
+        status: 'degraded',
+        service: 'vuelto-api',
+        database: 'disconnected',
+        error: err.message,
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+      });
+    }
   });
 
   // Rutas de API v1
