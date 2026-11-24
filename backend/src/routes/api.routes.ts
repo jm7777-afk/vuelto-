@@ -27,30 +27,32 @@ export const apiRouter = Router();
 // --- AUTENTICACIÓN PÚBLICA ---
 apiRouter.post('/auth/login', AuthController.login);
 
-// --- WEBHOOK PÚBLICO (Verificación criptográfica con X-Signature-SHA256) ---
-apiRouter.post('/payments/webhooks', PaymentController.handleWebhook);
+// --- TASAS DE CAMBIO (Público / Monitor BCV, Paralelo, Euro, USDT) ---
+apiRouter.get('/exchange-rates/monitor', async (req, res, next) => {
+  try {
+    const tenantId = (req as any).tenantId || 'a0000000-0000-0000-0000-000000000001';
+    const monitor = await ExchangeRateService.getMonitorRates(tenantId);
+    res.json(monitor);
+  } catch (err) {
+    next(err);
+  }
+});
 
-// Todas las demás rutas de dominio bajo /api/v1 requieren autenticación de tenant
-apiRouter.use(requireTenantAuth);
-
-// --- TASAS DE CAMBIO (BCV / Paralelo) ---
 apiRouter.get('/exchange-rates/current', async (req, res, next) => {
   try {
-    const rates = await ExchangeRateService.getCurrentRates(req.tenantId!);
+    const tenantId = (req as any).tenantId || 'a0000000-0000-0000-0000-000000000001';
+    const rates = await ExchangeRateService.getCurrentRates(tenantId);
     res.json(rates);
   } catch (err) {
     next(err);
   }
 });
 
-apiRouter.get('/exchange-rates/monitor', async (req, res, next) => {
-  try {
-    const monitor = await ExchangeRateService.getMonitorRates(req.tenantId!);
-    res.json(monitor);
-  } catch (err) {
-    next(err);
-  }
-});
+// --- WEBHOOK PÚBLICO (Verificación criptográfica con X-Signature-SHA256) ---
+apiRouter.post('/payments/webhooks', PaymentController.handleWebhook);
+
+// Todas las demás rutas de dominio bajo /api/v1 requieren autenticación de tenant
+apiRouter.use(requireTenantAuth);
 
 // --- PAGOS Y PASARELA C2P ---
 apiRouter.post('/payments/c2p/intent', PaymentController.createIntent);

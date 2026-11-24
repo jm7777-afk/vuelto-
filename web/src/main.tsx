@@ -504,6 +504,10 @@ export const App = () => {
             </div>
             <h1 style={{ fontSize: '26px', fontWeight: 'bold', color: '#F8FAFC', letterSpacing: '0.5px' }}>VUELTO POS</h1>
             <p style={{ fontSize: '13px', color: '#94A3B8', marginTop: '4px' }}>Facturación e Inventario con Soporte SENIAT</p>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', backgroundColor: '#0284C722', border: '1px solid #0284C744', borderRadius: '20px', padding: '4px 12px', marginTop: '12px', fontSize: '12px', color: '#38BDF8' }}>
+              <span>🇻🇪 Tasa Oficial BCV:</span>
+              <strong>{bcvRate.toFixed(2)} Bs/$</strong>
+            </div>
           </div>
 
           {loginError && (
