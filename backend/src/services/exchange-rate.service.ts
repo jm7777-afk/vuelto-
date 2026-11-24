@@ -4,6 +4,7 @@ import { exchangeRateSnapshots } from '../db/schema.js';
 import { AuditService } from './audit.service.js';
 
 export interface RateResult {
+  id?: string;
   source: 'BCV' | 'PARALELO' | 'P2P';
   rate: number;
   fetchedAt: Date;
@@ -38,6 +39,7 @@ export class ExchangeRateService {
 
       return {
         bcv: {
+          id: latestBcv.id,
           source: 'BCV',
           rate: parseFloat(latestBcv.rate),
           fetchedAt: new Date(latestBcv.fetchedAt),
@@ -66,6 +68,7 @@ export class ExchangeRateService {
 
     return {
       bcv: {
+        id: seeded.id,
         source: 'BCV',
         rate: defaultRate,
         fetchedAt: now,
@@ -132,6 +135,7 @@ export class ExchangeRateService {
 
     return {
       bcv: {
+        id: current.bcv.id,
         source: 'BCV Oficial (USD)',
         rate: bcvRate,
         previousRate: +(bcvRate * 0.985).toFixed(4),
