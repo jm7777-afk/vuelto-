@@ -9,13 +9,17 @@ import {
   Alert,
   SafeAreaView,
   StatusBar,
+  Linking,
 } from 'react-native';
 import { useAuthStore } from '../../stores/auth.store';
 
 export const MobileAdminDashboard: React.FC = () => {
-  const { user, toggleMode } = useAuthStore();
+  const { user, toggleMode, logout } = useAuthStore();
 
   const [activeSection, setActiveSection] = useState<'STOCK' | 'DEBTS' | 'SALES' | 'RATES' | 'USERS'>('STOCK');
+
+  // Configuración de Mora Administrativa
+  const [lateFeePercent, setLateFeePercent] = useState('5.0');
 
   // Estado para ajuste rápido de stock
   const [adjustProductId, setAdjustProductId] = useState('');
@@ -31,7 +35,10 @@ export const MobileAdminDashboard: React.FC = () => {
       Alert.alert('Datos Incompletos', 'Indique el producto, la cantidad y el motivo del ajuste.');
       return;
     }
-    Alert.alert('Ajuste Registrado', `Se ajustó el stock a ${adjustQty} unidades. Generado movimiento de Kardex y registro en Auditoría (MOBILE_ADMIN).`);
+    Alert.alert(
+      'Ajuste Registrado',
+      `Se ajustó el stock a ${adjustQty} unidades. Generado movimiento de Kardex y registro en Auditoría con usuario ${user?.username}.`
+    );
     setAdjustProductId('');
     setAdjustQty('');
     setAdjustReason('');
@@ -42,28 +49,62 @@ export const MobileAdminDashboard: React.FC = () => {
       Alert.alert('Datos Incompletos', 'Indique el usuario y el nombre completo.');
       return;
     }
-    Alert.alert('Cajero Creado', `Usuario "${newCashierUsername}" creado con rol VENDEDOR.`);
+    Alert.alert('Cajero Creado', `Usuario "${newCashierUsername}" creado exitosamente con rol VENDEDOR.`);
     setNewCashierUsername('');
     setNewCashierName('');
   };
 
+  const handleWhatsAppDebtReminder = (customer: any) => {
+    const surcharge = customer.isOverdue ? (customer.balanceDueUsd * (parseFloat(lateFeePercent) / 100)) : 0;
+    const totalToPay = customer.balanceDueUsd + surcharge;
+    const msg = `Estimado(a) ${customer.name}, le recordamos que presenta un saldo pendiente con ${user?.businessName} por $${customer.balanceDueUsd.toFixed(2)} USD.${customer.isOverdue ? ` Incluye recargo por mora del ${lateFeePercent}% ($${surcharge.toFixed(2)}). Total a cancelar: $${totalToPay.toFixed(2)} USD.` : ''} Agradecemos gestionar su pago.`;
+    const cleanPhone = customer.phone.replace(/\D/g, '');
+    const url = `https://wa.me/${cleanPhone}?text=${encodeURIComponent(msg)}`;
+    Linking.openURL(url).catch(() => {
+      Alert.alert('WhatsApp', `Mensaje generado:\n\n${msg}`);
+    });
+  };
+
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#1E293B" />
+      <StatusBar barStyle="light-content" backgroundColor="#0B3B49" />
 
-      {/* Header con Switch a Modo POS */}
+      {/* Header con Switch a Modo POS y Salir */}
       <View style={styles.header}>
         <View>
-          <Text style={styles.title}>VUELTO ADMIN</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <Text style={styles.title}>VUELTO ADMIN</Text>
+            <View style={styles.adminPill}>
+              <Text style={styles.adminPillText}>👑 TOTAL</Text>
+            </View>
+          </View>
           <Text style={styles.subtitle}>{user?.businessName} ({user?.fullName})</Text>
         </View>
 
-        <TouchableOpacity
-          style={styles.posSwitchBtn}
-          onPress={() => toggleMode('POS')}
-        >
-          <Text style={styles.posSwitchBtnText}>Ir a Modo POS</Text>
-        </TouchableOpacity>
+        <View style={styles.headerRight}>
+          <TouchableOpacity
+            style={styles.posSwitchBtn}
+            onPress={() => toggleMode('POS')}
+          >
+            <Text style={styles.posSwitchBtnText}>Ir a POS</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.logoutBtn}
+            onPress={() => {
+              Alert.alert(
+                'Cerrar Sesión',
+                '¿Deseas salir del panel administrador?',
+                [
+                  { text: 'Cancelar', style: 'cancel' },
+                  { text: 'Salir', style: 'destructive', onPress: () => logout() },
+                ]
+              );
+            }}
+          >
+            <Text style={styles.logoutBtnText}>Salir</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* Barra de Navegación por Pestañas */}
@@ -75,150 +116,233 @@ export const MobileAdminDashboard: React.FC = () => {
             onPress={() => setActiveSection(sec)}
           >
             <Text style={[styles.navText, activeSection === sec && styles.navTextActive]}>
-              {sec === 'STOCK' ? 'Stock' : sec === 'DEBTS' ? 'Cobranzas' : sec === 'SALES' ? 'Ventas' : sec === 'RATES' ? 'Tasas' : 'Usuarios'}
+              {sec === 'STOCK' ? 'Inventario' : sec === 'DEBTS' ? 'Cobranzas' : sec === 'SALES' ? 'Ventas' : sec === 'RATES' ? 'Tasas' : 'Cajeros'}
             </Text>
           </TouchableOpacity>
         ))}
       </View>
 
       <ScrollView style={styles.content}>
-        {/* SECCIÓN 1: STOCK E INVENTARIO */}
+        {/* SECCIÓN 1: STOCK E INVENTARIO CON COSTOS Y MÁRGENES (SOLO ADMIN) */}
         {activeSection === 'STOCK' && (
           <View>
-            <Text style={styles.sectionTitle}>Ajuste Rápido de Stock</Text>
+            <Text style={styles.sectionTitle}>Control de Inventario & Márgenes</Text>
             <Text style={styles.sectionDesc}>
-              Permite registrar entradas, salidas o ajustes físicos en depósito. Genera fila en Kardex y Auditoría obligatoria.
+              Visibilidad exclusiva de costos al mayor, precios de salida y cálculo de rentabilidad.
             </Text>
 
+            {/* Resumen de Valuación */}
+            <View style={styles.kpiRow}>
+              <View style={styles.kpiCard}>
+                <Text style={styles.kpiLabel}>Valuación Costo</Text>
+                <Text style={styles.kpiValue}>$368.50</Text>
+              </View>
+              <View style={styles.kpiCard}>
+                <Text style={styles.kpiLabel}>Margen Promedio</Text>
+                <Text style={[styles.kpiValue, { color: '#10B981' }]}>+36.8%</Text>
+              </View>
+            </View>
+
+            {/* Alertas de Stock Bajo con Proveedores y WhatsApp */}
+            <View style={[styles.card, { borderColor: '#EF4444' }]}>
+              <Text style={[styles.cardHeader, { color: '#EF4444' }]}>⚠️ Alertas de Reposición Urgente</Text>
+              {[
+                { name: 'Aceite de Maíz Mazeite 1L', stock: 4, min: 10, cost: 2.80, supplier: 'Alimentos Polar', phone: '04141234567' },
+              ].map((it, idx) => (
+                <View key={idx} style={{ marginTop: 8, padding: 10, backgroundColor: '#0F172A', borderRadius: 8 }}>
+                  <Text style={{ color: '#F8FAFC', fontWeight: 'bold' }}>{it.name}</Text>
+                  <Text style={{ color: '#EF4444', fontSize: 12 }}>Stock Crítico: {it.stock} unids (Mínimo: {it.min})</Text>
+                  <Text style={{ color: '#94A3B8', fontSize: 11, marginTop: 2 }}>Proveedor: {it.supplier} • Costo Mayor: ${it.cost.toFixed(2)}</Text>
+                  <TouchableOpacity
+                    style={styles.orderWaBtn}
+                    onPress={() => {
+                      const msg = `Hola ${it.supplier}, necesitamos orden de reposición de 20 unids de ${it.name}. Envíenos cotización a ${user?.businessName}.`;
+                      Linking.openURL(`https://wa.me/${it.phone}?text=${encodeURIComponent(msg)}`).catch(() => Alert.alert('WhatsApp', msg));
+                    }}
+                  >
+                    <Text style={styles.orderWaBtnText}>📲 Ordenar Reposición por WhatsApp</Text>
+                  </TouchableOpacity>
+                </View>
+              ))}
+            </View>
+
+            {/* Ajuste de Inventario con Kardex */}
             <View style={styles.card}>
-              <Text style={styles.fieldLabel}>Producto / Código de Barras:</Text>
+              <Text style={styles.cardHeader}>Ajuste Físico de Stock (Kardex)</Text>
+              <Text style={styles.fieldLabel}>Producto o Código de Barras:</Text>
               <TextInput
                 style={styles.input}
-                placeholder="ID o código de barras (ej. 7591234567894)"
+                placeholder="7591001001019 (Harina PAN)"
+                placeholderTextColor="#64748B"
                 value={adjustProductId}
                 onChangeText={setAdjustProductId}
               />
 
-              <Text style={styles.fieldLabel}>Nueva Cantidad Física:</Text>
+              <Text style={styles.fieldLabel}>Nueva Cantidad Contada:</Text>
               <TextInput
                 style={styles.input}
-                placeholder="Cantidad contada (ej. 45)"
+                placeholder="ej. 150"
+                placeholderTextColor="#64748B"
                 keyboardType="numeric"
                 value={adjustQty}
                 onChangeText={setAdjustQty}
               />
 
-              <Text style={styles.fieldLabel}>Motivo del Ajuste (Obligatorio para auditoría):</Text>
+              <Text style={styles.fieldLabel}>Motivo del Ajuste (Auditoría SENIAT):</Text>
               <TextInput
                 style={styles.input}
-                placeholder="ej. Conteo físico de mostrador / Mercancía dañada"
+                placeholder="Conteo de inventario físico mensual"
+                placeholderTextColor="#64748B"
                 value={adjustReason}
                 onChangeText={setAdjustReason}
               />
 
               <TouchableOpacity style={styles.primaryBtn} onPress={handleAdjustStock}>
-                <Text style={styles.primaryBtnText}>Guardar Ajuste de Inventario</Text>
+                <Text style={styles.primaryBtnText}>Registrar Ajuste en Kardex</Text>
               </TouchableOpacity>
             </View>
-
-            <View style={[styles.card, { borderColor: '#F59E0B' }]}>
-              <Text style={[styles.cardHeader, { color: '#F59E0B' }]}>Alertas de Stock Bajo</Text>
-              <Text style={styles.itemText}>- Harina Pan 1kg: 3 unidades restantes (Alerta: ≤ 5)</Text>
-              <Text style={styles.itemText}>- Arroz Blanco 1kg: 2 unidades restantes (Alerta: ≤ 5)</Text>
-            </View>
           </View>
         )}
 
-        {/* SECCIÓN 2: CUENTAS POR COBRAR */}
+        {/* SECCIÓN 2: CUENTAS POR COBRAR & MORA CONFIGURABLE */}
         {activeSection === 'DEBTS' && (
           <View>
-            <Text style={styles.sectionTitle}>Cuentas por Cobrar & Monederos</Text>
-            <View style={styles.card}>
-              <Text style={styles.cardHeader}>Clientes con Saldos</Text>
-              <View style={styles.debtRow}>
-                <View>
-                  <Text style={styles.customerName}>Pedro Pérez (V-12345678)</Text>
-                  <Text style={styles.debtAmount}>Deuda: $25.00 USD (1,312.50 Bs)</Text>
-                </View>
-                <TouchableOpacity
-                  style={styles.actionPillBtn}
-                  onPress={() => Alert.alert('Abono', 'Registrar abono a cuenta de Pedro Pérez')}
-                >
-                  <Text style={styles.actionPillText}>Cobrar</Text>
-                </TouchableOpacity>
-              </View>
+            <Text style={styles.sectionTitle}>Cobranzas & Recargo por Mora</Text>
+            <Text style={styles.sectionDesc}>
+              Configura el recargo por retraso y envía recordatorios de cobro automáticos por WhatsApp.
+            </Text>
 
-              <View style={[styles.debtRow, { borderBottomWidth: 0 }]}>
-                <View>
-                  <Text style={styles.customerName}>María Gómez (V-19876543)</Text>
-                  <Text style={[styles.debtAmount, { color: '#16A34A' }]}>Saldo a Favor (Vuelto): $6.50 USD</Text>
-                </View>
+            {/* Configuración de Recargo por Mora */}
+            <View style={styles.card}>
+              <Text style={styles.cardHeader}>Configuración de Recargo por Mora</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <Text style={{ color: '#CBD5E1', fontSize: 13 }}>Recargo por retraso:</Text>
+                <TextInput
+                  style={[styles.input, { width: 70, marginBottom: 0, textAlign: 'center', fontWeight: 'bold', color: '#EF4444' }]}
+                  value={lateFeePercent}
+                  onChangeText={setLateFeePercent}
+                  keyboardType="numeric"
+                />
+                <Text style={{ color: '#CBD5E1', fontSize: 13, fontWeight: 'bold' }}>%</Text>
               </View>
+            </View>
+
+            {/* Lista de Deudores */}
+            <View style={styles.card}>
+              <Text style={styles.cardHeader}>Cartera de Clientes con Saldo</Text>
+              {[
+                { name: 'Inversiones Los Chaguaramos C.A.', doc: 'J-309876541', phone: '04141234567', balanceDueUsd: 145.0, isOverdue: true, dueDate: '2026-11-20' },
+                { name: 'Automercado San Antonio', doc: 'J-401122334', phone: '04129876543', balanceDueUsd: 82.50, isOverdue: false, dueDate: '2026-11-30' },
+              ].map((c, i) => {
+                const surcharge = c.isOverdue ? (c.balanceDueUsd * (parseFloat(lateFeePercent) / 100)) : 0;
+                const total = c.balanceDueUsd + surcharge;
+
+                return (
+                  <View key={i} style={styles.debtCard}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.customerName}>{c.name}</Text>
+                      <Text style={styles.customerDoc}>{c.doc} • Límite: {c.dueDate}</Text>
+                      <Text style={[styles.debtAmount, { color: c.isOverdue ? '#EF4444' : '#F59E0B' }]}>
+                        Deuda: ${c.balanceDueUsd.toFixed(2)} USD
+                        {c.isOverdue && ` (+${lateFeePercent}% mora: $${total.toFixed(2)})`}
+                      </Text>
+                      {c.isOverdue && (
+                        <Text style={{ color: '#EF4444', fontSize: 11, fontWeight: 'bold', marginTop: 2 }}>
+                          ⚠️ VENCIDO (Aplica recargo configurable)
+                        </Text>
+                      )}
+                    </View>
+
+                    <TouchableOpacity
+                      style={styles.waCobroBtn}
+                      onPress={() => handleWhatsAppDebtReminder(c)}
+                    >
+                      <Text style={styles.waCobroBtnText}>📲 Cobrar</Text>
+                    </TouchableOpacity>
+                  </View>
+                );
+              })}
             </View>
           </View>
         )}
 
-        {/* SECCIÓN 3: VENTAS Y REENVÍO */}
+        {/* SECCIÓN 3: VENTAS Y REIMPRESIÓN */}
         {activeSection === 'SALES' && (
           <View>
-            <Text style={styles.sectionTitle}>Últimas Ventas Emitidas</Text>
+            <Text style={styles.sectionTitle}>Últimas Facturas Fiscales</Text>
             {[
-              { invoice: 'A-00000042', customer: 'Consumidor Final', total: '$18.88', bs: '991.20 Bs', time: 'Hoy 18:30' },
-              { invoice: 'A-00000041', customer: 'Juan Silva', total: '$4.50', bs: '236.25 Bs', time: 'Hoy 17:15' },
+              { invoice: 'A-00000042', customer: 'Consumidor Final', total: '$18.88', bs: '991.20 Bs', igtf: '$0.57', time: 'Hoy 18:30' },
+              { invoice: 'A-00000041', customer: 'Inversiones Los Chaguaramos', total: '$45.00', bs: '2,362.50 Bs', igtf: '$1.35', time: 'Hoy 17:15' },
             ].map((s) => (
               <View key={s.invoice} style={styles.card}>
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 }}>
-                  <Text style={{ fontWeight: 'bold', color: '#1E293B' }}>{s.invoice}</Text>
-                  <Text style={{ color: '#64748B', fontSize: 12 }}>{s.time}</Text>
+                  <Text style={{ fontWeight: 'bold', color: '#38BDF8', fontSize: 15 }}>{s.invoice}</Text>
+                  <Text style={{ color: '#94A3B8', fontSize: 12 }}>{s.time}</Text>
                 </View>
-                <Text style={{ fontSize: 14, color: '#334155' }}>Cliente: {s.customer}</Text>
-                <Text style={{ fontSize: 16, fontWeight: 'bold', color: '#0284C7', marginVertical: 4 }}>
+                <Text style={{ fontSize: 13, color: '#CBD5E1' }}>Cliente: {s.customer}</Text>
+                <Text style={{ fontSize: 16, fontWeight: 'bold', color: '#10B981', marginVertical: 4 }}>
                   {s.total} ({s.bs})
                 </Text>
+                <Text style={{ fontSize: 11, color: '#F59E0B' }}>IGTF 3% percibido: {s.igtf}</Text>
 
                 <TouchableOpacity
                   style={styles.shareAgainBtn}
-                  onPress={() => Alert.alert('Reenviar Factura', 'Abriendo Share Sheet nativo del dispositivo...')}
+                  onPress={() => Alert.alert('Reenviar Factura', `Enviando factura ${s.invoice} vía WhatsApp...`)}
                 >
-                  <Text style={styles.shareAgainBtnText}>Reenviar Factura (WhatsApp)</Text>
+                  <Text style={styles.shareAgainBtnText}>📲 Reenviar Factura al Cliente</Text>
                 </TouchableOpacity>
               </View>
             ))}
           </View>
         )}
 
-        {/* SECCIÓN 4: TASAS DE CAMBIO */}
+        {/* SECCIÓN 4: TASAS DE CAMBIO OFICIALES */}
         {activeSection === 'RATES' && (
           <View>
-            <Text style={styles.sectionTitle}>Tasas de Cambio del Día</Text>
+            <Text style={styles.sectionTitle}>Tasas de Cambio Oficiales BCV</Text>
             <View style={styles.card}>
-              <Text style={{ fontSize: 12, color: '#64748B' }}>Tasa Oficial (BCV):</Text>
-              <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#16A34A', marginVertical: 4 }}>52.5000 Bs / USD</Text>
-              <Text style={{ fontSize: 11, color: '#94A3B8' }}>Actualizado hace 22 minutos</Text>
+              <Text style={{ fontSize: 12, color: '#94A3B8' }}>Tasa Oficial Vigente (BCV):</Text>
+              <Text style={{ fontSize: 26, fontWeight: 'bold', color: '#10B981', marginVertical: 6 }}>
+                52.5000 Bs / USD
+              </Text>
+              <Text style={{ fontSize: 11, color: '#94A3B8' }}>Euro BCV: 57.10 Bs • Paralelo Monitor: 60.50 Bs</Text>
 
               <TouchableOpacity
                 style={[styles.primaryBtn, { marginTop: 15 }]}
-                onPress={() => Alert.alert('Actualizado', 'Tasas sincronizadas con el proveedor oficial.')}
+                onPress={() => Alert.alert('Tasas Actualizadas', 'Tasas sincronizadas con la API oficial.')}
               >
-                <Text style={styles.primaryBtnText}>Actualizar Tasa Ahora</Text>
+                <Text style={styles.primaryBtnText}>Sincronizar Tasas Ahora</Text>
               </TouchableOpacity>
             </View>
           </View>
         )}
 
-        {/* SECCIÓN 5: USUARIOS Y CAJEROS (LIMITADO EN MÓVIL) */}
+        {/* SECCIÓN 5: GESTIÓN DE CAJEROS EN VIVO */}
         {activeSection === 'USERS' && (
           <View>
-            <Text style={styles.sectionTitle}>Gestión de Vendedores</Text>
+            <Text style={styles.sectionTitle}>Supervisión de Vendedores</Text>
             <Text style={styles.sectionDesc}>
-              En el móvil solo se pueden crear o desactivar usuarios con rol VENDEDOR o CONSULTA.
+              Monitorea las ventas y actividades de tus cajeros en tiempo real.
             </Text>
 
             <View style={styles.card}>
-              <Text style={styles.fieldLabel}>Nombre de Usuario:</Text>
+              <Text style={styles.cardHeader}>Cajeros Activos en Turno</Text>
+              <View style={styles.cashierRow}>
+                <View>
+                  <Text style={{ color: '#F8FAFC', fontWeight: 'bold' }}>cajero1 (Carlos Mendoza)</Text>
+                  <Text style={{ color: '#10B981', fontSize: 11 }}>● Conectado • Turno Abierto</Text>
+                  <Text style={{ color: '#94A3B8', fontSize: 11, marginTop: 2 }}>Ventas: 18 facturas ($412.50 USD)</Text>
+                </View>
+              </View>
+            </View>
+
+            <View style={styles.card}>
+              <Text style={styles.cardHeader}>Crear Nuevo Vendedor</Text>
+              <Text style={styles.fieldLabel}>Usuario:</Text>
               <TextInput
                 style={styles.input}
                 placeholder="ej. cajero2"
+                placeholderTextColor="#64748B"
                 value={newCashierUsername}
                 onChangeText={setNewCashierUsername}
               />
@@ -226,13 +350,14 @@ export const MobileAdminDashboard: React.FC = () => {
               <Text style={styles.fieldLabel}>Nombre Completo:</Text>
               <TextInput
                 style={styles.input}
-                placeholder="ej. Carlos Mendoza"
+                placeholder="ej. Luis Ramírez"
+                placeholderTextColor="#64748B"
                 value={newCashierName}
                 onChangeText={setNewCashierName}
               />
 
               <TouchableOpacity style={styles.primaryBtn} onPress={handleCreateCashier}>
-                <Text style={styles.primaryBtnText}>Crear Vendedor</Text>
+                <Text style={styles.primaryBtnText}>Registrar Vendedor</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -243,16 +368,28 @@ export const MobileAdminDashboard: React.FC = () => {
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F8FAFC' },
+  container: { flex: 1, backgroundColor: '#071F27' },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     padding: 14,
-    backgroundColor: '#0F172A',
+    backgroundColor: '#0B3B49',
+    borderBottomWidth: 1,
+    borderBottomColor: '#155E75',
   },
   title: { color: '#F59E0B', fontSize: 18, fontWeight: 'bold' },
-  subtitle: { color: '#94A3B8', fontSize: 12 },
+  subtitle: { color: '#94A3B8', fontSize: 11, marginTop: 2 },
+  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  adminPill: {
+    backgroundColor: '#0284C722',
+    borderWidth: 1,
+    borderColor: '#0284C755',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  adminPillText: { color: '#38BDF8', fontSize: 10, fontWeight: 'bold' },
   posSwitchBtn: {
     backgroundColor: '#10B981',
     paddingVertical: 6,
@@ -260,74 +397,114 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
   posSwitchBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: 'bold' },
+  logoutBtn: {
+    backgroundColor: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#334155',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+  },
+  logoutBtnText: { color: '#94A3B8', fontSize: 12, fontWeight: '600' },
 
   navBar: {
     flexDirection: 'row',
-    backgroundColor: '#1E293B',
+    backgroundColor: '#0F172A',
     paddingVertical: 6,
     paddingHorizontal: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1E293B',
   },
-  navItem: { flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: 4 },
-  navItemActive: { backgroundColor: '#334155' },
+  navItem: { flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: 6 },
+  navItemActive: { backgroundColor: '#1E293B' },
   navText: { color: '#94A3B8', fontSize: 12, fontWeight: '600' },
-  navTextActive: { color: '#F59E0B', fontWeight: 'bold' },
+  navTextActive: { color: '#38BDF8', fontWeight: 'bold' },
 
   content: { flex: 1, padding: 14 },
-  sectionTitle: { fontSize: 18, fontWeight: 'bold', color: '#0F172A', marginBottom: 4 },
-  sectionDesc: { fontSize: 13, color: '#64748B', marginBottom: 12 },
+  sectionTitle: { fontSize: 18, fontWeight: 'bold', color: '#F8FAFC', marginBottom: 4 },
+  sectionDesc: { fontSize: 12, color: '#94A3B8', marginBottom: 14, lineHeight: 18 },
+
+  kpiRow: { flexDirection: 'row', gap: 10, marginBottom: 14 },
+  kpiCard: {
+    flex: 1,
+    backgroundColor: '#1E293B',
+    padding: 14,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  kpiLabel: { color: '#94A3B8', fontSize: 11 },
+  kpiValue: { color: '#F8FAFC', fontSize: 20, fontWeight: 'bold', marginTop: 4 },
 
   card: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 8,
-    padding: 14,
+    backgroundColor: '#1E293B',
+    borderRadius: 12,
+    padding: 16,
     marginBottom: 14,
     borderWidth: 1,
-    borderColor: '#E2E8F0',
+    borderColor: '#334155',
   },
-  cardHeader: { fontSize: 14, fontWeight: 'bold', color: '#0F172A', marginBottom: 8 },
-  fieldLabel: { fontSize: 12, fontWeight: '600', color: '#475569', marginBottom: 4 },
+  cardHeader: { fontSize: 14, fontWeight: 'bold', color: '#F8FAFC', marginBottom: 10 },
+  fieldLabel: { fontSize: 12, fontWeight: '600', color: '#CBD5E1', marginBottom: 4 },
   input: {
+    backgroundColor: '#0F172A',
     borderWidth: 1,
-    borderColor: '#CBD5E1',
-    borderRadius: 6,
+    borderColor: '#334155',
+    borderRadius: 8,
+    color: '#FFFFFF',
     padding: 10,
-    fontSize: 14,
+    fontSize: 13,
     marginBottom: 10,
   },
   primaryBtn: {
     backgroundColor: '#0284C7',
     padding: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginTop: 4,
+  },
+  primaryBtnText: { color: '#FFFFFF', fontWeight: 'bold', fontSize: 13 },
+
+  orderWaBtn: {
+    backgroundColor: '#10B981',
+    padding: 10,
     borderRadius: 6,
     alignItems: 'center',
+    marginTop: 8,
   },
-  primaryBtnText: { color: '#FFFFFF', fontWeight: 'bold', fontSize: 14 },
+  orderWaBtnText: { color: '#FFFFFF', fontWeight: 'bold', fontSize: 12 },
 
-  itemText: { fontSize: 13, color: '#334155', marginVertical: 2 },
-
-  debtRow: {
+  debtCard: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 8,
+    justifyContent: 'space-between',
+    paddingVertical: 10,
     borderBottomWidth: 1,
-    borderBottomColor: '#F1F5F9',
+    borderBottomColor: '#334155',
   },
-  customerName: { fontSize: 14, fontWeight: 'bold', color: '#1E293B' },
-  debtAmount: { fontSize: 13, fontWeight: 'bold', color: '#DC2626' },
-  actionPillBtn: {
-    backgroundColor: '#0284C7',
+  customerName: { fontSize: 13, fontWeight: 'bold', color: '#F8FAFC' },
+  customerDoc: { fontSize: 11, color: '#64748B', marginTop: 2 },
+  debtAmount: { fontSize: 12, fontWeight: 'bold', marginTop: 2 },
+  waCobroBtn: {
+    backgroundColor: '#10B981',
     paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 12,
+    paddingHorizontal: 10,
+    borderRadius: 6,
   },
-  actionPillText: { color: '#FFFFFF', fontSize: 12, fontWeight: 'bold' },
+  waCobroBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: 'bold' },
 
   shareAgainBtn: {
-    backgroundColor: '#16A34A',
-    padding: 8,
+    backgroundColor: '#10B981',
+    padding: 10,
     borderRadius: 6,
     alignItems: 'center',
-    marginTop: 6,
+    marginTop: 8,
   },
   shareAgainBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: 'bold' },
+
+  cashierRow: {
+    padding: 10,
+    backgroundColor: '#0F172A',
+    borderRadius: 8,
+  },
 });

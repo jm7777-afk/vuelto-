@@ -46,6 +46,7 @@ import {
   HelpCircle,
   ChevronRight,
   ChevronLeft,
+  Menu,
 } from 'lucide-react';
 
 // Tipos Principales
@@ -609,8 +610,19 @@ export const App = () => {
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState('');
 
+  // Roles y Responsive
+  const isVendedor = user?.roleId === 'VENDEDOR' || user?.username === 'cajero1';
+  const isAdmin = !isVendedor;
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
   // Navegación Activa
   const [activeTab, setActiveTab] = useState<'METRICS' | 'INVENTORY' | 'LOW_STOCK' | 'RECEIVABLES' | 'SALES' | 'RATES' | 'CASHIERS'>('METRICS');
+
+  useEffect(() => {
+    if (isVendedor && (activeTab === 'METRICS' || activeTab === 'LOW_STOCK' || activeTab === 'RECEIVABLES' || activeTab === 'CASHIERS')) {
+      setActiveTab('INVENTORY');
+    }
+  }, [user, isVendedor, activeTab]);
 
   // Tasa BCV y Monitor
   const [bcvRate, setBcvRate] = useState(DEFAULT_BCV_RATE);
@@ -1215,65 +1227,174 @@ export const App = () => {
   }
 
   return (
-    <div style={{ display: 'flex', minHeight: '100vh', backgroundColor: '#071F27', color: '#F8FAFC', position: 'relative' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', backgroundColor: '#071F27', color: '#F8FAFC', position: 'relative' }}>
       {showSplash && <VueltoSplashScreen onFinish={() => setShowSplash(false)} />}
       {showOnboarding && <VueltoOnboardingModal onClose={() => setShowOnboarding(false)} onPlaySplash={() => { setShowOnboarding(false); setShowSplash(true); }} />}
-      {/* SIDEBAR LATERAL */}
-      <aside style={{ width: '280px', backgroundColor: '#1E293B', padding: '24px 16px', borderRight: '1px solid #334155', display: 'flex', flexDirection: 'column' }}>
-        <div style={{ marginBottom: '28px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '6px' }}>
-            <div style={{ padding: '8px', borderRadius: '8px', backgroundColor: '#0284C7', color: '#FFFFFF' }}>
-              <Store size={22} />
-            </div>
-            <div>
-              <h1 style={{ fontSize: '20px', fontWeight: 'bold', color: '#38BDF8', lineHeight: 1 }}>VUELTO</h1>
-              <span style={{ fontSize: '10px', color: '#10B981', fontWeight: 'bold' }}>● Supabase Cloud Conectada</span>
-            </div>
+
+      <style>{`
+        @media (max-width: 768px) {
+          .vuelto-desktop-sidebar {
+            position: fixed !important;
+            top: 0; bottom: 0; left: 0;
+            width: 280px !important;
+            z-index: 1000 !important;
+            transform: translateX(-100%);
+            transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1) !important;
+            box-shadow: 10px 0 30px rgba(0,0,0,0.7) !important;
+          }
+          .vuelto-desktop-sidebar.open {
+            transform: translateX(0) !important;
+          }
+          .vuelto-mobile-header {
+            display: flex !important;
+          }
+          .vuelto-main-view {
+            padding: 14px !important;
+          }
+        }
+        @media (min-width: 769px) {
+          .vuelto-mobile-header {
+            display: none !important;
+          }
+          .vuelto-mobile-backdrop {
+            display: none !important;
+          }
+        }
+      `}</style>
+
+      {/* CABECERA MÓVIL RESPONSIVE */}
+      <header className="vuelto-mobile-header" style={{
+        display: 'none',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: '12px 16px',
+        backgroundColor: '#0B3B49',
+        borderBottom: '1px solid #155E75',
+        position: 'sticky',
+        top: 0,
+        zIndex: 500,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <button
+            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+            style={{ background: 'none', border: 'none', color: '#F8FAFC', cursor: 'pointer', padding: '4px' }}
+          >
+            <Menu size={24} />
+          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span style={{ fontSize: '18px', fontWeight: 'bold', color: '#FFFFFF', letterSpacing: '1px' }}>vuelto<span style={{ color: '#A3E635' }}>.</span></span>
+            <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', backgroundColor: isVendedor ? '#10B98122' : '#0284C722', color: isVendedor ? '#A3E635' : '#38BDF8', fontWeight: 'bold' }}>
+              {isVendedor ? 'Cajero' : 'Admin'}
+            </span>
           </div>
-          <p style={{ fontSize: '11px', color: '#94A3B8' }}>{user?.businessName || 'Inversiones Bodega Central C.A.'}</p>
         </div>
 
-        {/* NAVEGACIÓN */}
-        <nav style={{ display: 'flex', flexDirection: 'column', gap: '6px', flex: 1 }}>
-          {[
-            { id: 'METRICS', label: 'Dashboard & Finanzas', icon: <TrendingUp size={18} /> },
-            { id: 'INVENTORY', label: 'Inventario & Catálogo', icon: <Package size={18} /> },
-            { id: 'LOW_STOCK', label: 'Stock Bajo & Pedidos', icon: <AlertTriangle size={18} />, badge: lowStockItems.length },
-            { id: 'RECEIVABLES', label: 'Cobranzas & Mora', icon: <DollarSign size={18} />, badge: customerDebts.filter(c => c.isOverdue).length },
-            { id: 'SALES', label: 'Ventas & Facturas', icon: <FileText size={18} /> },
-            { id: 'RATES', label: 'Tasas de Cambio', icon: <RefreshCw size={18} /> },
-            { id: 'CASHIERS', label: 'Vendedores en Vivo', icon: <Users size={18} /> },
-          ].map((item) => (
-            <button
-              key={item.id}
-              onClick={() => setActiveTab(item.id as any)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                padding: '12px 14px',
-                borderRadius: '8px',
-                border: 'none',
-                cursor: 'pointer',
-                fontSize: '13px',
-                fontWeight: activeTab === item.id ? 'bold' : '500',
-                backgroundColor: activeTab === item.id ? '#0284C7' : 'transparent',
-                color: activeTab === item.id ? '#FFFFFF' : '#94A3B8',
-                transition: 'all 0.15s ease',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                {item.icon}
-                <span>{item.label}</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <div style={{ padding: '4px 8px', borderRadius: '12px', backgroundColor: '#062F3B', border: '1px solid #10B98155', fontSize: '11px', color: '#A3E635', fontWeight: 'bold' }}>
+            BCV: {bcvRate.toFixed(2)} Bs
+          </div>
+          <button
+            onClick={handleLogout}
+            title="Cerrar sesión"
+            style={{ background: 'none', border: 'none', color: '#94A3B8', padding: '4px' }}
+          >
+            <LogOut size={18} />
+          </button>
+        </div>
+      </header>
+
+      {/* OVERLAY PARA CERRAR EL MENÚ EN MÓVIL */}
+      {mobileMenuOpen && (
+        <div
+          className="vuelto-mobile-backdrop"
+          onClick={() => setMobileMenuOpen(false)}
+          style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(3px)', zIndex: 999 }}
+        />
+      )}
+
+      <div style={{ display: 'flex', flex: 1, minHeight: '100vh' }}>
+        {/* SIDEBAR LATERAL (RESPONSIVE) */}
+        <aside
+          className={`vuelto-desktop-sidebar ${mobileMenuOpen ? 'open' : ''}`}
+          style={{ width: '280px', backgroundColor: '#1E293B', padding: '24px 16px', borderRight: '1px solid #334155', display: 'flex', flexDirection: 'column' }}
+        >
+          <div style={{ marginBottom: '20px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '6px' }}>
+              <div style={{ padding: '8px', borderRadius: '8px', backgroundColor: '#0284C7', color: '#FFFFFF' }}>
+                <Store size={22} />
               </div>
-              {item.badge !== undefined && item.badge > 0 && (
-                <span style={{ backgroundColor: '#EF4444', color: '#FFFFFF', padding: '2px 7px', borderRadius: '10px', fontSize: '11px', fontWeight: 'bold' }}>
-                  {item.badge}
-                </span>
-              )}
-            </button>
-          ))}
-        </nav>
+              <div>
+                <h1 style={{ fontSize: '20px', fontWeight: 'bold', color: '#38BDF8', lineHeight: 1 }}>VUELTO</h1>
+                <span style={{ fontSize: '10px', color: '#10B981', fontWeight: 'bold' }}>● Supabase Cloud Conectada</span>
+              </div>
+            </div>
+            <p style={{ fontSize: '11px', color: '#94A3B8' }}>{user?.businessName || 'Inversiones Bodega Central C.A.'}</p>
+          </div>
+
+          {/* DISTINTIVO DE ROL */}
+          <div style={{
+            padding: '6px 10px',
+            borderRadius: '8px',
+            backgroundColor: isVendedor ? '#10B98122' : '#0284C722',
+            border: `1px solid ${isVendedor ? '#10B98155' : '#0284C755'}`,
+            color: isVendedor ? '#A3E635' : '#38BDF8',
+            fontSize: '11px',
+            fontWeight: 'bold',
+            marginBottom: '16px',
+            textAlign: 'center',
+            letterSpacing: '0.5px'
+          }}>
+            {isVendedor ? '🛒 MODO CAJERO / VENDEDOR' : '👑 MODO ADMINISTRADOR TOTAL'}
+          </div>
+
+          {/* NAVEGACIÓN BASADA EN ROLES (RBAC) */}
+          <nav style={{ display: 'flex', flexDirection: 'column', gap: '6px', flex: 1 }}>
+            {(isVendedor
+              ? [
+                  { id: 'INVENTORY', label: 'Consulta de Precios', icon: <Package size={18} /> },
+                  { id: 'SALES', label: 'Ventas y Facturas', icon: <FileText size={18} /> },
+                  { id: 'RATES', label: 'Tasas Oficiales BCV', icon: <RefreshCw size={18} /> },
+                ]
+              : [
+                  { id: 'METRICS', label: 'Dashboard & Finanzas', icon: <TrendingUp size={18} /> },
+                  { id: 'INVENTORY', label: 'Inventario & Catálogo', icon: <Package size={18} /> },
+                  { id: 'LOW_STOCK', label: 'Stock Bajo & Pedidos', icon: <AlertTriangle size={18} />, badge: lowStockItems.length },
+                  { id: 'RECEIVABLES', label: 'Cobranzas & Mora', icon: <DollarSign size={18} />, badge: customerDebts.filter(c => c.isOverdue).length },
+                  { id: 'SALES', label: 'Ventas & Facturas', icon: <FileText size={18} /> },
+                  { id: 'RATES', label: 'Tasas de Cambio', icon: <RefreshCw size={18} /> },
+                  { id: 'CASHIERS', label: 'Vendedores en Vivo', icon: <Users size={18} /> },
+                ]
+            ).map((item) => (
+              <button
+                key={item.id}
+                onClick={() => { setActiveTab(item.id as any); setMobileMenuOpen(false); }}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '12px 14px',
+                  borderRadius: '8px',
+                  border: 'none',
+                  cursor: 'pointer',
+                  fontSize: '13px',
+                  fontWeight: activeTab === item.id ? 'bold' : '500',
+                  backgroundColor: activeTab === item.id ? '#0284C7' : 'transparent',
+                  color: activeTab === item.id ? '#FFFFFF' : '#94A3B8',
+                  transition: 'all 0.15s ease',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  {item.icon}
+                  <span>{item.label}</span>
+                </div>
+                {item.badge !== undefined && item.badge > 0 && (
+                  <span style={{ backgroundColor: '#EF4444', color: '#FFFFFF', padding: '2px 7px', borderRadius: '10px', fontSize: '11px', fontWeight: 'bold' }}>
+                    {item.badge}
+                  </span>
+                )}
+              </button>
+            ))}
+          </nav>
 
         {/* BOTONES DE EXPERIENCIA SENIOR */}
         <div style={{ display: 'flex', gap: '6px', marginBottom: '16px' }}>
@@ -1322,7 +1443,7 @@ export const App = () => {
       </aside>
 
       {/* ÁREA DE CONTENIDO PRINCIPAL */}
-      <main style={{ flex: 1, padding: '32px', overflowY: 'auto' }}>
+      <main className="vuelto-main-view" style={{ flex: 1, padding: '32px', overflowY: 'auto' }}>
         {/* TAB 1: DASHBOARD Y FINANZAS */}
         {activeTab === 'METRICS' && (
           <div>
@@ -1423,27 +1544,33 @@ export const App = () => {
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
               <div>
-                <h2 style={{ fontSize: '24px', fontWeight: 'bold' }}>Catálogo de Productos e Inventario</h2>
-                <p style={{ color: '#94A3B8', fontSize: '13px' }}>Control de códigos EAN-13 (759), balanza, costo al mayor y margen de ganancia.</p>
+                <h2 style={{ fontSize: '24px', fontWeight: 'bold' }}>
+                  {isAdmin ? 'Catálogo de Productos e Inventario' : 'Consulta de Precios y Catálogo'}
+                </h2>
+                <p style={{ color: '#94A3B8', fontSize: '13px' }}>
+                  {isAdmin ? 'Control de códigos EAN-13 (759), balanza, costo al mayor y margen de ganancia.' : 'Consulta rápida de precios al detal en divisas y bolívares según tasa oficial BCV.'}
+                </p>
               </div>
 
-              <div style={{ display: 'flex', gap: '10px' }}>
-                <button
-                  onClick={() => { setIsAddModalOpen(true); setAddMode('MANUAL'); setCameraActive(false); }}
-                  style={{ display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#0284C7', color: '#FFFFFF', padding: '10px 16px', borderRadius: '8px', border: 'none', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer' }}
-                >
-                  <Plus size={16} />
-                  <span>Nuevo Producto</span>
-                </button>
+              {isAdmin && (
+                <div style={{ display: 'flex', gap: '10px' }}>
+                  <button
+                    onClick={() => { setIsAddModalOpen(true); setAddMode('MANUAL'); setCameraActive(false); }}
+                    style={{ display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#0284C7', color: '#FFFFFF', padding: '10px 16px', borderRadius: '8px', border: 'none', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer' }}
+                  >
+                    <Plus size={16} />
+                    <span>Nuevo Producto</span>
+                  </button>
 
-                <button
-                  onClick={() => { setIsAddModalOpen(true); setAddMode('CAMERA'); setCameraActive(true); }}
-                  style={{ display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#10B981', color: '#FFFFFF', padding: '10px 16px', borderRadius: '8px', border: 'none', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer' }}
-                >
-                  <Camera size={16} />
-                  <span>Escanear con Cámara</span>
-                </button>
-              </div>
+                  <button
+                    onClick={() => { setIsAddModalOpen(true); setAddMode('CAMERA'); setCameraActive(true); }}
+                    style={{ display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#10B981', color: '#FFFFFF', padding: '10px 16px', borderRadius: '8px', border: 'none', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer' }}
+                  >
+                    <Camera size={16} />
+                    <span>Escanear con Cámara</span>
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Barra de Búsqueda */}
@@ -1459,17 +1586,17 @@ export const App = () => {
             </div>
 
             {/* Tabla de Productos */}
-            <div style={{ backgroundColor: '#1E293B', borderRadius: '12px', border: '1px solid #334155', overflow: 'hidden' }}>
+            <div style={{ backgroundColor: '#1E293B', borderRadius: '12px', border: '1px solid #334155', overflowX: 'auto' }}>
               <table style={{ width: '100%', textAlign: 'left', borderCollapse: 'collapse', fontSize: '13px' }}>
                 <thead>
                   <tr style={{ backgroundColor: '#0F172A', color: '#94A3B8', borderBottom: '1px solid #334155' }}>
                     <th style={{ padding: '12px 16px' }}>Código</th>
                     <th style={{ padding: '12px 16px' }}>Producto</th>
-                    <th style={{ padding: '12px 16px' }}>Proveedor</th>
-                    <th style={{ padding: '12px 16px' }}>Costo Mayor ($)</th>
+                    {isAdmin && <th style={{ padding: '12px 16px' }}>Proveedor</th>}
+                    {isAdmin && <th style={{ padding: '12px 16px' }}>Costo Mayor ($)</th>}
                     <th style={{ padding: '12px 16px' }}>Precio Salida ($)</th>
                     <th style={{ padding: '12px 16px' }}>Precio Salida (Bs)</th>
-                    <th style={{ padding: '12px 16px' }}>Margen Ganancia</th>
+                    {isAdmin && <th style={{ padding: '12px 16px' }}>Margen Ganancia</th>}
                     <th style={{ padding: '12px 16px' }}>Stock</th>
                   </tr>
                 </thead>
@@ -1485,15 +1612,17 @@ export const App = () => {
                         <tr key={item.id} style={{ borderBottom: '1px solid #334155' }}>
                           <td style={{ padding: '12px 16px', fontFamily: 'monospace', color: '#38BDF8' }}>{item.barcode}</td>
                           <td style={{ padding: '12px 16px', fontWeight: 'bold' }}>{item.name}</td>
-                          <td style={{ padding: '12px 16px', color: '#94A3B8' }}>{item.supplier}</td>
-                          <td style={{ padding: '12px 16px' }}>${item.costPriceUsd.toFixed(2)}</td>
+                          {isAdmin && <td style={{ padding: '12px 16px', color: '#94A3B8' }}>{item.supplier}</td>}
+                          {isAdmin && <td style={{ padding: '12px 16px' }}>${item.costPriceUsd.toFixed(2)}</td>}
                           <td style={{ padding: '12px 16px', fontWeight: 'bold', color: '#10B981' }}>${item.salePriceUsd.toFixed(2)}</td>
                           <td style={{ padding: '12px 16px', color: '#CBD5E1' }}>{(item.salePriceUsd * bcvRate).toFixed(2)} Bs</td>
-                          <td style={{ padding: '12px 16px' }}>
-                            <span style={{ backgroundColor: '#10B98122', color: '#10B981', padding: '3px 8px', borderRadius: '4px', fontWeight: 'bold', fontSize: '11px' }}>
-                              +{itemMargin}% (+${itemProfit.toFixed(2)})
-                            </span>
-                          </td>
+                          {isAdmin && (
+                            <td style={{ padding: '12px 16px' }}>
+                              <span style={{ backgroundColor: '#10B98122', color: '#10B981', padding: '3px 8px', borderRadius: '4px', fontWeight: 'bold', fontSize: '11px' }}>
+                                +{itemMargin}% (+${itemProfit.toFixed(2)})
+                              </span>
+                            </td>
+                          )}
                           <td style={{ padding: '12px 16px' }}>
                             <span style={{ backgroundColor: isLow ? '#EF444422' : '#0284C722', color: isLow ? '#EF4444' : '#38BDF8', padding: '3px 8px', borderRadius: '4px', fontWeight: 'bold', fontSize: '12px' }}>
                               {item.stock} unids {isLow && '⚠️ Bajo'}
@@ -1818,6 +1947,7 @@ export const App = () => {
           </div>
         )}
       </main>
+      </div>
 
       {/* MODAL DETALLE COMPLETO DE VENTA */}
       {selectedSale && (

@@ -2,23 +2,24 @@ import React, { useEffect, useState } from 'react';
 import { View, StyleSheet, Text, ActivityIndicator } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as FileSystem from 'expo-file-system';
-import { useAuthStore } from './src/stores/auth.store';
+import { MobileUserProfile, useAuthStore } from './src/stores/auth.store';
 import { useCartStore } from './src/stores/cart.store';
 import { PosCheckoutScreen } from './src/screens/pos/PosCheckoutScreen';
 import { MobileAdminDashboard } from './src/screens/admin/MobileAdminDashboard';
+import { LoginScreen } from './src/screens/auth/LoginScreen';
 import { MobileApiService } from './src/services/api.service';
 
 const AUTH_FILE = `${FileSystem.documentDirectory}vuelto_auth.json`;
 
 export default function App() {
-  const { user, activeMode, setAuth } = useAuthStore();
+  const { user, activeMode, setAuth, logout } = useAuthStore();
   const { setExchangeRate } = useCartStore();
   const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
     async function initApp() {
       try {
-        // 1. Restaurar Sesión Persistente desde el almacenamiento local
+        // 1. Restaurar Sesión Persistente desde el almacenamiento local si existe
         const fileInfo = await FileSystem.getInfoAsync(AUTH_FILE);
         if (fileInfo.exists) {
           const content = await FileSystem.readAsStringAsync(AUTH_FILE);
@@ -26,22 +27,6 @@ export default function App() {
           if (parsed && parsed.user) {
             setAuth(parsed.user, parsed.accessToken, parsed.refreshToken);
           }
-        } else {
-          // Inicializar sesión predeterminada y persistirla
-          const defaultAuth = {
-            user: {
-              id: '24a8eccf-b45e-4d5a-ac01-b44b77198c10',
-              tenantId: 'a0000000-0000-0000-0000-000000000001',
-              username: 'admin',
-              fullName: 'Dueño Administrador',
-              roleId: 'ADMIN' as const,
-              businessName: 'Bodega Central C.A.',
-            },
-            accessToken: 'persisted_jwt_token',
-            refreshToken: 'persisted_refresh_token',
-          };
-          setAuth(defaultAuth.user, defaultAuth.accessToken, defaultAuth.refreshToken);
-          await FileSystem.writeAsStringAsync(AUTH_FILE, JSON.stringify(defaultAuth));
         }
 
         // 2. Consultar Tasa Oficial BCV en vivo desde la API de Producción Render
@@ -64,21 +49,60 @@ export default function App() {
     initApp();
   }, []);
 
+  // Guardar sesión persistente al iniciar sesión exitosamente
+  const handleLoginSuccess = async (
+    loggedInUser: MobileUserProfile,
+    accessToken: string,
+    refreshToken: string
+  ) => {
+    setAuth(loggedInUser, accessToken, refreshToken);
+    try {
+      await FileSystem.writeAsStringAsync(
+        AUTH_FILE,
+        JSON.stringify({ user: loggedInUser, accessToken, refreshToken })
+      );
+    } catch (e) {
+      console.warn('Error persistiendo sesión:', e);
+    }
+  };
+
+  // Limpiar archivo de sesión al cerrar sesión
+  useEffect(() => {
+    if (isReady && !user) {
+      FileSystem.deleteAsync(AUTH_FILE, { idempotent: true }).catch(() => {});
+    }
+  }, [user, isReady]);
+
   if (!isReady) {
     return (
       <View style={styles.splash}>
         <StatusBar style="light" />
-        <Text style={styles.brandTitle}>vuelto<Text style={styles.dot}>.</Text></Text>
+        <Text style={styles.brandTitle}>
+          vuelto<Text style={styles.dot}>.</Text>
+        </Text>
         <Text style={styles.brandSubtitle}>PUNTO DE VENTA & FACTURACIÓN</Text>
         <ActivityIndicator size="large" color="#A3E635" style={{ marginTop: 24 }} />
       </View>
     );
   }
 
+  // Si no hay usuario autenticado, renderizar pantalla de Login profesional
+  if (!user) {
+    return (
+      <View style={styles.container}>
+        <StatusBar style="light" />
+        <LoginScreen onLoginSuccess={handleLoginSuccess} />
+      </View>
+    );
+  }
+
+  // Interfaz de VENDEDOR (Cajero): NUNCA puede acceder a MobileAdminDashboard (RBAC estricto)
+  const isAuthorizedAdmin = user.roleId === 'ADMIN' || user.roleId === 'SUPER_ADMIN';
+
   return (
     <View style={styles.container}>
       <StatusBar style="light" />
-      {activeMode === 'ADMIN' && user?.roleId === 'ADMIN' ? (
+      {activeMode === 'ADMIN' && isAuthorizedAdmin ? (
         <MobileAdminDashboard />
       ) : (
         <PosCheckoutScreen />
