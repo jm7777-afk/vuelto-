@@ -27,6 +27,11 @@ import {
   Tag,
   Check,
   Zap,
+  Play,
+  Sparkles,
+  HelpCircle,
+  ChevronRight,
+  ChevronLeft,
 } from 'lucide-react';
 
 // Tipos Principales
@@ -98,13 +103,491 @@ interface CashierStatus {
 
 const DEFAULT_BCV_RATE = 52.50;
 
+
+// =========================================================================
+// 🎬 SPLASH SCREEN / INTRO ANIMADA DE VUELTO POS (MOTION DESIGN SENIOR)
+// =========================================================================
+export const VueltoSplashScreen: React.FC<{ onFinish: () => void }> = ({ onFinish }) => {
+  const [closing, setClosing] = useState(false);
+
+  useEffect(() => {
+    try { sessionStorage.setItem('vuelto_splash_shown', 'true'); } catch {}
+
+    // Secuencia cinemática total (3.7 segundos):
+    // 0.0s - 1.2s: Aparición y dibujo de factura (degradado turquesa a lima)
+    // 0.8s - 1.4s: 3 líneas de conceptos de cobro (izq a der)
+    // 1.2s - 2.1s: Emergencia del billete inclinado + giro antihorario ("vuelto") + destello lima
+    // 2.1s - 2.9s: Entrada de tipografía geométrica "vuelto" con fade-in y subida
+    // 2.9s - 3.7s: Cierre estático y centrado para retención de marca
+    // 3.7s - 4.2s: Transición fluida (desvanecimiento y escala suave) hacia la app
+    const timer = setTimeout(() => {
+      setClosing(true);
+      setTimeout(onFinish, 450);
+    }, 3700);
+
+    return () => clearTimeout(timer);
+  }, [onFinish]);
+
+  const handleSkip = () => {
+    setClosing(true);
+    setTimeout(onFinish, 200);
+  };
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 99999,
+        backgroundColor: '#0B3B49',
+        backgroundImage: 'radial-gradient(circle at 50% 45%, #0E4E61 0%, #0B3B49 55%, #052129 100%)',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        overflow: 'hidden',
+        transition: 'opacity 0.45s cubic-bezier(0.16, 1, 0.3, 1), transform 0.45s cubic-bezier(0.16, 1, 0.3, 1)',
+        opacity: closing ? 0 : 1,
+        transform: closing ? 'scale(1.04)' : 'scale(1)',
+        pointerEvents: closing ? 'none' : 'auto',
+      }}
+    >
+      <style>{`
+        /* 1. Aparición del comprobante (factura): trazo progresivo con degradado turquesa a lima */
+        @keyframes drawInvoiceContour {
+          0% { stroke-dashoffset: 750; opacity: 0; }
+          15% { opacity: 1; }
+          100% { stroke-dashoffset: 0; opacity: 1; }
+        }
+        .vuelto-invoice-contour {
+          stroke-dasharray: 750;
+          stroke-dashoffset: 750;
+          animation: drawInvoiceContour 1.2s cubic-bezier(0.22, 1, 0.36, 1) 0.1s forwards;
+        }
+
+        /* 2. Tres líneas horizontales internas (conceptos de cobro) aparecen de izquierda a derecha */
+        @keyframes drawConceptLine {
+          0% { transform: scaleX(0); opacity: 0; }
+          30% { opacity: 1; }
+          100% { transform: scaleX(1); opacity: 0.95; }
+        }
+        .vuelto-line-1 {
+          transform-origin: 125px 105px;
+          animation: drawConceptLine 0.5s cubic-bezier(0.16, 1, 0.3, 1) 0.75s forwards;
+          opacity: 0;
+        }
+        .vuelto-line-2 {
+          transform-origin: 125px 135px;
+          animation: drawConceptLine 0.5s cubic-bezier(0.16, 1, 0.3, 1) 0.95s forwards;
+          opacity: 0;
+        }
+        .vuelto-line-3 {
+          transform-origin: 125px 165px;
+          animation: drawConceptLine 0.5s cubic-bezier(0.16, 1, 0.3, 1) 1.15s forwards;
+          opacity: 0;
+        }
+
+        /* 3. Billete inclinado que surge sobre la esquina inferior derecha */
+        @keyframes popBanknote {
+          0% { transform: translate(242px, 195px) rotate(-10deg) scale(0.2); opacity: 0; }
+          65% { transform: translate(232px, 180px) rotate(18deg) scale(1.08); opacity: 1; }
+          100% { transform: translate(235px, 184px) rotate(15deg) scale(1); opacity: 1; }
+        }
+        .vuelto-banknote-group {
+          animation: popBanknote 0.85s cubic-bezier(0.34, 1.56, 0.64, 1) 1.25s forwards;
+          opacity: 0;
+        }
+
+        /* 4. Flecha curva con movimiento circular ascendente antihorario (devolución / vuelto rápido) */
+        @keyframes spinReturnArrow {
+          0% {
+            stroke-dashoffset: 320;
+            transform: translate(235px, 202px) rotate(80deg);
+            opacity: 0;
+          }
+          25% { opacity: 1; }
+          100% {
+            stroke-dashoffset: 0;
+            transform: translate(235px, 202px) rotate(-25deg);
+            opacity: 1;
+          }
+        }
+        .vuelto-return-arrow {
+          stroke-dasharray: 320;
+          stroke-dashoffset: 320;
+          animation: spinReturnArrow 1.05s cubic-bezier(0.22, 1, 0.36, 1) 1.45s forwards;
+          opacity: 0;
+        }
+
+        /* 5. Destello luminoso verde-amarillento en los bordes */
+        @keyframes limeGlowPulse {
+          0% { filter: drop-shadow(0 0 0px rgba(163, 230, 53, 0)); }
+          45% { filter: drop-shadow(0 0 24px rgba(163, 230, 53, 0.95)) drop-shadow(0 0 45px rgba(6, 214, 160, 0.6)); }
+          100% { filter: drop-shadow(0 0 12px rgba(16, 185, 129, 0.7)); }
+        }
+        .vuelto-glow-effect {
+          animation: limeGlowPulse 1.4s ease-out 1.55s forwards;
+        }
+
+        /* 6. Entrada de la tipografía "vuelto" geométrica limpia con fade-in y subida */
+        @keyframes typographyAscend {
+          0% { opacity: 0; transform: translateY(18px); }
+          100% { opacity: 1; transform: translateY(0); }
+        }
+        .vuelto-brand-text {
+          animation: typographyAscend 0.75s cubic-bezier(0.16, 1, 0.3, 1) 2.15s forwards;
+          opacity: 0;
+        }
+
+        /* 7. Tagline con desplazamiento sutil */
+        @keyframes taglineFadeIn {
+          0% { opacity: 0; letter-spacing: 5px; }
+          100% { opacity: 0.9; letter-spacing: 3.5px; }
+        }
+        .vuelto-tagline-text {
+          animation: taglineFadeIn 0.75s cubic-bezier(0.16, 1, 0.3, 1) 2.45s forwards;
+          opacity: 0;
+        }
+      `}</style>
+
+      {/* ISOTIPO ANIMADO */}
+      <div className="vuelto-glow-effect" style={{ width: '380px', height: '270px', position: 'relative' }}>
+        <svg viewBox="0 0 380 270" width="100%" height="100%" style={{ overflow: 'visible' }}>
+          <defs>
+            <linearGradient id="contourGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stopColor="#06D6A0" />
+              <stop offset="55%" stopColor="#10B981" />
+              <stop offset="100%" stopColor="#84CC16" />
+            </linearGradient>
+
+            <linearGradient id="billGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stopColor="#06D6A0" />
+              <stop offset="50%" stopColor="#10B981" />
+              <stop offset="100%" stopColor="#A3E635" />
+            </linearGradient>
+
+            <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+              <feDropShadow dx="0" dy="6" stdDeviation="8" floodColor="#000000" floodOpacity="0.45" />
+            </filter>
+          </defs>
+
+          {/* 1. Factura / Comprobante con borde enrollado superior y zig-zag inferior */}
+          <path
+            className="vuelto-invoice-contour"
+            d="M 110,65 L 235,65 Q 250,65 250,80 L 250,205 L 242,200 L 230,205 L 218,200 L 206,205 L 194,200 L 182,205 L 170,200 L 158,205 L 146,200 L 134,205 L 122,200 L 110,205 L 98,200 L 98,80 Q 98,65 110,65 Z"
+            fill="none"
+            stroke="url(#contourGrad)"
+            strokeWidth="4.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            filter="url(#softShadow)"
+          />
+
+          {/* 2. Tres líneas internas (conceptos de cobro) */}
+          <line
+            className="vuelto-line-1"
+            x1="125"
+            y1="105"
+            x2="225"
+            y2="105"
+            stroke="#06D6A0"
+            strokeWidth="3.5"
+            strokeLinecap="round"
+          />
+          <line
+            className="vuelto-line-2"
+            x1="125"
+            y1="135"
+            x2="205"
+            y2="135"
+            stroke="#10B981"
+            strokeWidth="3.5"
+            strokeLinecap="round"
+          />
+          <line
+            className="vuelto-line-3"
+            x1="125"
+            y1="165"
+            x2="185"
+            y2="165"
+            stroke="#84CC16"
+            strokeWidth="3.5"
+            strokeLinecap="round"
+          />
+
+          {/* 3. Billete inclinado en la esquina inferior derecha */}
+          <g className="vuelto-banknote-group">
+            <rect
+              x="-48"
+              y="-28"
+              width="96"
+              height="56"
+              rx="7"
+              fill="#062F3B"
+              stroke="url(#billGrad)"
+              strokeWidth="3.5"
+              filter="url(#softShadow)"
+            />
+            <circle cx="0" cy="0" r="14" fill="none" stroke="#A3E635" strokeWidth="2.5" />
+            <text
+              x="0"
+              y="5"
+              textAnchor="middle"
+              fill="#A3E635"
+              fontSize="15"
+              fontWeight="bold"
+              fontFamily="sans-serif"
+            >
+              $
+            </text>
+            <circle cx="-36" cy="-18" r="2.5" fill="#10B981" />
+            <circle cx="36" cy="-18" r="2.5" fill="#10B981" />
+            <circle cx="-36" cy="18" r="2.5" fill="#10B981" />
+            <circle cx="36" cy="18" r="2.5" fill="#10B981" />
+          </g>
+
+          {/* 4. Flecha curva con movimiento circular ascendente antihorario (el "vuelto") */}
+          <g className="vuelto-return-arrow">
+            <path
+              d="M -38,28 A 44 44 0 1 1 35,18"
+              fill="none"
+              stroke="#A3E635"
+              strokeWidth="4"
+              strokeLinecap="round"
+            />
+            <polygon
+              points="35,10 44,22 30,24"
+              fill="#A3E635"
+            />
+          </g>
+        </svg>
+      </div>
+
+      {/* 5. Entrada de la tipografía "vuelto" geométrica blanca */}
+      <div className="vuelto-brand-text" style={{ textAlign: 'center', marginTop: '16px' }}>
+        <h1
+          style={{
+            fontSize: '44px',
+            fontWeight: '900',
+            color: '#FFFFFF',
+            letterSpacing: '3px',
+            lineHeight: 1,
+            margin: 0,
+            textShadow: '0 4px 18px rgba(0, 0, 0, 0.4)',
+            fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", sans-serif',
+          }}
+        >
+          vuelto
+          <span style={{ color: '#A3E635' }}>.</span>
+        </h1>
+        <p
+          className="vuelto-tagline-text"
+          style={{
+            fontSize: '11px',
+            fontWeight: '700',
+            color: '#A3E635',
+            marginTop: '8px',
+            textTransform: 'uppercase',
+            fontFamily: 'monospace, sans-serif',
+          }}
+        >
+          PUNTO DE VENTA & FACTURACIÓN INTELIGENTE
+        </p>
+      </div>
+
+      {/* Botón sutil de Saltar / Continuar */}
+      <button
+        onClick={handleSkip}
+        style={{
+          position: 'absolute',
+          bottom: '28px',
+          backgroundColor: 'rgba(255, 255, 255, 0.08)',
+          border: '1px solid rgba(255, 255, 255, 0.15)',
+          color: '#94A3B8',
+          fontSize: '12px',
+          fontWeight: '600',
+          padding: '8px 18px',
+          borderRadius: '20px',
+          cursor: 'pointer',
+          backdropFilter: 'blur(8px)',
+          transition: 'all 0.2s ease',
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.color = '#FFFFFF';
+          e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.16)';
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.color = '#94A3B8';
+          e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.08)';
+        }}
+      >
+        Saltar intro →
+      </button>
+    </div>
+  );
+};
+
+// =========================================================================
+// 🚀 MODAL DE ONBOARDING INTERACTIVO PARA COMERCIOS VENEZOLANOS
+// =========================================================================
+export const VueltoOnboardingModal: React.FC<{ onClose: () => void; onPlaySplash: () => void }> = ({ onClose, onPlaySplash }) => {
+  const [step, setStep] = useState(0);
+
+  const steps = [
+    {
+      title: '📸 Escáner con Cámara & Control de Margen en Vivo',
+      desc: 'Agrega productos en segundos leyendo códigos EAN-13 / 759 directamente con la cámara de tu teléfono o laptop. Al ingresar el costo al mayor y precio de salida, el sistema calcula tu ganancia neta en $ y margen % al instante.',
+      badge: 'Facturación Ágil',
+      highlight: '¡Evita pérdidas de inventario fijando márgenes reales!',
+    },
+    {
+      title: '💱 Monitor Multitasa SENIAT & Protección Inflacionaria',
+      desc: 'Consulta en tiempo real la Tasa Oficial BCV, Paralelo, Euro y USDT Binance. Al emitir una factura, la tasa se congela legalmente según la Providencia 0071, calculando automáticamente el 3% de IGTF en pagos en divisas.',
+      badge: 'Cumplimiento Legal SENIAT',
+      highlight: 'Soporte bimoneda integral con historial de 7 días.',
+    },
+    {
+      title: '💬 Cobranza con Mora & Reposición por WhatsApp en 1 Clic',
+      desc: 'Recupera el dinero de tus cuentas por cobrar enviando recordatorios formales a clientes con recargo por mora configurable. Además, genera órdenes de compra a proveedores con lo que necesitas reponer con un solo clic.',
+      badge: 'Flujo de Caja Garantizado',
+      highlight: 'Abre directo en WhatsApp sin configurar APIs costosas.',
+    },
+  ];
+
+  const current = steps[step];
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(7, 31, 39, 0.85)', backdropFilter: 'blur(10px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999, padding: '20px' }}>
+      <div style={{ maxWidth: '520px', width: '100%', backgroundColor: '#0B3B49', borderRadius: '20px', border: '1px solid #10B98155', padding: '32px', boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.7)', color: '#F8FAFC', position: 'relative' }}>
+        <button
+          onClick={onClose}
+          style={{ position: 'absolute', top: '18px', right: '18px', background: 'none', border: 'none', color: '#94A3B8', cursor: 'pointer' }}
+        >
+          <X size={20} />
+        </button>
+
+        <div style={{ display: 'inline-flex', padding: '6px 14px', borderRadius: '20px', backgroundColor: '#10B98122', border: '1px solid #10B981', color: '#A3E635', fontSize: '11px', fontWeight: 'bold', marginBottom: '16px' }}>
+          {current.badge} • Paso {step + 1} de 3
+        </div>
+
+        <h3 style={{ fontSize: '20px', fontWeight: 'bold', color: '#FFFFFF', marginBottom: '12px', lineHeight: 1.3 }}>
+          {current.title}
+        </h3>
+
+        <p style={{ fontSize: '14px', color: '#CBD5E1', lineHeight: 1.6, marginBottom: '20px' }}>
+          {current.desc}
+        </p>
+
+        <div style={{ backgroundColor: '#062F3B', padding: '12px 16px', borderRadius: '10px', borderLeft: '4px solid #A3E635', fontSize: '13px', color: '#A3E635', marginBottom: '28px' }}>
+          💡 {current.highlight}
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: '1px solid #155E75', paddingTop: '18px' }}>
+          <div style={{ display: 'flex', gap: '6px' }}>
+            {steps.map((_, i) => (
+              <div
+                key={i}
+                style={{
+                  width: i === step ? '24px' : '8px',
+                  height: '8px',
+                  borderRadius: '4px',
+                  backgroundColor: i === step ? '#A3E635' : '#155E75',
+                  transition: 'all 0.2s',
+                }}
+              />
+            ))}
+          </div>
+
+          <div style={{ display: 'flex', gap: '10px' }}>
+            {step > 0 && (
+              <button
+                onClick={() => setStep(step - 1)}
+                style={{ padding: '8px 16px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#CBD5E1', fontSize: '13px', cursor: 'pointer' }}
+              >
+                Anterior
+              </button>
+            )}
+
+            {step < steps.length - 1 ? (
+              <button
+                onClick={() => setStep(step + 1)}
+                style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 18px', borderRadius: '8px', border: 'none', backgroundColor: '#10B981', color: '#FFFFFF', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer' }}
+              >
+                <span>Siguiente</span>
+                <ChevronRight size={16} />
+              </button>
+            ) : (
+              <button
+                onClick={onClose}
+                style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 20px', borderRadius: '8px', border: 'none', backgroundColor: '#A3E635', color: '#062F3B', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer' }}
+              >
+                <span>¡Entendido, Empezar!</span>
+                <Check size={16} />
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export const App = () => {
-  // Estado de Autenticación
-  const [token, setToken] = useState<string | null>(() => localStorage.getItem('vuelto_token'));
-  const [user, setUser] = useState<UserProfile | null>(() => {
-    const saved = localStorage.getItem('vuelto_user');
-    return saved ? JSON.parse(saved) : null;
+  // Control de Animación Splash / Intro y Onboarding
+  const [showSplash, setShowSplash] = useState<boolean>(() => {
+    try {
+      return sessionStorage.getItem('vuelto_splash_shown') !== 'true';
+    } catch {
+      return true;
+    }
   });
+  const [showOnboarding, setShowOnboarding] = useState<boolean>(false);
+
+  // Estado de Autenticación con Persistencia Robusta
+  const [token, setToken] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem('vuelto_token');
+    } catch {
+      return null;
+    }
+  });
+  const [user, setUser] = useState<UserProfile | null>(() => {
+    try {
+      const saved = localStorage.getItem('vuelto_user');
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  // Verificación de Sesión en segundo plano (no desloguea en recarga)
+  useEffect(() => {
+    const savedToken = localStorage.getItem('vuelto_token');
+    if (savedToken) {
+      fetch('/api/v1/exchange-rates/monitor', {
+        headers: { Authorization: 'Bearer ' + savedToken },
+      })
+        .then((res) => {
+          if (res.status === 401) {
+            console.warn('Sesión revocada o expirada. Solicitando credenciales.');
+            localStorage.removeItem('vuelto_token');
+            localStorage.removeItem('vuelto_user');
+            setToken(null);
+            setUser(null);
+          }
+        })
+        .catch(() => {});
+    }
+
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === 'vuelto_token') setToken(e.newValue);
+      if (e.key === 'vuelto_user') {
+        try { setUser(e.newValue ? JSON.parse(e.newValue) : null); } catch { setUser(null); }
+      }
+    };
+    window.addEventListener('storage', handleStorageChange);
+    return () => window.removeEventListener('storage', handleStorageChange);
+  }, []);
 
   // Credenciales en Login
   const [loginUsername, setLoginUsername] = useState('admin');
@@ -496,7 +979,9 @@ export const App = () => {
   // Si no está autenticado, renderizar Login Dinámico
   if (!token) {
     return (
-      <div style={{ display: 'flex', minHeight: '100vh', backgroundColor: '#0B1329', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
+      <div style={{ display: 'flex', minHeight: '100vh', backgroundColor: '#071F27', backgroundImage: 'radial-gradient(circle at 50% 25%, #0B3B49 0%, #071F27 100%)', alignItems: 'center', justifyContent: 'center', padding: '20px', position: 'relative' }}>
+        {showSplash && <VueltoSplashScreen onFinish={() => setShowSplash(false)} />}
+        {showOnboarding && <VueltoOnboardingModal onClose={() => setShowOnboarding(false)} onPlaySplash={() => { setShowOnboarding(false); setShowSplash(true); }} />}
         <div style={{ maxWidth: '420px', width: '100%', backgroundColor: '#1E293B', borderRadius: '16px', padding: '36px', boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.5)', border: '1px solid #334155' }}>
           <div style={{ textAlign: 'center', marginBottom: '28px' }}>
             <div style={{ display: 'inline-flex', padding: '14px', borderRadius: '50%', backgroundColor: '#0284C722', color: '#38BDF8', marginBottom: '12px' }}>
@@ -550,20 +1035,38 @@ export const App = () => {
 
           <div style={{ marginTop: '24px', paddingTop: '20px', borderTop: '1px solid #334155', textAlign: 'center' }}>
             <p style={{ fontSize: '12px', color: '#64748B', marginBottom: '8px' }}>Accesos de Demostración:</p>
-            <div style={{ display: 'flex', gap: '8px', justifyContent: 'center' }}>
+            <div style={{ display: 'flex', gap: '8px', justifyContent: 'center', marginBottom: '14px' }}>
               <button
                 type="button"
                 onClick={() => { setLoginUsername('admin'); setLoginPassword('password'); }}
-                style={{ fontSize: '11px', padding: '6px 12px', borderRadius: '6px', border: '1px solid #334155', backgroundColor: '#0F172A', color: '#38BDF8', cursor: 'pointer' }}
+                style={{ fontSize: '11px', padding: '6px 12px', borderRadius: '6px', border: '1px solid #10B98144', backgroundColor: '#062F3B', color: '#38BDF8', cursor: 'pointer' }}
               >
                 Cargar Admin Demo
               </button>
               <button
                 type="button"
                 onClick={() => { setLoginUsername('cajero1'); setLoginPassword('password'); }}
-                style={{ fontSize: '11px', padding: '6px 12px', borderRadius: '6px', border: '1px solid #334155', backgroundColor: '#0F172A', color: '#10B981', cursor: 'pointer' }}
+                style={{ fontSize: '11px', padding: '6px 12px', borderRadius: '6px', border: '1px solid #10B98144', backgroundColor: '#062F3B', color: '#A3E635', cursor: 'pointer' }}
               >
                 Cargar Cajero Demo
+              </button>
+            </div>
+            <div style={{ display: 'flex', gap: '8px', justifyContent: 'center' }}>
+              <button
+                type="button"
+                onClick={() => setShowSplash(true)}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '11px', padding: '5px 12px', borderRadius: '6px', border: '1px solid #155E75', backgroundColor: 'transparent', color: '#A3E635', cursor: 'pointer' }}
+              >
+                <Play size={12} />
+                <span>Ver Intro de Marca</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowOnboarding(true)}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '11px', padding: '5px 12px', borderRadius: '6px', border: '1px solid #155E75', backgroundColor: 'transparent', color: '#38BDF8', cursor: 'pointer' }}
+              >
+                <HelpCircle size={12} />
+                <span>Guía Rápida</span>
               </button>
             </div>
           </div>
@@ -573,7 +1076,9 @@ export const App = () => {
   }
 
   return (
-    <div style={{ display: 'flex', minHeight: '100vh', backgroundColor: '#0B1329', color: '#F8FAFC' }}>
+    <div style={{ display: 'flex', minHeight: '100vh', backgroundColor: '#071F27', color: '#F8FAFC', position: 'relative' }}>
+      {showSplash && <VueltoSplashScreen onFinish={() => setShowSplash(false)} />}
+      {showOnboarding && <VueltoOnboardingModal onClose={() => setShowOnboarding(false)} onPlaySplash={() => { setShowOnboarding(false); setShowSplash(true); }} />}
       {/* SIDEBAR LATERAL */}
       <aside style={{ width: '280px', backgroundColor: '#1E293B', padding: '24px 16px', borderRight: '1px solid #334155', display: 'flex', flexDirection: 'column' }}>
         <div style={{ marginBottom: '28px' }}>
@@ -631,8 +1136,26 @@ export const App = () => {
           ))}
         </nav>
 
+        {/* BOTONES DE EXPERIENCIA SENIOR */}
+        <div style={{ display: 'flex', gap: '6px', marginBottom: '16px' }}>
+          <button
+            onClick={() => setShowSplash(true)}
+            style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', padding: '8px 10px', borderRadius: '8px', border: '1px solid #10B98144', backgroundColor: '#062F3B', color: '#A3E635', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+          >
+            <Play size={13} />
+            <span>Intro</span>
+          </button>
+          <button
+            onClick={() => setShowOnboarding(true)}
+            style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', padding: '8px 10px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#38BDF8', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+          >
+            <HelpCircle size={13} />
+            <span>Guía</span>
+          </button>
+        </div>
+
         {/* MONITOR DE TASA EN SIDEBAR */}
-        <div style={{ backgroundColor: '#0F172A', padding: '14px', borderRadius: '10px', border: '1px solid #334155', marginBottom: '16px' }}>
+        <div style={{ backgroundColor: '#062F3B', padding: '14px', borderRadius: '10px', border: '1px solid #10B98133', marginBottom: '16px' }}>
           <p style={{ fontSize: '11px', color: '#64748B', marginBottom: '2px' }}>Tasa Oficial BCV:</p>
           <p style={{ fontSize: '17px', fontWeight: 'bold', color: '#10B981' }}>{bcvRate.toFixed(2)} Bs / USD</p>
           <p style={{ fontSize: '10px', color: '#94A3B8', marginTop: '2px' }}>Congelamiento por factura</p>
