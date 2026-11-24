@@ -1,6 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import path from 'path';
+import fs from 'fs';
 import { apiRouter } from './routes/api.routes.js';
 import { errorHandler } from './middlewares/error.middleware.js';
 import { pool } from './db/index.js';
@@ -49,6 +51,21 @@ export const createApp = () => {
 
   // Rutas de API v1
   app.use('/api/v1', apiRouter);
+
+  // Servir frontend web de administración (SPA)
+  const publicDir = fs.existsSync(path.resolve(__dirname, '../public'))
+    ? path.resolve(__dirname, '../public')
+    : path.resolve(process.cwd(), 'public');
+
+  if (fs.existsSync(publicDir)) {
+    app.use(express.static(publicDir));
+    app.use((req, res, next) => {
+      if (req.method === 'GET' && !req.path.startsWith('/api') && !req.path.startsWith('/health')) {
+        return res.sendFile(path.join(publicDir, 'index.html'));
+      }
+      next();
+    });
+  }
 
   // Manejador centralizado de errores
   app.use(errorHandler);
