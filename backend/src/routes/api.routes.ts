@@ -43,6 +43,15 @@ apiRouter.get('/exchange-rates/current', async (req, res, next) => {
   }
 });
 
+apiRouter.get('/exchange-rates/monitor', async (req, res, next) => {
+  try {
+    const monitor = await ExchangeRateService.getMonitorRates(req.tenantId!);
+    res.json(monitor);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // --- PAGOS Y PASARELA C2P ---
 apiRouter.post('/payments/c2p/intent', PaymentController.createIntent);
 
@@ -101,6 +110,8 @@ apiRouter.post(
 apiRouter.get('/suppliers/:id/interactions', SupplierController.getInteractions);
 
 // --- VENTAS Y FACTURACIÓN ATÓMICA ---
+apiRouter.get('/sales', SalesController.list);
+apiRouter.get('/sales/:id', SalesController.getById);
 apiRouter.post(
   '/sales',
   requireCashierOrAdmin,
