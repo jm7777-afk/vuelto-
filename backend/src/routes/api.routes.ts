@@ -24,6 +24,8 @@ import { PurchaseOrderController } from '../controllers/purchase-order.controlle
 import { ReceivablesController } from '../controllers/receivables.controller.js';
 import { LateFeeController } from '../controllers/late-fee.controller.js';
 import { FinancesController } from '../controllers/finances.controller.js';
+import { ConfigController } from '../controllers/config.controller.js';
+import { AuditController } from '../controllers/audit.controller.js';
 import { ExchangeRateService } from '../services/exchange-rate.service.js';
 import { FiscalReportService } from '../services/fiscal-report.service.js';
 
@@ -66,6 +68,7 @@ apiRouter.post('/payments/c2p/intent', PaymentController.createIntent);
 apiRouter.get('/products/barcode/:barcode', ProductController.findByBarcode);
 apiRouter.get('/products', ProductController.list);
 apiRouter.post('/products', requireAdmin, validateRequest({ body: createProductSchema }), ProductController.create);
+apiRouter.post('/products/apply-global-margin', requireAdmin, ProductController.applyGlobalMargin);
 apiRouter.put('/products/:id', requireAdmin, ProductController.update);
 apiRouter.delete('/products/:id', requireAdmin, ProductController.delete);
 
@@ -73,6 +76,7 @@ apiRouter.delete('/products/:id', requireAdmin, ProductController.delete);
 apiRouter.get('/inventory/stock', requireCashierOrAdmin, InventoryController.getStock);
 apiRouter.get('/inventory/kardex', requireAdmin, InventoryController.getKardex);
 apiRouter.get('/inventory/low-stock', requireAdmin, InventoryController.getLowStock);
+apiRouter.get('/inventory/replenishment-list', requireAdmin, InventoryController.getReplenishmentList);
 apiRouter.post('/inventory/adjust', requireAdmin, InventoryController.adjustStock);
 
 // --- CLIENTES Y CONTACTO ---
@@ -192,3 +196,13 @@ apiRouter.get('/reports/sales-book/json', requireAdmin, async (req, res, next) =
 // --- VALES DE CAMBIO (VUELTOS) ---
 apiRouter.get('/vouchers/:code', VoucherController.getByCode);
 apiRouter.post('/vouchers/redeem', requireCashierOrAdmin, VoucherController.redeem);
+
+// --- CONFIGURACIÓN DEL NEGOCIO, TASAS Y RÉGIMEN FISCAL ---
+apiRouter.get('/config', requireCashierOrAdmin, ConfigController.getConfig);
+apiRouter.put('/config', requireAdmin, ConfigController.updateConfig);
+apiRouter.get('/exchange-rates/active', requireCashierOrAdmin, ConfigController.getActiveRate);
+apiRouter.post('/exchange-rates/select-active', requireAdmin, ConfigController.selectActiveRate);
+
+// --- AUDITORÍA INMUTABLE Y RESPALDOS (BACKUPS) ---
+apiRouter.get('/audit/logs', requireAdmin, AuditController.listLogs);
+apiRouter.get('/admin/backup', requireAdmin, AuditController.downloadBackup);

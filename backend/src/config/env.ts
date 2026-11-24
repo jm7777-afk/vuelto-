@@ -1,5 +1,9 @@
+import path from 'path';
 import { z } from 'zod';
 import dotenv from 'dotenv';
+
+// Carga resiliente: busca en backend/.env o en el cwd actual
+dotenv.config({ path: path.join(process.cwd(), 'backend', '.env') });
 dotenv.config();
 
 const envSchema = z.object({

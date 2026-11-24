@@ -14,6 +14,7 @@ import {
   warehouses,
   idempotencyKeys,
   tenants,
+  tenantConfigurations,
 } from '../db/schema.js';
 import { VoucherService } from './voucher.service.js';
 import { AuditService } from './audit.service.js';
@@ -39,6 +40,7 @@ export interface ConfirmSaleInput {
   exchangeRateId: string;
   lines: ConfirmSaleLineInput[];
   payments: ConfirmSalePaymentInput[];
+  adminAuthorized?: boolean;
   vueltoOption?: {
     type: 'CASH' | 'WALLET_CREDIT' | 'CHANGE_VOUCHER' | 'PAGO_MOVIL';
     amountUsd: number;
@@ -94,6 +96,17 @@ export class SalesService {
 
       if (!tenant) throw new Error('Tenant no encontrado');
 
+      // A2. Obtener Configuración del Tenant (Desafiliación IVA/IGTF, Margen y Reglas de Mora)
+      const [config] = await tx
+        .select()
+        .from(tenantConfigurations)
+        .where(eq(tenantConfigurations.tenantId, tenantId))
+        .limit(1);
+
+      const enableIva = config ? config.enableIva : true;
+      const enableIgtf = config ? config.enableIgtf : true;
+      const requireAdminForDebt = config ? config.requireAdminForOverdueDebt : true;
+
       // B. Validar Almacén
       let warehouseId = input.warehouseId;
       if (!warehouseId) {
@@ -123,7 +136,7 @@ export class SalesService {
 
       const rateValue = parseFloat(rateSnapshot.rate);
 
-      // D. Validar Cliente
+      // D. Validar Cliente y verificación de mora/bloqueo de crédito
       const [customer] = await tx
         .select()
         .from(customers)
@@ -131,6 +144,16 @@ export class SalesService {
 
       if (!customer) {
         throw new Error('Cliente no encontrado');
+      }
+
+      const customerBalanceDue = parseFloat(customer.balanceDue || '0');
+      const isSpecialCustomer = (customer as any).isSpecialMoraCustomer || customerBalanceDue > 0;
+      const hasCreditPayment = input.payments.some((p) => p.paymentMethod === 'CREDIT_DEBT');
+
+      if (hasCreditPayment && isSpecialCustomer && requireAdminForDebt && !input.adminAuthorized) {
+        throw new Error(
+          `El cliente "${customer.name}" presenta saldo deudor / mora activa ($${customerBalanceDue.toFixed(2)} USD). Esta venta a crédito requiere autorización del Administrador.`
+        );
       }
 
       // E. Recalcular Líneas, Precios, Bases Imponibles e IVA
@@ -158,7 +181,8 @@ export class SalesService {
         const taxRate = parseFloat(prod.taxRate);
         let lineTax = 0;
 
-        if (prod.isExempt || taxRate === 0) {
+        // Si el comercio desafilió el IVA (emprendimiento no registrado) o el producto es exento
+        if (!enableIva || prod.isExempt || taxRate === 0) {
           exemptAmountUsd += lineSubtotal;
         } else if (taxRate === 16.0) {
           taxableBase16Usd += lineSubtotal;
@@ -174,11 +198,12 @@ export class SalesService {
 
         processedLines.push({
           productId: prod.id,
+          name: prod.name,
           quantity: line.quantity,
           unitCostUsd: parseFloat(prod.costPriceUsd),
           unitPriceUsd: unitPrice,
-          taxRate,
-          isExempt: prod.isExempt,
+          taxRate: enableIva ? taxRate : 0,
+          isExempt: !enableIva || prod.isExempt,
           subtotalUsd: lineSubtotal,
           taxAmountUsd: lineTax,
           totalUsd: lineSubtotal + lineTax,
@@ -229,7 +254,7 @@ export class SalesService {
       }
 
       let igtfAmountUsd = 0;
-      if (tenant.isSpecialTaxpayer && cashUsdPayments > 0) {
+      if (enableIgtf && tenant.isSpecialTaxpayer && cashUsdPayments > 0) {
         igtfAmountUsd = cashUsdPayments * 0.03;
       }
 
@@ -448,6 +473,25 @@ export class SalesService {
         channel: 'POS_MOBILE',
       });
 
+      const cleanPhone = customer.phone ? customer.phone.replace(/\D/g, '') : '';
+      const whatsappText = `*${tenant.businessName || 'VUELTO POS'}* - *Nota de Entrega / Factura Digital*
+*N°:* ${invoiceFormattedNumber}
+*Fecha:* ${new Date().toLocaleString('es-VE')}
+*Cliente:* ${customer.name} (${customer.documentType}-${customer.documentNumber})
+--------------------------------
+${processedLines.map((l: any) => `• ${l.quantity}x ${l.name || 'Ítem'}: $${l.totalUsd.toFixed(2)} (${l.totalBs.toFixed(2)} Bs)`).join('\n')}
+--------------------------------
+*Total a Pagar:* $${totalAmountUsd.toFixed(2)} USD ≈ ${totalAmountBs.toFixed(2)} Bs
+*Tasa Oficial:* ${rateValue.toFixed(2)} Bs/$
+*Pago:* ${input.payments.map((p) => `${p.paymentMethod} ($${p.amount.toFixed(2)})`).join(', ')}
+${vueltoIssued ? `*Vuelto (${vueltoIssued.type}):* $${vueltoIssued.amountUsd} USD (${vueltoIssued.amountBs} Bs)` : ''}
+
+_¡Gracias por su compra! Conserve este comprobante digital._`;
+
+      const whatsappUrl = cleanPhone
+        ? `https://wa.me/${cleanPhone.startsWith('58') ? cleanPhone : '58' + cleanPhone.replace(/^0+/, '')}?text=${encodeURIComponent(whatsappText)}`
+        : null;
+
       const responsePayload = {
         id: sale.id,
         invoiceFormattedNumber,
@@ -456,6 +500,11 @@ export class SalesService {
         totalAmountBs: totalAmountBs.toFixed(2),
         igtfAmountUsd: igtfAmountUsd.toFixed(2),
         vueltoIssued,
+        digitalDeliveryNote: {
+          whatsappText,
+          whatsappUrl,
+          customerPhone: customer.phone,
+        },
       };
 
       // M. Guardar respuesta en Idempotency Keys (TTL: 24 horas)

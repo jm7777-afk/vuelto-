@@ -121,6 +121,7 @@ export const products = pgTable(
       .notNull()
       .references(() => tenants.id, { onDelete: 'cascade' }),
     categoryId: uuid('category_id').references(() => categories.id, { onDelete: 'set null' }),
+    supplierId: uuid('supplier_id').references(() => suppliers.id, { onDelete: 'set null' }),
     sku: varchar('sku', { length: 50 }),
     name: varchar('name', { length: 150 }).notNull(),
     description: text('description'),
@@ -230,6 +231,7 @@ export const customers = pgTable(
     fiscalAddress: text('fiscal_address'),
     creditLimit: numeric('credit_limit', { precision: 14, scale: 2 }).default('0.00').notNull(),
     balanceDue: numeric('balance_due', { precision: 14, scale: 2 }).default('0.00').notNull(), // Positivo: debe. Negativo: saldo a favor (monedero)
+    isSpecialMoraCustomer: boolean('is_special_mora_customer').default(false).notNull(), // Requiere aprobación especial de admin
     createdVia: varchar('created_via', { length: 20 }).notNull(), // 'POS_QUICK', 'ADMIN', 'IMPORT'
     isActive: boolean('is_active').default(true).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
@@ -531,6 +533,21 @@ export const tenantConfigurations = pgTable(
     lateFeeGraceDays: integer('late_fee_grace_days').default(3).notNull(),
     autoApplyLateFee: boolean('auto_apply_late_fee').default(true).notNull(),
     currencyPreference: varchar('currency_preference', { length: 10 }).default('USD').notNull(),
+    
+    // Tasa Activa Seleccionada por el Administrador
+    activeRateSource: varchar('active_rate_source', { length: 20 }).default('BCV').notNull(), // 'BCV', 'PARALELO', 'EURO', 'CUSTOM'
+    customRateValue: numeric('custom_rate_value', { precision: 14, scale: 4 }).default('0.0000').notNull(),
+    
+    // Régimen Fiscal Flexible (Emprendimientos / Desafiliación de IVA e IGTF)
+    enableIva: boolean('enable_iva').default(true).notNull(), // Si es false, se emite a 0% IVA (Emprendimientos / Negocios no registrados)
+    enableIgtf: boolean('enable_igtf').default(true).notNull(), // Si es false, 0% IGTF
+    defaultIvaPercentage: numeric('default_iva_percentage', { precision: 5, scale: 2 }).default('16.00').notNull(),
+    
+    // Margen de Ganancia Global Predeterminado para Inventario (%)
+    defaultProfitMargin: numeric('default_profit_margin', { precision: 5, scale: 2 }).default('30.00').notNull(),
+    
+    // Bloqueo y Aprobación de Administrador para Clientes Morosos
+    requireAdminForOverdueDebt: boolean('require_admin_for_overdue_debt').default(true).notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   }
 );

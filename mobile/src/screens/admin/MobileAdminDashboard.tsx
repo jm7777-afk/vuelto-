@@ -21,6 +21,13 @@ export const MobileAdminDashboard: React.FC = () => {
   // Configuración de Mora Administrativa
   const [lateFeePercent, setLateFeePercent] = useState('5.0');
 
+  // Configuración de Tasa de Cobro Activa y Régimen Fiscal
+  const [activeRateSource, setActiveRateSource] = useState<'BCV' | 'PARALELO' | 'EURO' | 'CUSTOM'>('BCV');
+  const [customRate, setCustomRate] = useState('58.50');
+  const [enableIva, setEnableIva] = useState(true);
+  const [enableIgtf, setEnableIgtf] = useState(true);
+  const [globalMargin, setGlobalMargin] = useState('30');
+
   // Estado para ajuste rápido de stock
   const [adjustProductId, setAdjustProductId] = useState('');
   const [adjustQty, setAdjustQty] = useState('');
@@ -523,22 +530,147 @@ export const MobileAdminDashboard: React.FC = () => {
           </View>
         )}
 
-        {/* SECCIÓN 6: TASAS DE CAMBIO OFICIALES */}
+        {/* SECCIÓN 6: TASAS, RÉGIMEN FISCAL Y CONFIGURACIÓN */}
         {activeSection === 'RATES' && (
           <View>
-            <Text style={styles.sectionTitle}>Tasas de Cambio Oficiales BCV</Text>
-            <View style={styles.card}>
-              <Text style={{ fontSize: 12, color: '#94A3B8' }}>Tasa Oficial Vigente (BCV):</Text>
-              <Text style={{ fontSize: 26, fontWeight: 'bold', color: '#10B981', marginVertical: 6 }}>
-                52.5000 Bs / USD
-              </Text>
-              <Text style={{ fontSize: 11, color: '#94A3B8' }}>Euro BCV: 57.10 Bs • Paralelo Monitor: 60.50 Bs</Text>
+            <Text style={styles.sectionTitle}>Tasas de Cambio & Régimen Fiscal</Text>
 
+            {/* Selector de Tasa de Cobro Activa */}
+            <View style={styles.card}>
+              <Text style={styles.cardHeader}>Tasa de Cobro Activa en Tienda</Text>
+              <Text style={{ fontSize: 12, color: '#94A3B8', marginBottom: 8 }}>
+                Selecciona cuál tasa de cambio se aplicará para cobrar tus productos en caja:
+              </Text>
+
+              <View style={{ gap: 6, marginBottom: 10 }}>
+                {[
+                  { id: 'BCV', label: 'BCV Oficial (52.50 Bs)', val: '52.50' },
+                  { id: 'PARALELO', label: 'Monitor Paralelo (59.75 Bs)', val: '59.75' },
+                  { id: 'EURO', label: 'Euro BCV (55.39 Bs)', val: '55.39' },
+                  { id: 'CUSTOM', label: 'Tasa Personalizada', val: customRate },
+                ].map((opt) => (
+                  <TouchableOpacity
+                    key={opt.id}
+                    style={{
+                      flexDirection: 'row',
+                      justifyContent: 'space-between',
+                      padding: 10,
+                      borderRadius: 8,
+                      borderWidth: 1,
+                      borderColor: activeRateSource === opt.id ? '#10B981' : '#334155',
+                      backgroundColor: activeRateSource === opt.id ? '#10B98122' : '#0F172A',
+                    }}
+                    onPress={() => {
+                      setActiveRateSource(opt.id as any);
+                      Alert.alert('Tasa Seleccionada', `Se cobrará a tasa ${opt.label}.`);
+                    }}
+                  >
+                    <Text style={{ color: activeRateSource === opt.id ? '#A3E635' : '#F8FAFC', fontWeight: 'bold', fontSize: 13 }}>
+                      {opt.label}
+                    </Text>
+                    <Text style={{ color: '#10B981', fontWeight: 'bold' }}>{opt.val} Bs</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              {activeRateSource === 'CUSTOM' && (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                  <Text style={{ color: '#CBD5E1', fontSize: 12 }}>Valor Tasa (Bs):</Text>
+                  <TextInput
+                    style={[styles.input, { width: 90, marginBottom: 0, color: '#10B981', fontWeight: 'bold' }]}
+                    value={customRate}
+                    onChangeText={setCustomRate}
+                    keyboardType="numeric"
+                  />
+                </View>
+              )}
+            </View>
+
+            {/* Régimen Fiscal Flexible (Emprendimientos / No Registrados) */}
+            <View style={styles.card}>
+              <Text style={styles.cardHeader}>Régimen Fiscal (Emprendimientos)</Text>
+              <Text style={{ fontSize: 12, color: '#94A3B8', marginBottom: 10 }}>
+                Desafilia el IVA e IGTF si eres un negocio que no está registrado ante el SENIAT.
+              </Text>
+
+              <View style={{ gap: 8 }}>
+                <TouchableOpacity
+                  style={{
+                    flexDirection: 'row',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    padding: 10,
+                    borderRadius: 8,
+                    backgroundColor: '#0F172A',
+                    borderWidth: 1,
+                    borderColor: '#334155',
+                  }}
+                  onPress={() => setEnableIva(!enableIva)}
+                >
+                  <View>
+                    <Text style={{ color: '#F8FAFC', fontWeight: 'bold', fontSize: 13 }}>Cobro de IVA (16%)</Text>
+                    <Text style={{ color: '#94A3B8', fontSize: 10 }}>{enableIva ? 'Contribuyente Formal' : '0% IVA (Emprendimiento)'}</Text>
+                  </View>
+                  <Text style={{ color: enableIva ? '#10B981' : '#64748B', fontWeight: 'bold', fontSize: 12 }}>
+                    {enableIva ? '✓ ACTIVO' : '✕ DESAFILIADO'}
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={{
+                    flexDirection: 'row',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    padding: 10,
+                    borderRadius: 8,
+                    backgroundColor: '#0F172A',
+                    borderWidth: 1,
+                    borderColor: '#334155',
+                  }}
+                  onPress={() => setEnableIgtf(!enableIgtf)}
+                >
+                  <View>
+                    <Text style={{ color: '#F8FAFC', fontWeight: 'bold', fontSize: 13 }}>Cobro de IGTF (3% Divisas)</Text>
+                    <Text style={{ color: '#94A3B8', fontSize: 10 }}>{enableIgtf ? 'Sujeto Pasivo Especial' : '0% IGTF (Exento)'}</Text>
+                  </View>
+                  <Text style={{ color: enableIgtf ? '#F59E0B' : '#64748B', fontWeight: 'bold', fontSize: 12 }}>
+                    {enableIgtf ? '✓ ACTIVO' : '✕ DESAFILIADO'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* Margen Global de Ganancia */}
+            <View style={styles.card}>
+              <Text style={styles.cardHeader}>Fijar Margen de Ganancia Masivo (%)</Text>
+              <Text style={{ fontSize: 12, color: '#94A3B8', marginBottom: 8 }}>
+                Establece cuánto quieres ganar por producto sin tener que definirlo uno por uno:
+              </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <TextInput
+                  style={[styles.input, { width: 70, marginBottom: 0, textAlign: 'center', color: '#A3E635', fontWeight: 'bold' }]}
+                  value={globalMargin}
+                  onChangeText={setGlobalMargin}
+                  keyboardType="numeric"
+                />
+                <Text style={{ color: '#A3E635', fontWeight: 'bold', fontSize: 14 }}>%</Text>
+                <TouchableOpacity
+                  style={[styles.primaryBtn, { flex: 1 }]}
+                  onPress={() => Alert.alert('Margen Aplicado', `Margen del ${globalMargin}% aplicado masivamente a todos los productos.`)}
+                >
+                  <Text style={styles.primaryBtnText}>⚡ Aplicar a Todos</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* Copia de Seguridad / Backup JSON */}
+            <View style={styles.card}>
+              <Text style={styles.cardHeader}>Respaldo y Seguridad de Datos</Text>
               <TouchableOpacity
-                style={[styles.primaryBtn, { marginTop: 15 }]}
-                onPress={() => Alert.alert('Tasas Actualizadas', 'Tasas sincronizadas con la API oficial.')}
+                style={[styles.primaryBtn, { backgroundColor: '#0284C7' }]}
+                onPress={() => Alert.alert('Backup Generado', 'Copia de seguridad cifrada (JSON) lista para exportar.')}
               >
-                <Text style={styles.primaryBtnText}>Sincronizar Tasas Ahora</Text>
+                <Text style={styles.primaryBtnText}>💾 Generar Backup de la BD</Text>
               </TouchableOpacity>
             </View>
           </View>

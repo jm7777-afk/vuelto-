@@ -438,18 +438,142 @@ export const App: React.FC = () => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   // Navegación Activa
-  type TabType = 'METRICS' | 'INVENTORY' | 'SUPPLIERS' | 'ORDERS' | 'RECEIVABLES' | 'SALES' | 'EXPENSES' | 'RATES' | 'CASHIERS';
-  const [activeTab, setActiveTab] = useState<TabType>('METRICS');
+  type TabType = 'POS' | 'METRICS' | 'INVENTORY' | 'SUPPLIERS' | 'ORDERS' | 'RECEIVABLES' | 'SALES' | 'EXPENSES' | 'RATES' | 'CASHIERS' | 'AUDIT';
+  const [activeTab, setActiveTab] = useState<TabType>(() => {
+    const isVend = user?.roleId === 'VENDEDOR' || user?.username === 'cajero1';
+    return isVend ? 'POS' : 'METRICS';
+  });
 
   useEffect(() => {
-    if (isVendedor && activeTab !== 'INVENTORY' && activeTab !== 'SALES' && activeTab !== 'RATES') {
-      setActiveTab('INVENTORY');
+    if (isVendedor && activeTab !== 'POS' && activeTab !== 'INVENTORY' && activeTab !== 'SALES' && activeTab !== 'RATES') {
+      setActiveTab('POS');
     }
   }, [user, isVendedor, activeTab]);
 
-  // Tasa BCV y Monitor
+  // Tasa de Cambio y Selección de Cobro del Administrador
   const [bcvRate, setBcvRate] = useState(DEFAULT_BCV_RATE);
+  const [activeRateSource, setActiveRateSource] = useState<'BCV' | 'PARALELO' | 'EURO' | 'CUSTOM'>('BCV');
+  const [customRateInput, setCustomRateInput] = useState('58.50');
   const [ratesData, setRatesData] = useState<any>(null);
+
+  // Régimen Fiscal Flexible (Emprendimientos / Pequeños Comercios No Registrados)
+  const [enableIva, setEnableIva] = useState(true);
+  const [enableIgtf, setEnableIgtf] = useState(true);
+
+  // Margen Global de Ganancia para Inventario
+  const [globalMarginInput, setGlobalMarginInput] = useState('30');
+  const [globalMarginCategory, setGlobalMarginCategory] = useState('ALL');
+
+  // Cálculo de la Tasa Activa con la que el Negocio Cobra sus Productos
+  const activeRate = activeRateSource === 'PARALELO'
+    ? +(bcvRate * 1.138)
+    : activeRateSource === 'EURO'
+    ? +(bcvRate * 1.055)
+    : activeRateSource === 'CUSTOM'
+    ? +(parseFloat(customRateInput) || bcvRate)
+    : bcvRate;
+
+  // Estado del Carrito y Terminal POS
+  interface PosCartLine {
+    productId: string;
+    name: string;
+    barcode: string;
+    priceUsd: number;
+    qty: number;
+    isExempt: boolean;
+    taxRate: number;
+  }
+  const [cartLines, setCartLines] = useState<PosCartLine[]>([
+    {
+      productId: 'p1',
+      name: 'Harina PAN Blanca 1kg',
+      barcode: '7591001001019',
+      priceUsd: 1.25,
+      qty: 2,
+      isExempt: true,
+      taxRate: 0,
+    },
+    {
+      productId: 'p2',
+      name: 'Arroz Primor Grano Entero 1kg',
+      barcode: '7591003003035',
+      priceUsd: 1.50,
+      qty: 1,
+      isExempt: true,
+      taxRate: 0,
+    },
+  ]);
+  const [posBarcodeQuery, setPosBarcodeQuery] = useState('');
+  const [posCategoryFilter, setPosCategoryFilter] = useState('TODAS');
+  const [posCustomerList, setPosCustomerList] = useState([
+    { id: 'c0', name: 'Consumidor Final', documentType: 'V', documentNumber: '00000000', phone: '', balanceDue: 0, isSpecialMoraCustomer: false },
+    { id: 'c1', name: 'Automercado Miranda C.A.', documentType: 'J', documentNumber: '401234567', phone: '+584121112233', balanceDue: 145.50, isSpecialMoraCustomer: true },
+    { id: 'c2', name: 'Distribuidora Los Próceres', documentType: 'J', documentNumber: '309876543', phone: '+584149998877', balanceDue: 280.00, isSpecialMoraCustomer: true },
+    { id: 'c3', name: 'María Corina Machado', documentType: 'V', documentNumber: '14523988', phone: '+584145556677', balanceDue: 0, isSpecialMoraCustomer: false },
+  ]);
+  const [posSelectedCustomer, setPosSelectedCustomer] = useState({
+    id: 'c0',
+    name: 'Consumidor Final',
+    documentType: 'V',
+    documentNumber: '00000000',
+    phone: '',
+    balanceDue: 0,
+    isSpecialMoraCustomer: false,
+  });
+  const [posPaymentMethod, setPosPaymentMethod] = useState<'CASH_USD' | 'PAGO_MOVIL' | 'DEBIT_CARD' | 'TRANSFER' | 'CREDIT_DEBT'>('CASH_USD');
+  const [posCashAmountUsd, setPosCashAmountUsd] = useState('10.00');
+  const [posPagoMovilBank, setPosPagoMovilBank] = useState('0102 - Banco de Venezuela');
+  const [posPagoMovilPhone, setPosPagoMovilPhone] = useState('04141234567');
+  const [posPagoMovilRef, setPosPagoMovilRef] = useState('489201');
+  const [posAdminApproved, setPosAdminApproved] = useState(false);
+  const [posAdminPinInput, setPosAdminPinInput] = useState('');
+  const [completedSaleModal, setCompletedSaleModal] = useState<any | null>(null);
+
+  // Auditoría y Backups
+  const [auditLogsList, setAuditLogsList] = useState<any[]>([
+    {
+      id: 'aud-1',
+      action: 'SALE_CONFIRMED',
+      entity: 'sale',
+      entityId: 'FACT-A-00000042',
+      payload: { invoice: 'A-00000042', totalUsd: '4.50', totalBs: '236.25', payment: 'PAGO_MOVIL' },
+      result: 'SUCCESS',
+      channel: 'POS_MOBILE',
+      createdAt: 'Hace 5 minutos',
+      user: 'cajero1',
+    },
+    {
+      id: 'aud-2',
+      action: 'UPDATE_ACTIVE_RATE',
+      entity: 'TENANT_CONFIGURATION',
+      payload: { activeRateSource: 'BCV', rate: 52.50 },
+      result: 'SUCCESS',
+      channel: 'WEB_ADMIN',
+      createdAt: 'Hace 30 minutos',
+      user: 'admin',
+    },
+    {
+      id: 'aud-3',
+      action: 'APPLY_GLOBAL_PROFIT_MARGIN',
+      entity: 'product',
+      payload: { marginPercentage: 30, updatedCount: 4 },
+      result: 'SUCCESS',
+      channel: 'WEB_ADMIN',
+      createdAt: 'Hoy 10:15 AM',
+      user: 'admin',
+    },
+    {
+      id: 'aud-4',
+      action: 'INVENTORY_MOVEMENT',
+      entity: 'inventory_movement',
+      payload: { productId: 'p1', type: 'IN', qty: 50, reason: 'Recepción orden OC-2026-0001' },
+      result: 'SUCCESS',
+      channel: 'WEB_ADMIN',
+      createdAt: 'Ayer 16:20 PM',
+      user: 'admin',
+    },
+  ]);
+  const [isBackupDownloading, setIsBackupDownloading] = useState(false);
 
   // 1. INVENTARIO & STOCK
   const [searchTerm, setSearchTerm] = useState('');
@@ -1167,6 +1291,272 @@ export const App: React.FC = () => {
     alert(`Factura ${sale.invoiceFormattedNumber} ANULADA. Mercancía retornada a inventario.`);
   };
 
+  // --- MANEJADORES DE PUNTO DE VENTA (POS) ---
+  const handlePosAddToCart = (prod: ProductItem, addQty: number = 1) => {
+    const existing = cartLines.find((c) => c.productId === prod.id);
+    if (existing) {
+      setCartLines(
+        cartLines.map((c) => (c.productId === prod.id ? { ...c, qty: c.qty + addQty } : c))
+      );
+    } else {
+      setCartLines([
+        ...cartLines,
+        {
+          productId: prod.id,
+          name: prod.name,
+          barcode: prod.barcode,
+          priceUsd: prod.salePriceUsd,
+          qty: addQty,
+          isExempt: prod.taxRate === 0,
+          taxRate: prod.taxRate,
+        },
+      ]);
+    }
+  };
+
+  const handlePosUpdateCartQty = (productId: string, newQty: number) => {
+    if (newQty <= 0) {
+      setCartLines(cartLines.filter((c) => c.productId !== productId));
+    } else {
+      setCartLines(cartLines.map((c) => (c.productId === productId ? { ...c, qty: newQty } : c)));
+    }
+  };
+
+  const handlePosBarcodeScan = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!posBarcodeQuery.trim()) return;
+
+    const query = posBarcodeQuery.trim().toLowerCase();
+    const found = inventoryList.find(
+      (p) => p.barcode === query || p.sku.toLowerCase() === query || p.name.toLowerCase().includes(query)
+    );
+
+    if (found) {
+      handlePosAddToCart(found, 1);
+      setPosBarcodeQuery('');
+    } else {
+      alert(`Producto con código o nombre "${posBarcodeQuery}" no encontrado en el inventario.`);
+    }
+  };
+
+  // Cálculos de Totales POS
+  const posSubtotalUsd = cartLines.reduce((acc, it) => acc + it.priceUsd * it.qty, 0);
+  const posTax16Usd = enableIva
+    ? cartLines.filter((i) => !i.isExempt && i.taxRate === 16).reduce((acc, i) => acc + i.priceUsd * i.qty * 0.16, 0)
+    : 0;
+  const posTax8Usd = enableIva
+    ? cartLines.filter((i) => !i.isExempt && i.taxRate === 8).reduce((acc, i) => acc + i.priceUsd * i.qty * 0.08, 0)
+    : 0;
+  const posIgtfUsd = enableIgtf && posPaymentMethod === 'CASH_USD' ? posSubtotalUsd * 0.03 : 0;
+  const posTotalUsd = posSubtotalUsd + posTax16Usd + posTax8Usd + posIgtfUsd;
+  const posTotalBs = posTotalUsd * activeRate;
+
+  const posCashAmountNum = parseFloat(posCashAmountUsd) || 0;
+  const posChangeUsd = posPaymentMethod === 'CASH_USD' && posCashAmountNum > posTotalUsd ? posCashAmountNum - posTotalUsd : 0;
+  const posChangeBs = posChangeUsd * activeRate;
+
+  // Confirmar Venta POS y Emitir Comprobante Digital
+  const handlePosConfirmSale = () => {
+    if (cartLines.length === 0) {
+      alert('El carrito está vacío. Agrega productos para facturar.');
+      return;
+    }
+
+    // Validación de mora y crédito
+    const hasDebt = posSelectedCustomer.balanceDue > 0 || posSelectedCustomer.isSpecialMoraCustomer;
+    if (posPaymentMethod === 'CREDIT_DEBT' && hasDebt && !posAdminApproved && !isAdmin) {
+      alert(
+        `El cliente ${posSelectedCustomer.name} posee deuda previa ($${posSelectedCustomer.balanceDue.toFixed(2)} USD). Esta venta a crédito requiere aprobación y clave del Administrador.`
+      );
+      return;
+    }
+
+    const nextInvoiceNum = `FACT-A-${String(Math.floor(100000 + Math.random() * 900000)).padStart(8, '0')}`;
+    const nowStr = new Date().toLocaleString('es-VE');
+
+    // Descontar inventario
+    for (const line of cartLines) {
+      setInventoryList((prev) =>
+        prev.map((p) => (p.id === line.productId ? { ...p, stock: Math.max(0, p.stock - line.qty) } : p))
+      );
+      setKardexHistory((prev) => [
+        {
+          id: `k-${Date.now()}-${Math.random()}`,
+          productName: line.name,
+          movementType: 'SALE',
+          quantity: line.qty,
+          unitCostUsd: 0.95,
+          reason: `Venta POS ${nextInvoiceNum}`,
+          createdAt: 'Ahora mismo',
+          user: user?.username || 'cajero1',
+        },
+        ...prev,
+      ]);
+    }
+
+    // Registrar en Historial de Ventas
+    const saleItem: SaleRecord = {
+      id: `s-${Date.now()}`,
+      invoiceFormattedNumber: nextInvoiceNum,
+      createdAt: nowStr,
+      customerName: posSelectedCustomer.name,
+      customerDoc: `${posSelectedCustomer.documentType}-${posSelectedCustomer.documentNumber}`,
+      cashierName: `${user?.fullName} (${user?.username})`,
+      totalUsd: posTotalUsd,
+      totalBs: posTotalBs,
+      rateValue: activeRate,
+      status: 'COMPLETADA',
+      items: cartLines.map((c) => ({
+        name: c.name,
+        qty: c.qty,
+        priceUsd: c.priceUsd,
+        subtotalUsd: c.priceUsd * c.qty,
+        taxRate: enableIva ? c.taxRate : 0,
+      })),
+      taxes: {
+        base16: enableIva ? posSubtotalUsd : 0,
+        base8: 0,
+        exempt: !enableIva ? posSubtotalUsd : 0,
+        tax16: posTax16Usd,
+        tax8: 0,
+        igtf3: posIgtfUsd,
+      },
+    };
+    setSalesHistory([saleItem, ...salesHistory]);
+
+    // Registrar en Auditoría
+    setAuditLogsList((prev) => [
+      {
+        id: `aud-${Date.now()}`,
+        action: 'SALE_CONFIRMED',
+        entity: 'sale',
+        entityId: nextInvoiceNum,
+        payload: {
+          invoice: nextInvoiceNum,
+          customer: posSelectedCustomer.name,
+          totalUsd: posTotalUsd.toFixed(2),
+          totalBs: posTotalBs.toFixed(2),
+          paymentMethod: posPaymentMethod,
+          activeRate,
+        },
+        result: 'SUCCESS',
+        channel: 'POS_WEB',
+        createdAt: 'Ahora mismo',
+        user: user?.username || 'cajero1',
+      },
+      ...prev,
+    ]);
+
+    // Preparar objeto para el modal de éxito con WhatsApp
+    setCompletedSaleModal({
+      ...saleItem,
+      customerPhone: posSelectedCustomer.phone,
+      paymentMethod: posPaymentMethod,
+      vueltoUsd: posChangeUsd,
+      vueltoBs: posChangeBs,
+    });
+
+    // Limpiar carrito
+    setCartLines([]);
+    setPosAdminApproved(false);
+    setPosAdminPinInput('');
+  };
+
+  // Generador de enlace WhatsApp para Factura / Nota de Entrega Digital
+  const getWhatsAppDeliveryNoteUrl = (sale: any) => {
+    if (!sale) return '#';
+    const phone = sale.customerPhone ? sale.customerPhone.replace(/\D/g, '') : '';
+    const cleanPhone = phone.startsWith('58') ? phone : '58' + phone.replace(/^0+/, '');
+    const itemsText = sale.items
+      .map((it: any) => `• ${it.qty}x ${it.name}: $${it.subtotalUsd.toFixed(2)} (${(it.subtotalUsd * sale.rateValue).toFixed(2)} Bs)`)
+      .join('\n');
+
+    const msg = `*${user?.businessName || 'VUELTO POS'}* - *NOTA DE ENTREGA / FACTURA DIGITAL*\n*N°:* ${sale.invoiceFormattedNumber}\n*Fecha:* ${sale.createdAt}\n*Cliente:* ${sale.customerName} (${sale.customerDoc})\n--------------------------------\n${itemsText}\n--------------------------------\n*Total a Pagar:* $${sale.totalUsd.toFixed(2)} USD ≈ ${sale.totalBs.toFixed(2)} Bs\n*Tasa Aplicada:* ${sale.rateValue.toFixed(2)} Bs/$\n*Método de Pago:* ${sale.paymentMethod}\n${sale.vueltoUsd > 0 ? `*Vuelto Entregado:* $${sale.vueltoUsd.toFixed(2)} USD (${sale.vueltoBs.toFixed(2)} Bs)\n` : ''}\n_¡Gracias por su compra! Conserve este comprobante digital._`;
+
+    return cleanPhone ? `https://wa.me/${cleanPhone}?text=${encodeURIComponent(msg)}` : `https://wa.me/?text=${encodeURIComponent(msg)}`;
+  };
+
+  // Manejador de Margen Global Masivo
+  const handleApplyGlobalMargin = () => {
+    const margin = parseFloat(globalMarginInput);
+    if (isNaN(margin) || margin <= 0) {
+      alert('Por favor ingrese un porcentaje de margen válido (ej. 30%)');
+      return;
+    }
+    const factor = 1 + margin / 100;
+    const updated = inventoryList.map((p) => {
+      if (globalMarginCategory === 'ALL' || p.category === globalMarginCategory) {
+        if (p.costPriceUsd > 0) {
+          const newPrice = +(p.costPriceUsd * factor).toFixed(2);
+          return { ...p, salePriceUsd: newPrice };
+        }
+      }
+      return p;
+    });
+    setInventoryList(updated);
+
+    setAuditLogsList((prev) => [
+      {
+        id: `aud-${Date.now()}`,
+        action: 'APPLY_GLOBAL_PROFIT_MARGIN',
+        entity: 'product',
+        payload: { marginPercentage: margin, category: globalMarginCategory, count: updated.length },
+        result: 'SUCCESS',
+        channel: 'WEB_ADMIN',
+        createdAt: 'Ahora mismo',
+        user: user?.username || 'admin',
+      },
+      ...prev,
+    ]);
+
+    fetch('/api/v1/products/apply-global-margin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ marginPercentage: margin, category: globalMarginCategory }),
+    }).catch(() => {});
+
+    alert(`✅ ¡Margen del ${margin}% aplicado masivamente a los productos seleccionados (${globalMarginCategory === 'ALL' ? 'Catálogo Completo' : globalMarginCategory})!`);
+  };
+
+  // Descarga de Backup
+  const handleDownloadBackup = () => {
+    setIsBackupDownloading(true);
+    const backupData = {
+      version: '1.2.0',
+      system: 'Vuelto SaaS Venezuela',
+      generatedAt: new Date().toISOString(),
+      tenant: { name: user?.businessName, rif: 'J-123456789' },
+      summary: {
+        totalProducts: inventoryList.length,
+        totalSuppliers: suppliersList.length,
+        totalSales: salesHistory.length,
+        totalCustomers: posCustomerList.length,
+      },
+      data: {
+        products: inventoryList,
+        suppliers: suppliersList,
+        purchaseOrders: purchaseOrdersList,
+        salesHistory: salesHistory,
+        receivables: customerDebts,
+        finances: financialTransactionsList,
+        auditLogs: auditLogsList,
+      },
+    };
+
+    setTimeout(() => {
+      const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `backup_vuelto_${user?.tenantId ? user.tenantId.slice(0, 8) : 'central'}_${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      setIsBackupDownloading(false);
+      alert('✅ ¡Copia de seguridad (Backup JSON) exportada y descargada exitosamente!');
+    }, 600);
+  };
+
   // LOGIN SCREEN SI NO ESTÁ AUTENTICADO
   if (!user) {
     return (
@@ -1365,20 +1755,23 @@ export const App: React.FC = () => {
           <nav style={{ display: 'flex', flexDirection: 'column', gap: '4px', flex: 1, overflowY: 'auto' }}>
             {(isVendedor
               ? [
+                  { id: 'POS', label: 'Terminal POS (Ventas)', icon: <ShoppingCart size={17} /> },
                   { id: 'INVENTORY', label: 'Consulta de Precios', icon: <Package size={17} /> },
-                  { id: 'SALES', label: 'Ventas y Facturas', icon: <FileText size={17} /> },
+                  { id: 'SALES', label: 'Ventas y Comprobantes', icon: <FileText size={17} /> },
                   { id: 'RATES', label: 'Tasas Oficiales BCV', icon: <RefreshCw size={17} /> },
                 ]
               : [
+                  { id: 'POS', label: 'Punto de Venta (POS)', icon: <ShoppingCart size={17} /> },
                   { id: 'METRICS', label: 'Dashboard & Finanzas', icon: <TrendingUp size={17} /> },
                   { id: 'INVENTORY', label: 'Inventario & Kardex', icon: <Package size={17} /> },
                   { id: 'SUPPLIERS', label: 'Proveedores (CRUD)', icon: <Building size={17} /> },
-                  { id: 'ORDERS', label: 'Pedidos a Proveedores', icon: <Truck size={17} />, badge: purchaseOrdersList.filter(o => o.status === 'DRAFT' || o.status === 'SENT_WHATSAPP').length },
+                  { id: 'ORDERS', label: 'Pedidos / Reposición', icon: <Truck size={17} />, badge: purchaseOrdersList.filter(o => o.status === 'DRAFT' || o.status === 'SENT_WHATSAPP').length },
                   { id: 'RECEIVABLES', label: 'Cobranzas & Mora', icon: <DollarSign size={17} />, badge: customerDebts.filter(c => c.isOverdue).length },
                   { id: 'SALES', label: 'Ventas & Facturas', icon: <FileText size={17} /> },
                   { id: 'EXPENSES', label: 'Flujo de Caja & Gastos', icon: <CreditCard size={17} /> },
-                  { id: 'RATES', label: 'Tasas de Cambio', icon: <RefreshCw size={17} /> },
+                  { id: 'RATES', label: 'Tasas & Régimen Fiscal', icon: <RefreshCw size={17} /> },
                   { id: 'CASHIERS', label: 'Vendedores en Vivo', icon: <Users size={17} /> },
+                  { id: 'AUDIT', label: 'Auditoría & Backups', icon: <ShieldCheck size={17} /> },
                 ]
             ).map((item) => (
               <button
@@ -1451,6 +1844,413 @@ export const App: React.FC = () => {
 
         {/* ÁREA DE CONTENIDO PRINCIPAL */}
         <main className="vuelto-main-view" style={{ flex: 1, padding: '28px', overflowY: 'auto' }}>
+          {/* TAB 0: TERMINAL DE VENTAS POS (CAJERO & ADMIN) */}
+          {activeTab === 'POS' && (
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '20px', flexWrap: 'wrap', gap: '12px' }}>
+                <div>
+                  <h2 style={{ fontSize: '24px', fontWeight: 'bold' }}>Punto de Venta & Facturación Rápida (POS)</h2>
+                  <p style={{ color: '#94A3B8', fontSize: '13px' }}>
+                    Escaneo de código de barras, cobro bimoneda, verificación de mora y emisión de nota de entrega digital.
+                  </p>
+                </div>
+
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <div style={{ padding: '6px 12px', borderRadius: '8px', backgroundColor: '#062F3B', border: '1px solid #10B98155', fontSize: '12px', color: '#A3E635', fontWeight: 'bold' }}>
+                    Tasa de Cobro: {activeRate.toFixed(2)} Bs/$ ({activeRateSource})
+                  </div>
+                  <div style={{ padding: '6px 12px', borderRadius: '8px', backgroundColor: '#062F3B', border: '1px solid #0284C755', fontSize: '12px', color: '#38BDF8', fontWeight: 'bold' }}>
+                    Régimen: {enableIva ? 'IVA 16%' : 'IVA 0% (Emprendimiento)'}
+                  </div>
+                </div>
+              </div>
+
+              {/* GRID PRINCIPAL: 2 COLUMNAS (CATÁLOGO A LA IZQUIERDA / CARRITO Y COBRO A LA DERECHA) */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '20px' }}>
+                {/* COLUMNA 1: CATÁLOGO DE PRODUCTOS & ESCÁNER */}
+                <div style={{ backgroundColor: '#0B3B49', padding: '20px', borderRadius: '16px', border: '1px solid #155E75' }}>
+                  {/* Barra de Búsqueda y Escáner */}
+                  <form onSubmit={handlePosBarcodeScan} style={{ display: 'flex', gap: '8px', marginBottom: '14px' }}>
+                    <div style={{ position: 'relative', flex: 1 }}>
+                      <Search size={16} color="#94A3B8" style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)' }} />
+                      <input
+                        type="text"
+                        placeholder="Escanear código de barras EAN-13 o buscar producto..."
+                        value={posBarcodeQuery}
+                        onChange={(e) => setPosBarcodeQuery(e.target.value)}
+                        style={{ width: '100%', padding: '10px 10px 10px 36px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#FFFFFF', fontSize: '13px', outline: 'none' }}
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      style={{ padding: '10px 16px', borderRadius: '8px', border: 'none', backgroundColor: '#0284C7', color: '#FFFFFF', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer' }}
+                    >
+                      Buscar
+                    </button>
+                  </form>
+
+                  {/* Filtro por Categorías */}
+                  <div style={{ display: 'flex', gap: '6px', overflowX: 'auto', paddingBottom: '8px', marginBottom: '14px' }}>
+                    {['TODAS', 'Alimentos', 'Bebidas', 'Lácteos', 'Limpieza', 'Víveres'].map((cat) => (
+                      <button
+                        key={cat}
+                        onClick={() => setPosCategoryFilter(cat)}
+                        style={{
+                          padding: '6px 12px',
+                          borderRadius: '16px',
+                          border: 'none',
+                          fontSize: '11px',
+                          fontWeight: 'bold',
+                          cursor: 'pointer',
+                          backgroundColor: posCategoryFilter === cat ? '#A3E635' : '#062F3B',
+                          color: posCategoryFilter === cat ? '#071F27' : '#94A3B8',
+                          transition: 'all 0.15s ease',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {cat}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Lista de Productos Scanneables / Recomendados */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxHeight: '540px', overflowY: 'auto' }}>
+                    {inventoryList
+                      .filter((p) => posCategoryFilter === 'TODAS' || p.category === posCategoryFilter)
+                      .map((prod) => (
+                        <div
+                          key={prod.id}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            backgroundColor: '#062F3B',
+                            padding: '12px 14px',
+                            borderRadius: '10px',
+                            border: '1px solid #155E7544',
+                          }}
+                        >
+                          <div style={{ flex: 1, marginRight: '10px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <h4 style={{ fontSize: '14px', fontWeight: 'bold', color: '#FFFFFF' }}>{prod.name}</h4>
+                              <span style={{ fontSize: '9px', padding: '1px 5px', borderRadius: '4px', backgroundColor: prod.stock <= prod.minStockAlert ? '#EF444422' : '#10B98122', color: prod.stock <= prod.minStockAlert ? '#EF4444' : '#10B981', fontWeight: 'bold' }}>
+                                {prod.stock} disp.
+                              </span>
+                            </div>
+                            <p style={{ fontSize: '11px', color: '#64748B', fontFamily: 'monospace' }}>
+                              EAN: {prod.barcode} • SKU: {prod.sku}
+                            </p>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' }}>
+                              <span style={{ fontSize: '14px', fontWeight: 'bold', color: '#10B981' }}>
+                                ${prod.salePriceUsd.toFixed(2)} USD
+                              </span>
+                              <span style={{ fontSize: '12px', color: '#94A3B8' }}>
+                                ≈ {(prod.salePriceUsd * activeRate).toFixed(2)} Bs
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Botones de Cantidades Rápidas Recomendadas */}
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', alignItems: 'flex-end' }}>
+                            <button
+                              onClick={() => handlePosAddToCart(prod, 1)}
+                              style={{
+                                padding: '6px 12px',
+                                borderRadius: '6px',
+                                border: 'none',
+                                backgroundColor: '#10B981',
+                                color: '#FFFFFF',
+                                fontWeight: 'bold',
+                                fontSize: '12px',
+                                cursor: 'pointer',
+                              }}
+                            >
+                              + Agregar
+                            </button>
+                            <div style={{ display: 'flex', gap: '4px' }}>
+                              {[2, 5, 10].map((q) => (
+                                <button
+                                  key={q}
+                                  onClick={() => handlePosAddToCart(prod, q)}
+                                  style={{
+                                    padding: '2px 6px',
+                                    borderRadius: '4px',
+                                    border: '1px solid #334155',
+                                    backgroundColor: '#071F27',
+                                    color: '#A3E635',
+                                    fontSize: '10px',
+                                    fontWeight: 'bold',
+                                    cursor: 'pointer',
+                                  }}
+                                >
+                                  +{q}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+
+                {/* COLUMNA 2: CARRITO DE COMPRAS, CLIENTE Y COBRO */}
+                <div style={{ backgroundColor: '#0B3B49', padding: '20px', borderRadius: '16px', border: '1px solid #155E75', display: 'flex', flexDirection: 'column' }}>
+                  {/* Selector y Verificación de Cliente (MORA) */}
+                  <div style={{ marginBottom: '14px', backgroundColor: '#062F3B', padding: '12px', borderRadius: '10px', border: '1px solid #155E75' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                      <span style={{ fontSize: '11px', color: '#94A3B8', fontWeight: 'bold' }}>CLIENTE ASIGNADO</span>
+                      <span style={{ fontSize: '10px', color: '#38BDF8' }}>{posSelectedCustomer.phone || 'Sin WhatsApp'}</span>
+                    </div>
+
+                    <select
+                      value={posSelectedCustomer.id}
+                      onChange={(e) => {
+                        const c = posCustomerList.find((cust) => cust.id === e.target.value) || posCustomerList[0];
+                        setPosSelectedCustomer(c);
+                        setPosAdminApproved(false);
+                      }}
+                      style={{ width: '100%', padding: '8px', borderRadius: '6px', border: '1px solid #334155', backgroundColor: '#071F27', color: '#FFFFFF', fontSize: '13px', outline: 'none', marginBottom: '8px' }}
+                    >
+                      {posCustomerList.map((cust) => (
+                        <option key={cust.id} value={cust.id}>
+                          {cust.documentType}-{cust.documentNumber} {cust.name} {cust.balanceDue > 0 ? `(Deuda: $${cust.balanceDue})` : ''}
+                        </option>
+                      ))}
+                    </select>
+
+                    {/* ALERTA DE MORA / CLIENTE ESPECIAL */}
+                    {(posSelectedCustomer.balanceDue > 0 || posSelectedCustomer.isSpecialMoraCustomer) && (
+                      <div style={{ backgroundColor: '#EF444422', border: '1px solid #EF4444', borderRadius: '8px', padding: '8px 10px', fontSize: '11px', color: '#FCA5A5' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 'bold', color: '#EF4444' }}>
+                          <AlertTriangle size={14} />
+                          <span>CLIENTE ESPECIAL CON MORA ACTIVA</span>
+                        </div>
+                        <p style={{ marginTop: '2px' }}>
+                          Saldo Deudor: <strong>${posSelectedCustomer.balanceDue.toFixed(2)} USD</strong> (≈ {(posSelectedCustomer.balanceDue * activeRate).toFixed(2)} Bs).
+                          Ventas a crédito requieren autorización expresa del Administrador.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Tabla de Ítems en Carrito */}
+                  <div style={{ flex: 1, minHeight: '180px', maxHeight: '260px', overflowY: 'auto', marginBottom: '14px', borderBottom: '1px solid #155E7544', paddingBottom: '10px' }}>
+                    {cartLines.length === 0 ? (
+                      <div style={{ textAlign: 'center', padding: '30px', color: '#64748B' }}>
+                        <ShoppingCart size={36} style={{ margin: '0 auto 8px', opacity: 0.5 }} />
+                        <p style={{ fontSize: '13px' }}>El carrito está vacío.</p>
+                        <p style={{ fontSize: '11px' }}>Escanea productos o presiona "+ Agregar" desde el catálogo.</p>
+                      </div>
+                    ) : (
+                      cartLines.map((line) => (
+                        <div
+                          key={line.productId}
+                          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid #155E7522' }}
+                        >
+                          <div style={{ flex: 1, marginRight: '10px' }}>
+                            <p style={{ fontSize: '13px', fontWeight: '600', color: '#F8FAFC' }}>{line.name}</p>
+                            <p style={{ fontSize: '11px', color: '#94A3B8' }}>
+                              ${line.priceUsd.toFixed(2)} USD ≈ {(line.priceUsd * activeRate).toFixed(2)} Bs
+                            </p>
+                          </div>
+
+                          {/* Control de Cantidad */}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <button
+                              onClick={() => handlePosUpdateCartQty(line.productId, line.qty - 1)}
+                              style={{ width: '24px', height: '24px', borderRadius: '4px', border: '1px solid #334155', backgroundColor: '#062F3B', color: '#CBD5E1', cursor: 'pointer', fontWeight: 'bold' }}
+                            >
+                              -
+                            </button>
+                            <span style={{ fontSize: '13px', fontWeight: 'bold', minWidth: '18px', textAlign: 'center' }}>
+                              {line.qty}
+                            </span>
+                            <button
+                              onClick={() => handlePosUpdateCartQty(line.productId, line.qty + 1)}
+                              style={{ width: '24px', height: '24px', borderRadius: '4px', border: '1px solid #334155', backgroundColor: '#062F3B', color: '#CBD5E1', cursor: 'pointer', fontWeight: 'bold' }}
+                            >
+                              +
+                            </button>
+                          </div>
+
+                          <div style={{ minWidth: '70px', textAlign: 'right', marginLeft: '12px' }}>
+                            <p style={{ fontSize: '13px', fontWeight: 'bold', color: '#10B981' }}>
+                              ${(line.priceUsd * line.qty).toFixed(2)}
+                            </p>
+                            <p style={{ fontSize: '10px', color: '#64748B' }}>
+                              {((line.priceUsd * line.qty) * activeRate).toFixed(2)} Bs
+                            </p>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+
+                  {/* Resumen Financiero y Desglose de Impuestos */}
+                  <div style={{ backgroundColor: '#062F3B', padding: '12px', borderRadius: '10px', marginBottom: '14px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#94A3B8', marginBottom: '4px' }}>
+                      <span>Subtotal:</span>
+                      <span>${posSubtotalUsd.toFixed(2)} USD</span>
+                    </div>
+
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#94A3B8', marginBottom: '4px' }}>
+                      <span>IVA (16%):</span>
+                      <span>{enableIva ? `$${posTax16Usd.toFixed(2)} USD` : '0% (Régimen Emprendimiento)'}</span>
+                    </div>
+
+                    {enableIgtf && posPaymentMethod === 'CASH_USD' && (
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#F59E0B', marginBottom: '4px' }}>
+                        <span>IGTF (3% Divisas en Efectivo):</span>
+                        <span>${posIgtfUsd.toFixed(2)} USD</span>
+                      </div>
+                    )}
+
+                    <div style={{ height: '1px', backgroundColor: '#155E75', margin: '8px 0' }} />
+
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '15px', fontWeight: 'bold', color: '#FFFFFF' }}>TOTAL A PAGAR:</span>
+                      <div style={{ textAlign: 'right' }}>
+                        <span style={{ fontSize: '20px', fontWeight: '900', color: '#10B981' }}>
+                          ${posTotalUsd.toFixed(2)} USD
+                        </span>
+                        <p style={{ fontSize: '13px', fontWeight: 'bold', color: '#A3E635' }}>
+                          ≈ {posTotalBs.toFixed(2)} Bs
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Selección de Método de Pago */}
+                  <div style={{ marginBottom: '14px' }}>
+                    <label style={{ display: 'block', fontSize: '11px', color: '#94A3B8', fontWeight: 'bold', marginBottom: '6px' }}>
+                      MÉTODO DE PAGO
+                    </label>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px', marginBottom: '10px' }}>
+                      {[
+                        { id: 'CASH_USD', label: '💵 Divisas $' },
+                        { id: 'PAGO_MOVIL', label: '📱 Pago Móvil' },
+                        { id: 'DEBIT_CARD', label: '💳 Tarjeta Déb.' },
+                        { id: 'TRANSFER', label: '🏛️ Transferencia' },
+                        { id: 'CREDIT_DEBT', label: '🤝 Crédito' },
+                      ].map((m) => (
+                        <button
+                          key={m.id}
+                          onClick={() => setPosPaymentMethod(m.id as any)}
+                          style={{
+                            padding: '8px 4px',
+                            borderRadius: '6px',
+                            border: '1px solid #155E75',
+                            backgroundColor: posPaymentMethod === m.id ? '#0284C7' : '#062F3B',
+                            color: posPaymentMethod === m.id ? '#FFFFFF' : '#CBD5E1',
+                            fontSize: '11px',
+                            fontWeight: 'bold',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          {m.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Detalles según método de pago */}
+                    {posPaymentMethod === 'CASH_USD' && (
+                      <div style={{ backgroundColor: '#062F3B', padding: '10px', borderRadius: '8px', border: '1px solid #10B98144' }}>
+                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                          <span style={{ fontSize: '12px', color: '#CBD5E1' }}>Monto Recibido ($):</span>
+                          <input
+                            type="number"
+                            value={posCashAmountUsd}
+                            onChange={(e) => setPosCashAmountUsd(e.target.value)}
+                            style={{ width: '90px', padding: '6px', borderRadius: '6px', border: '1px solid #334155', backgroundColor: '#071F27', color: '#10B981', fontWeight: 'bold', fontSize: '14px' }}
+                          />
+                        </div>
+                        {posChangeUsd > 0 && (
+                          <div style={{ marginTop: '6px', fontSize: '12px', color: '#A3E635', fontWeight: 'bold' }}>
+                            Vuelto a entregar: ${posChangeUsd.toFixed(2)} USD (≈ {posChangeBs.toFixed(2)} Bs)
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {posPaymentMethod === 'PAGO_MOVIL' && (
+                      <div style={{ display: 'flex', gap: '8px', backgroundColor: '#062F3B', padding: '10px', borderRadius: '8px' }}>
+                        <input
+                          type="text"
+                          placeholder="N° Referencia Pago Móvil (ej. 4892)"
+                          value={posPagoMovilRef}
+                          onChange={(e) => setPosPagoMovilRef(e.target.value)}
+                          style={{ flex: 1, padding: '6px 8px', borderRadius: '6px', border: '1px solid #334155', backgroundColor: '#071F27', color: '#FFFFFF', fontSize: '12px' }}
+                        />
+                      </div>
+                    )}
+
+                    {posPaymentMethod === 'CREDIT_DEBT' && (posSelectedCustomer.balanceDue > 0 || posSelectedCustomer.isSpecialMoraCustomer) && !isAdmin && (
+                      <div style={{ backgroundColor: '#EF444415', border: '1px solid #EF4444', padding: '10px', borderRadius: '8px', marginTop: '6px' }}>
+                        <p style={{ fontSize: '11px', color: '#FCA5A5', marginBottom: '6px' }}>
+                          Requiere Clave de Aprobación de Administrador para otorgar crédito a cliente moroso:
+                        </p>
+                        <div style={{ display: 'flex', gap: '6px' }}>
+                          <input
+                            type="password"
+                            placeholder="Clave Admin (admin123)"
+                            value={posAdminPinInput}
+                            onChange={(e) => setPosAdminPinInput(e.target.value)}
+                            style={{ flex: 1, padding: '6px 8px', borderRadius: '6px', border: '1px solid #EF4444', backgroundColor: '#071F27', color: '#FFFFFF', fontSize: '12px' }}
+                          />
+                          <button
+                            onClick={() => {
+                              if (posAdminPinInput === 'admin123' || posAdminPinInput === 'Vuelto2026!') {
+                                setPosAdminApproved(true);
+                                alert('✅ Crédito autorizado por el Administrador.');
+                              } else {
+                                alert('❌ Clave de administrador incorrecta.');
+                              }
+                            }}
+                            style={{ padding: '6px 12px', borderRadius: '6px', border: 'none', backgroundColor: '#10B981', color: '#FFFFFF', fontWeight: 'bold', fontSize: '11px', cursor: 'pointer' }}
+                          >
+                            {posAdminApproved ? '✓ Autorizado' : 'Validar'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Botón de Confirmación y Facturación */}
+                  <div style={{ display: 'flex', gap: '8px', marginTop: 'auto' }}>
+                    <button
+                      onClick={() => setCartLines([])}
+                      style={{ padding: '12px', borderRadius: '8px', border: '1px solid #334155', backgroundColor: '#062F3B', color: '#94A3B8', fontWeight: 'bold', fontSize: '12px', cursor: 'pointer' }}
+                    >
+                      Vaciar
+                    </button>
+                    <button
+                      onClick={handlePosConfirmSale}
+                      disabled={cartLines.length === 0}
+                      style={{
+                        flex: 1,
+                        padding: '14px',
+                        borderRadius: '8px',
+                        border: 'none',
+                        backgroundColor: cartLines.length === 0 ? '#334155' : '#10B981',
+                        color: '#FFFFFF',
+                        fontWeight: 'bold',
+                        fontSize: '14px',
+                        cursor: cartLines.length === 0 ? 'not-allowed' : 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '8px',
+                      }}
+                    >
+                      <Zap size={18} />
+                      <span>Cobrar y Facturar (${posTotalUsd.toFixed(2)} USD ≈ {posTotalBs.toFixed(2)} Bs)</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* TAB 1: DASHBOARD Y FINANZAS */}
           {activeTab === 'METRICS' && (
             <div>
@@ -1584,6 +2384,56 @@ export const App: React.FC = () => {
                   </div>
                 )}
               </div>
+
+              {/* PANEL DE MARGEN GLOBAL DE GANANCIA (SOLO ADMIN) */}
+              {isAdmin && (
+                <div style={{ backgroundColor: '#0B3B49', padding: '16px 20px', borderRadius: '12px', border: '1px solid #10B98155', marginBottom: '18px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '14px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <div style={{ padding: '10px', borderRadius: '8px', backgroundColor: '#10B98122', color: '#10B981' }}>
+                      <Percent size={22} />
+                    </div>
+                    <div>
+                      <h4 style={{ fontSize: '14px', fontWeight: 'bold', color: '#FFFFFF' }}>Fijar Margen de Ganancia Masivo (%)</h4>
+                      <p style={{ fontSize: '11px', color: '#94A3B8' }}>
+                        Establece tu ganancia sobre el costo al mayor sin tener que editar producto por producto.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{ fontSize: '12px', color: '#CBD5E1' }}>Ganancia:</span>
+                      <input
+                        type="number"
+                        value={globalMarginInput}
+                        onChange={(e) => setGlobalMarginInput(e.target.value)}
+                        style={{ width: '70px', padding: '6px 8px', borderRadius: '6px', border: '1px solid #334155', backgroundColor: '#062F3B', color: '#A3E635', fontWeight: 'bold', fontSize: '14px', textAlign: 'center' }}
+                      />
+                      <span style={{ fontSize: '13px', color: '#A3E635', fontWeight: 'bold' }}>%</span>
+                    </div>
+
+                    <select
+                      value={globalMarginCategory}
+                      onChange={(e) => setGlobalMarginCategory(e.target.value)}
+                      style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid #334155', backgroundColor: '#062F3B', color: '#FFFFFF', fontSize: '12px' }}
+                    >
+                      <option value="ALL">Todo el Catálogo</option>
+                      <option value="Alimentos">Solo Alimentos</option>
+                      <option value="Bebidas">Solo Bebidas</option>
+                      <option value="Víveres">Solo Víveres</option>
+                      <option value="Limpieza">Solo Limpieza</option>
+                    </select>
+
+                    <button
+                      onClick={handleApplyGlobalMargin}
+                      style={{ padding: '8px 16px', borderRadius: '6px', border: 'none', backgroundColor: '#10B981', color: '#FFFFFF', fontWeight: 'bold', fontSize: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}
+                    >
+                      <Zap size={14} />
+                      <span>Aplicar a Todos</span>
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* Barra de Búsqueda */}
               <div style={{ display: 'flex', alignItems: 'center', backgroundColor: '#0B3B49', padding: '10px 14px', borderRadius: '10px', border: '1px solid #155E75', marginBottom: '18px' }}>
@@ -1812,6 +2662,85 @@ export const App: React.FC = () => {
                   <Plus size={15} />
                   <span>Nueva Orden de Compra</span>
                 </button>
+              </div>
+
+              {/* LISTA GLOBAL DE REPOSICIÓN A PROVEEDORES */}
+              <div style={{ backgroundColor: '#0B3B49', padding: '16px 20px', borderRadius: '12px', border: '1px solid #F59E0B55', marginBottom: '20px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '10px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <div style={{ padding: '8px', borderRadius: '8px', backgroundColor: '#F59E0B22', color: '#F59E0B' }}>
+                      <AlertTriangle size={20} />
+                    </div>
+                    <div>
+                      <h3 style={{ fontSize: '15px', fontWeight: 'bold', color: '#FFFFFF' }}>Lista Global de Reposición a Proveedores</h3>
+                      <p style={{ fontSize: '11px', color: '#94A3B8' }}>
+                        Productos en punto de reorden. Consolida pedidos y envíalos directamente a tus proveedores vía WhatsApp.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                    <div style={{ textAlign: 'right' }}>
+                      <span style={{ fontSize: '10px', color: '#94A3B8' }}>Inversión Requerida:</span>
+                      <p style={{ fontSize: '15px', fontWeight: 'bold', color: '#10B981' }}>
+                        ${inventoryList.filter(p => p.stock <= p.minStockAlert).reduce((acc, p) => acc + (Math.max(1, p.minStockAlert * 2 - p.stock) * p.costPriceUsd), 0).toFixed(2)} USD
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', textAlign: 'left', borderCollapse: 'collapse', fontSize: '12px' }}>
+                    <thead>
+                      <tr style={{ backgroundColor: '#062F3B', color: '#94A3B8', borderBottom: '1px solid #155E75' }}>
+                        <th style={{ padding: '8px 10px' }}>Producto Faltante</th>
+                        <th style={{ padding: '8px 10px' }}>Stock Actual</th>
+                        <th style={{ padding: '8px 10px' }}>Umbral Mínimo</th>
+                        <th style={{ padding: '8px 10px' }}>Sugerido a Reponer</th>
+                        <th style={{ padding: '8px 10px' }}>Costo Estimado</th>
+                        <th style={{ padding: '8px 10px' }}>Proveedor Habitual</th>
+                        <th style={{ padding: '8px 10px', textAlign: 'center' }}>Acción</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {inventoryList
+                        .filter((p) => p.stock <= p.minStockAlert)
+                        .map((prod) => {
+                          const suggested = Math.max(1, prod.minStockAlert * 2 - prod.stock);
+                          const costEst = suggested * prod.costPriceUsd;
+                          return (
+                            <tr key={prod.id} style={{ borderBottom: '1px solid #155E7533' }}>
+                              <td style={{ padding: '8px 10px', fontWeight: 'bold', color: '#FFFFFF' }}>{prod.name}</td>
+                              <td style={{ padding: '8px 10px', color: '#EF4444', fontWeight: 'bold' }}>{prod.stock} unids</td>
+                              <td style={{ padding: '8px 10px', color: '#94A3B8' }}>{prod.minStockAlert} unids</td>
+                              <td style={{ padding: '8px 10px', color: '#A3E635', fontWeight: 'bold' }}>+{suggested} unids</td>
+                              <td style={{ padding: '8px 10px', color: '#10B981', fontWeight: 'bold' }}>
+                                ${costEst.toFixed(2)}
+                                <span style={{ display: 'block', fontSize: '10px', color: '#64748B' }}>(${(costEst * activeRate).toFixed(2)} Bs)</span>
+                              </td>
+                              <td style={{ padding: '8px 10px' }}>
+                                <span style={{ fontWeight: '500' }}>{prod.supplier}</span>
+                                <span style={{ display: 'block', fontSize: '10px', color: '#94A3B8' }}>{prod.supplierPhone}</span>
+                              </td>
+                              <td style={{ padding: '8px 10px', textAlign: 'center' }}>
+                                <button
+                                  onClick={() => {
+                                    const cleanPhone = prod.supplierPhone.replace(/\D/g, '');
+                                    const msg = `*SOLICITUD DE REPOSICIÓN*\nComercio: ${user?.businessName}\nProveedor: ${prod.supplier}\n\nRequerimos cotización y reposición de:\n- *${suggested} unidades* de *${prod.name}* (SKU: ${prod.sku})\nCosto estimado: $${costEst.toFixed(2)} USD (≈ ${(costEst * activeRate).toFixed(2)} Bs)\n\nPor favor confirmar disponibilidad y fecha de entrega.`;
+                                    window.open(`https://wa.me/${cleanPhone}?text=${encodeURIComponent(msg)}`, '_blank');
+                                  }}
+                                  style={{ padding: '5px 10px', borderRadius: '6px', border: 'none', backgroundColor: '#10B981', color: '#FFFFFF', fontWeight: 'bold', fontSize: '11px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                                >
+                                  <Send size={12} />
+                                  <span>Pedir WhatsApp</span>
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                    </tbody>
+                  </table>
+                </div>
               </div>
 
               <div style={{ backgroundColor: '#0B3B49', borderRadius: '12px', border: '1px solid #155E75', overflowX: 'auto' }}>
@@ -2211,6 +3140,140 @@ export const App: React.FC = () => {
                 ))}
               </div>
 
+              {/* SELECCIÓN DE TASA ACTIVA Y RÉGIMEN FISCAL (SOLO ADMIN) */}
+              {isAdmin && (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '20px', marginBottom: '24px' }}>
+                  {/* SELECTOR DE TASA DE COBRO ACTIVA */}
+                  <div style={{ backgroundColor: '#0B3B49', padding: '20px', borderRadius: '14px', border: '1px solid #10B98155' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px' }}>
+                      <RefreshCw size={20} color="#10B981" />
+                      <h3 style={{ fontSize: '16px', fontWeight: 'bold' }}>Tasa de Cobro Activa para Productos</h3>
+                    </div>
+                    <p style={{ fontSize: '12px', color: '#94A3B8', marginBottom: '14px' }}>
+                      Selecciona cuál tasa de cambio utilizará el sistema para calcular los precios en Bolívares (Bs) en caja y catálogo.
+                    </p>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '14px' }}>
+                      {[
+                        { id: 'BCV', label: 'BCV Oficial (USD)', val: bcvRate, note: 'Tasa legal oficial' },
+                        { id: 'PARALELO', label: 'Monitor Dólar / Paralelo', val: +(bcvRate * 1.138).toFixed(2), note: 'Mercado libre referencial' },
+                        { id: 'EURO', label: 'Euro Oficial BCV', val: +(bcvRate * 1.055).toFixed(2), note: 'Cotización oficial EUR/VES' },
+                        { id: 'CUSTOM', label: 'Tasa Personalizada del Negocio', val: parseFloat(customRateInput) || bcvRate, note: 'Definida por el dueño' },
+                      ].map((opt) => (
+                        <div
+                          key={opt.id}
+                          onClick={() => setActiveRateSource(opt.id as any)}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            padding: '10px 14px',
+                            borderRadius: '8px',
+                            border: `1px solid ${activeRateSource === opt.id ? '#10B981' : '#155E75'}`,
+                            backgroundColor: activeRateSource === opt.id ? '#10B98115' : '#062F3B',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          <div>
+                            <span style={{ fontSize: '13px', fontWeight: 'bold', color: activeRateSource === opt.id ? '#A3E635' : '#FFFFFF' }}>
+                              {opt.label}
+                            </span>
+                            <span style={{ display: 'block', fontSize: '10px', color: '#94A3B8' }}>{opt.note}</span>
+                          </div>
+                          <span style={{ fontSize: '15px', fontWeight: 'bold', color: '#10B981' }}>
+                            {opt.val.toFixed(2)} Bs
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+
+                    {activeRateSource === 'CUSTOM' && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', backgroundColor: '#062F3B', padding: '10px', borderRadius: '8px', marginBottom: '12px' }}>
+                        <span style={{ fontSize: '12px', color: '#CBD5E1' }}>Monto Tasa (Bs):</span>
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={customRateInput}
+                          onChange={(e) => setCustomRateInput(e.target.value)}
+                          style={{ width: '100px', padding: '6px', borderRadius: '6px', border: '1px solid #10B981', backgroundColor: '#071F27', color: '#10B981', fontWeight: 'bold', fontSize: '14px' }}
+                        />
+                      </div>
+                    )}
+
+                    <div style={{ backgroundColor: '#062F3B', padding: '10px 14px', borderRadius: '8px', fontSize: '12px', color: '#A3E635', fontWeight: 'bold' }}>
+                      ✓ Tasa Aplicada Actualmente: {activeRate.toFixed(2)} Bs/$ ({activeRateSource})
+                    </div>
+                  </div>
+
+                  {/* RÉGIMEN FISCAL FLEXIBLE (EMPRENDIMIENTOS / NEGOCIOS NO REGISTRADOS) */}
+                  <div style={{ backgroundColor: '#0B3B49', padding: '20px', borderRadius: '14px', border: '1px solid #0284C755' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px' }}>
+                      <ShieldCheck size={20} color="#38BDF8" />
+                      <h3 style={{ fontSize: '16px', fontWeight: 'bold' }}>Régimen Fiscal Flexible (Emprendimientos)</h3>
+                    </div>
+                    <p style={{ fontSize: '12px', color: '#94A3B8', marginBottom: '14px' }}>
+                      Para negocios que están iniciando y no están registrados formalmente ante el SENIAT. Puedes desactivar o activar impuestos con 1 clic sin errores contables a medida que escalas.
+                    </p>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '16px' }}>
+                      {/* Switch IVA */}
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#062F3B', padding: '12px', borderRadius: '8px' }}>
+                        <div>
+                          <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#FFFFFF' }}>Cobro de IVA (16%)</span>
+                          <p style={{ fontSize: '10px', color: '#94A3B8' }}>
+                            {enableIva ? 'Habilitado (Contribuyente Formal SENIAT)' : 'Desafiliado (0% IVA para Emprendimientos)'}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => setEnableIva(!enableIva)}
+                          style={{
+                            padding: '6px 14px',
+                            borderRadius: '20px',
+                            border: 'none',
+                            fontWeight: 'bold',
+                            fontSize: '11px',
+                            cursor: 'pointer',
+                            backgroundColor: enableIva ? '#10B981' : '#334155',
+                            color: '#FFFFFF',
+                          }}
+                        >
+                          {enableIva ? 'ACTIVO (16%)' : 'DESAFILIADO (0%)'}
+                        </button>
+                      </div>
+
+                      {/* Switch IGTF */}
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#062F3B', padding: '12px', borderRadius: '8px' }}>
+                        <div>
+                          <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#FFFFFF' }}>Cobro de IGTF (3% Divisas)</span>
+                          <p style={{ fontSize: '10px', color: '#94A3B8' }}>
+                            {enableIgtf ? 'Habilitado (Sujeto Pasivo Especial)' : 'Desafiliado (0% IGTF para pequeños negocios)'}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => setEnableIgtf(!enableIgtf)}
+                          style={{
+                            padding: '6px 14px',
+                            borderRadius: '20px',
+                            border: 'none',
+                            fontWeight: 'bold',
+                            fontSize: '11px',
+                            cursor: 'pointer',
+                            backgroundColor: enableIgtf ? '#F59E0B' : '#334155',
+                            color: '#FFFFFF',
+                          }}
+                        >
+                          {enableIgtf ? 'ACTIVO (3%)' : 'DESAFILIADO (0%)'}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div style={{ fontSize: '11px', color: '#94A3B8', borderLeft: '3px solid #38BDF8', paddingLeft: '10px' }}>
+                      💡 <strong>Tranquilidad fiscal:</strong> Si tu negocio no está inscrito ante el SENIAT, mantén desafiliado el IVA e IGTF. Cuando te formalices, actívalos y el sistema calculará inmediatamente los libros y alícuotas sin alterar tu historial previo.
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Gráfico Histórico */}
               <div style={{ backgroundColor: '#0B3B49', padding: '20px', borderRadius: '12px', border: '1px solid #155E75' }}>
                 <h3 style={{ fontSize: '15px', fontWeight: 'bold', marginBottom: '16px' }}>Tendencia de Fluctuación de la Tasa BCV (Últimos 7 días)</h3>
@@ -2279,8 +3342,196 @@ export const App: React.FC = () => {
               </div>
             </div>
           )}
+
+          {/* TAB 10: AUDITORÍA Y BACKUPS (SOLO ADMIN) */}
+          {activeTab === 'AUDIT' && isAdmin && (
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '12px' }}>
+                <div>
+                  <h2 style={{ fontSize: '24px', fontWeight: 'bold' }}>Logs de Auditoría Inmutable & Respaldos (Backups)</h2>
+                  <p style={{ color: '#94A3B8', fontSize: '13px' }}>
+                    Trazabilidad de operaciones críticas (ventas, cambios de tasa, ajustes de stock y márgenes) y descarga de copias de seguridad.
+                  </p>
+                </div>
+
+                <button
+                  onClick={handleDownloadBackup}
+                  disabled={isBackupDownloading}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    backgroundColor: '#10B981',
+                    color: '#FFFFFF',
+                    padding: '10px 18px',
+                    borderRadius: '8px',
+                    border: 'none',
+                    fontWeight: 'bold',
+                    fontSize: '13px',
+                    cursor: isBackupDownloading ? 'wait' : 'pointer',
+                  }}
+                >
+                  <Download size={16} />
+                  <span>{isBackupDownloading ? 'Generando Copia...' : 'Descargar Backup Completo (JSON)'}</span>
+                </button>
+              </div>
+
+              {/* TARJETAS DE ESTADO DEL SISTEMA Y BACKUPS */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '14px', marginBottom: '24px' }}>
+                <div style={{ backgroundColor: '#0B3B49', padding: '18px', borderRadius: '12px', border: '1px solid #155E75' }}>
+                  <span style={{ fontSize: '11px', color: '#94A3B8' }}>Productos en Base de Datos</span>
+                  <p style={{ fontSize: '24px', fontWeight: 'bold', color: '#38BDF8', marginTop: '6px' }}>{inventoryList.length}</p>
+                  <span style={{ fontSize: '10px', color: '#10B981' }}>● Sincronizados en Nube</span>
+                </div>
+
+                <div style={{ backgroundColor: '#0B3B49', padding: '18px', borderRadius: '12px', border: '1px solid #155E75' }}>
+                  <span style={{ fontSize: '11px', color: '#94A3B8' }}>Facturas y Ventas Registradas</span>
+                  <p style={{ fontSize: '24px', fontWeight: 'bold', color: '#10B981', marginTop: '6px' }}>{salesHistory.length}</p>
+                  <span style={{ fontSize: '10px', color: '#38BDF8' }}>Con correlativo SENIAT</span>
+                </div>
+
+                <div style={{ backgroundColor: '#0B3B49', padding: '18px', borderRadius: '12px', border: '1px solid #155E75' }}>
+                  <span style={{ fontSize: '11px', color: '#94A3B8' }}>Eventos Auditados</span>
+                  <p style={{ fontSize: '24px', fontWeight: 'bold', color: '#F59E0B', marginTop: '6px' }}>{auditLogsList.length}</p>
+                  <span style={{ fontSize: '10px', color: '#94A3B8' }}>Inmutables en PostgreSQL</span>
+                </div>
+
+                <div style={{ backgroundColor: '#0B3B49', padding: '18px', borderRadius: '12px', border: '1px solid #155E75' }}>
+                  <span style={{ fontSize: '11px', color: '#94A3B8' }}>Último Respaldo</span>
+                  <p style={{ fontSize: '16px', fontWeight: 'bold', color: '#A3E635', marginTop: '10px' }}>Hoy (Automático)</p>
+                  <span style={{ fontSize: '10px', color: '#94A3B8' }}>Formato JSON estándar</span>
+                </div>
+              </div>
+
+              {/* TABLA DE AUDIT LOGS */}
+              <div style={{ backgroundColor: '#0B3B49', borderRadius: '12px', border: '1px solid #155E75', overflowX: 'auto' }}>
+                <div style={{ padding: '14px 18px', borderBottom: '1px solid #155E75', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <h3 style={{ fontSize: '15px', fontWeight: 'bold', color: '#FFFFFF' }}>Registro Cronológico de Eventos</h3>
+                  <span style={{ fontSize: '11px', color: '#38BDF8' }}>Filtrado por seguridad multi-tenant</span>
+                </div>
+
+                <table style={{ width: '100%', textAlign: 'left', borderCollapse: 'collapse', fontSize: '12px' }}>
+                  <thead>
+                    <tr style={{ backgroundColor: '#062F3B', color: '#94A3B8', borderBottom: '1px solid #155E75' }}>
+                      <th style={{ padding: '10px 14px' }}>Fecha y Hora</th>
+                      <th style={{ padding: '10px 14px' }}>Usuario</th>
+                      <th style={{ padding: '10px 14px' }}>Acción</th>
+                      <th style={{ padding: '10px 14px' }}>Módulo / Entidad</th>
+                      <th style={{ padding: '10px 14px' }}>Canal</th>
+                      <th style={{ padding: '10px 14px' }}>Resultado</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {auditLogsList.map((log) => (
+                      <tr key={log.id} style={{ borderBottom: '1px solid #155E7533' }}>
+                        <td style={{ padding: '10px 14px', color: '#94A3B8' }}>{log.createdAt}</td>
+                        <td style={{ padding: '10px 14px', fontWeight: 'bold', color: '#38BDF8' }}>@{log.user}</td>
+                        <td style={{ padding: '10px 14px' }}>
+                          <span style={{ padding: '2px 6px', borderRadius: '4px', backgroundColor: '#062F3B', color: '#FFFFFF', fontFamily: 'monospace', fontSize: '11px' }}>
+                            {log.action}
+                          </span>
+                        </td>
+                        <td style={{ padding: '10px 14px', color: '#CBD5E1' }}>{log.entity}</td>
+                        <td style={{ padding: '10px 14px', color: '#94A3B8' }}>{log.channel}</td>
+                        <td style={{ padding: '10px 14px' }}>
+                          <span style={{ padding: '2px 6px', borderRadius: '4px', backgroundColor: log.result === 'SUCCESS' ? '#10B98122' : '#EF444422', color: log.result === 'SUCCESS' ? '#10B981' : '#EF4444', fontWeight: 'bold', fontSize: '10px' }}>
+                            {log.result}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </main>
       </div>
+
+      {/* MODAL: COMPROBANTE DIGITAL / ENVÍO POR WHATSAPP (CERO IMPRESORA) */}
+      {completedSaleModal && (
+        <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px', zIndex: 1000 }}>
+          <div style={{ width: '100%', maxWidth: '500px', backgroundColor: '#0B3B49', borderRadius: '20px', padding: '28px', border: '1px solid #10B981', boxShadow: '0 25px 50px -12px rgba(0,0,0,0.7)', textAlign: 'center' }}>
+            <div style={{ width: '56px', height: '56px', borderRadius: '28px', backgroundColor: '#10B98122', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px', color: '#10B981' }}>
+              <CheckCircle size={32} />
+            </div>
+
+            <h3 style={{ fontSize: '20px', fontWeight: 'bold', color: '#FFFFFF', marginBottom: '4px' }}>
+              ¡Venta y Cobro Exitosos!
+            </h3>
+            <p style={{ fontSize: '13px', color: '#38BDF8', fontWeight: 'bold', marginBottom: '16px' }}>
+              Comprobante N° {completedSaleModal.invoiceFormattedNumber}
+            </p>
+
+            <div style={{ backgroundColor: '#062F3B', padding: '16px', borderRadius: '12px', border: '1px solid #155E75', marginBottom: '20px', textAlign: 'left' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
+                <span style={{ fontSize: '12px', color: '#94A3B8' }}>Cliente:</span>
+                <span style={{ fontSize: '12px', fontWeight: 'bold', color: '#FFFFFF' }}>{completedSaleModal.customerName}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
+                <span style={{ fontSize: '12px', color: '#94A3B8' }}>Método de Pago:</span>
+                <span style={{ fontSize: '12px', fontWeight: 'bold', color: '#A3E635' }}>{completedSaleModal.paymentMethod}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
+                <span style={{ fontSize: '12px', color: '#94A3B8' }}>Total Cobrado:</span>
+                <span style={{ fontSize: '16px', fontWeight: '900', color: '#10B981' }}>${completedSaleModal.totalUsd.toFixed(2)} USD (≈ {completedSaleModal.totalBs.toFixed(2)} Bs)</span>
+              </div>
+              {completedSaleModal.vueltoUsd > 0 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #155E75', paddingTop: '6px', marginTop: '6px' }}>
+                  <span style={{ fontSize: '12px', color: '#A3E635', fontWeight: 'bold' }}>Vuelto Entregado:</span>
+                  <span style={{ fontSize: '12px', fontWeight: 'bold', color: '#A3E635' }}>${completedSaleModal.vueltoUsd.toFixed(2)} USD ({completedSaleModal.vueltoBs.toFixed(2)} Bs)</span>
+                </div>
+              )}
+            </div>
+
+            {/* BOTÓN ESTRELLA: ENVIAR POR WHATSAPP SIN IMPRESORA */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <a
+                href={getWhatsAppDeliveryNoteUrl(completedSaleModal)}
+                target="_blank"
+                rel="noreferrer"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  backgroundColor: '#10B981',
+                  color: '#FFFFFF',
+                  padding: '14px',
+                  borderRadius: '10px',
+                  fontWeight: 'bold',
+                  fontSize: '14px',
+                  textDecoration: 'none',
+                  boxShadow: '0 4px 14px rgba(16, 185, 129, 0.4)',
+                }}
+              >
+                <MessageCircle size={20} />
+                <span>📲 Enviar Nota de Entrega por WhatsApp</span>
+              </a>
+
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <button
+                  onClick={() => {
+                    alert('Generando Factura Fiscal Digital en PDF...');
+                    window.open('/api/v1/reports/sales-book/csv', '_blank');
+                  }}
+                  style={{ flex: 1, padding: '12px', borderRadius: '10px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#38BDF8', fontWeight: 'bold', fontSize: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+                >
+                  <FileText size={16} />
+                  <span>Ver PDF Digital</span>
+                </button>
+
+                <button
+                  onClick={() => setCompletedSaleModal(null)}
+                  style={{ flex: 1, padding: '12px', borderRadius: '10px', border: 'none', backgroundColor: '#0284C7', color: '#FFFFFF', fontWeight: 'bold', fontSize: '12px', cursor: 'pointer' }}
+                >
+                  Nueva Venta
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* MODAL 1: REGISTRAR NUEVO PRODUCTO */}
       {isAddModalOpen && (

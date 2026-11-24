@@ -217,4 +217,52 @@ export class ProductService {
       .returning();
     return deleted || null;
   }
+
+  /**
+   * Aplica un margen de ganancia global (%) masivamente a todos los productos del inventario
+   * basándose en el costo unitario (salePrice = costPrice * (1 + margin / 100))
+   */
+  static async applyGlobalProfitMargin(
+    tenantId: string,
+    userId: string,
+    marginPercentage: number,
+    categoryId?: string
+  ): Promise<{ updatedCount: number; marginPercentage: number }> {
+    const conditions = [eq(products.tenantId, tenantId), eq(products.isActive, true)];
+    if (categoryId) {
+      conditions.push(eq(products.categoryId, categoryId));
+    }
+
+    const allProducts = await db
+      .select()
+      .from(products)
+      .where(and(...conditions));
+
+    let count = 0;
+    const factor = 1 + marginPercentage / 100;
+
+    for (const prod of allProducts) {
+      const cost = parseFloat(prod.costPriceUsd);
+      if (cost > 0) {
+        const newSalePrice = +(cost * factor).toFixed(4);
+        await db
+          .update(products)
+          .set({ salePriceUsd: newSalePrice.toFixed(4), updatedAt: new Date() })
+          .where(eq(products.id, prod.id));
+        count++;
+      }
+    }
+
+    await AuditService.log({
+      tenantId,
+      userId,
+      action: 'APPLY_GLOBAL_PROFIT_MARGIN',
+      entity: 'product',
+      payload: { marginPercentage, categoryId, updatedCount: count },
+      result: 'SUCCESS',
+      channel: 'WEB_ADMIN',
+    });
+
+    return { updatedCount: count, marginPercentage };
+  }
 }

@@ -65,4 +65,23 @@ export class ProductController {
       next(err);
     }
   }
+
+  static async applyGlobalMargin(req: Request, res: Response, next: NextFunction) {
+    try {
+      const tenantId = req.tenantId!;
+      const userId = req.user?.id || 'system';
+      const marginPercentage = parseFloat(req.body.marginPercentage);
+      const categoryId = req.body.categoryId;
+
+      if (isNaN(marginPercentage) || marginPercentage <= 0) {
+        res.status(400).json({ code: 'INVALID_MARGIN', message: 'El porcentaje de margen debe ser un número positivo.' });
+        return;
+      }
+
+      const result = await ProductService.applyGlobalProfitMargin(tenantId, userId, marginPercentage, categoryId);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
 }

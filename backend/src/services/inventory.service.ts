@@ -1,6 +1,6 @@
 import { eq, and, sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
-import { productStock, inventoryMovements, products, warehouses } from '../db/schema.js';
+import { productStock, inventoryMovements, products, warehouses, suppliers } from '../db/schema.js';
 import { AuditService } from './audit.service.js';
 
 export class InventoryService {
@@ -171,5 +171,76 @@ export class InventoryService {
   static async getLowStock(tenantId: string) {
     const allStock = await this.getStock(tenantId);
     return allStock.filter((s) => parseFloat(s.quantity || '0') <= 5);
+  }
+
+  /**
+   * Genera la lista global consolidada de reposición a proveedores
+   * Calcula faltantes según stock mínimo, costos estimados y agrupa por proveedor
+   */
+  static async getGlobalReplenishmentList(tenantId: string) {
+    const list = await db
+      .select({
+        productId: products.id,
+        productName: products.name,
+        sku: products.sku,
+        costPriceUsd: products.costPriceUsd,
+        salePriceUsd: products.salePriceUsd,
+        minStockAlert: products.minStockAlert,
+        currentStock: sql<string>`COALESCE(${productStock.quantity}, '0.000')`,
+        supplierId: suppliers.id,
+        supplierName: suppliers.name,
+        supplierPhone: suppliers.phone,
+        supplierRif: sql<string>`CONCAT(${suppliers.documentType}, '-', ${suppliers.documentNumber})`,
+      })
+      .from(products)
+      .leftJoin(productStock, eq(products.id, productStock.productId))
+      .leftJoin(suppliers, eq(products.supplierId, suppliers.id))
+      .where(and(eq(products.tenantId, tenantId), eq(products.isActive, true)));
+
+    // Filtrar solo los que están por debajo o igual al umbral
+    const lowStockItems = list
+      .map((item) => {
+        const current = parseFloat(item.currentStock || '0');
+        const minAlert = parseFloat(item.minStockAlert || '5');
+        const isLow = current <= minAlert;
+        const suggestedQty = Math.max(1, Math.ceil(minAlert * 2 - current));
+        const estimatedCost = +(suggestedQty * parseFloat(item.costPriceUsd)).toFixed(4);
+        return {
+          ...item,
+          currentStockNum: current,
+          minAlertNum: minAlert,
+          isLow,
+          suggestedQty,
+          estimatedCost,
+        };
+      })
+      .filter((i) => i.isLow);
+
+    // Agrupar por proveedor
+    const groupedBySupplier: Record<string, any> = {};
+    for (const item of lowStockItems) {
+      const supKey = item.supplierId || 'unassigned';
+      if (!groupedBySupplier[supKey]) {
+        groupedBySupplier[supKey] = {
+          supplierId: item.supplierId || null,
+          supplierName: item.supplierName || 'Proveedor General / No Asignado',
+          supplierPhone: item.supplierPhone || '',
+          supplierRif: item.supplierRif || 'N/A',
+          items: [],
+          totalEstimatedCost: 0,
+        };
+      }
+      groupedBySupplier[supKey].items.push(item);
+      groupedBySupplier[supKey].totalEstimatedCost = +(
+        groupedBySupplier[supKey].totalEstimatedCost + item.estimatedCost
+      ).toFixed(2);
+    }
+
+    return {
+      totalProductsToReplenish: lowStockItems.length,
+      globalEstimatedCost: +lowStockItems.reduce((acc, curr) => acc + curr.estimatedCost, 0).toFixed(2),
+      items: lowStockItems,
+      bySupplier: Object.values(groupedBySupplier),
+    };
   }
 }

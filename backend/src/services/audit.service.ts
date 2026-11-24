@@ -1,3 +1,4 @@
+import { eq, and, sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { auditLogs } from '../db/schema.js';
 
@@ -38,5 +39,39 @@ export class AuditService {
       // pero debe registrarse en la salida de error estructurada.
       console.error('Error registrando auditoría en DB:', error);
     }
+  }
+
+  /**
+   * Consulta el registro de auditoría inmutable con paginación y filtros
+   */
+  static async listLogs(
+    tenantId: string,
+    options: { page?: number; limit?: number; action?: string; channel?: string } = {}
+  ) {
+    const page = options.page || 1;
+    const limit = options.limit || 50;
+    const offset = (page - 1) * limit;
+
+    const conditions = [eq(auditLogs.tenantId, tenantId)];
+    if (options.action) {
+      conditions.push(eq(auditLogs.action, options.action));
+    }
+    if (options.channel) {
+      conditions.push(eq(auditLogs.channel, options.channel as any));
+    }
+
+    const rows = await db
+      .select()
+      .from(auditLogs)
+      .where(and(...conditions))
+      .orderBy(sql`${auditLogs.createdAt} DESC`)
+      .limit(limit)
+      .offset(offset);
+
+    return {
+      page,
+      limit,
+      logs: rows,
+    };
   }
 }

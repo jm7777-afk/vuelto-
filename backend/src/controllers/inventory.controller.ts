@@ -31,6 +31,15 @@ export class InventoryController {
     }
   }
 
+  static async getReplenishmentList(req: Request, res: Response, next: NextFunction) {
+    try {
+      const list = await InventoryService.getGlobalReplenishmentList(req.tenantId!);
+      res.json(list);
+    } catch (err) {
+      next(err);
+    }
+  }
+
   static async adjustStock(req: Request, res: Response, next: NextFunction) {
     try {
       const { warehouseId, productId, movementType, quantity, unitCostUsd, reason } = req.body;
