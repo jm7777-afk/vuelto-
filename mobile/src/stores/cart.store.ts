@@ -11,6 +11,7 @@ export interface CartLine {
   subtotalUsd: number;
   taxAmountUsd: number;
   totalUsd: number;
+  unitOfMeasure?: string;
 }
 
 export interface CustomerSummary {
@@ -53,6 +54,7 @@ interface CartState {
     salePriceUsd: number;
     taxRate: number;
     isExempt: boolean;
+    unitOfMeasure?: string;
   }) => void;
   updateQuantity: (productId: string, quantity: number) => void;
   removeLine: (productId: string) => void;
@@ -111,6 +113,7 @@ export const useCartStore = create<CartState>((set, get) => ({
         subtotalUsd: price,
         taxAmountUsd: taxAmount,
         totalUsd: price + taxAmount,
+        unitOfMeasure: product.unitOfMeasure || 'unidad',
       };
 
       set({ activeLines: [...lines, newLine] });

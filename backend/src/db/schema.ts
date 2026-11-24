@@ -124,6 +124,7 @@ export const products = pgTable(
     supplierId: uuid('supplier_id').references(() => suppliers.id, { onDelete: 'set null' }),
     sku: varchar('sku', { length: 50 }),
     name: varchar('name', { length: 150 }).notNull(),
+    unitOfMeasure: varchar('unit_of_measure', { length: 20 }).default('UNIDAD').notNull(),
     description: text('description'),
     costPriceUsd: numeric('cost_price_usd', { precision: 14, scale: 4 }).default('0.0000').notNull(),
     salePriceUsd: numeric('sale_price_usd', { precision: 14, scale: 4 }).notNull(),

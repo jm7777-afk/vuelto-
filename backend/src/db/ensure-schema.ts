@@ -76,6 +76,7 @@ export async function ensureSchema() {
       );
 
       ALTER TABLE products ADD COLUMN IF NOT EXISTS supplier_id UUID REFERENCES suppliers(id) ON DELETE SET NULL;
+      ALTER TABLE products ADD COLUMN IF NOT EXISTS unit_of_measure VARCHAR(20) NOT NULL DEFAULT 'UNIDAD';
       ALTER TABLE customers ADD COLUMN IF NOT EXISTS is_special_mora_customer BOOLEAN NOT NULL DEFAULT false;
       ALTER TABLE tenant_configurations ADD COLUMN IF NOT EXISTS active_rate_source VARCHAR(20) NOT NULL DEFAULT 'BCV';
       ALTER TABLE tenant_configurations ADD COLUMN IF NOT EXISTS custom_rate_value NUMERIC(14, 4) NOT NULL DEFAULT 0.0000;

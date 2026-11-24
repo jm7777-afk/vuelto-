@@ -17,12 +17,31 @@ import { useAuthStore } from '../../stores/auth.store';
 import { NativeShareService } from '../../services/share.service';
 import { MobileApiService } from '../../services/api.service';
 
-// Catálogo base verificado en Supabase PostgreSQL (Códigos GS1 759 matemáticamente válidos)
+// Clientes registrados en el sistema para consulta por C.I.
+interface CustomerEntry {
+  id: string;
+  name: string;
+  documentType: 'V' | 'E' | 'J' | 'G';
+  documentNumber: string;
+  phone?: string;
+  balanceDue: number;
+}
+
+const KNOWN_CUSTOMERS: CustomerEntry[] = [
+  { id: 'c0', name: 'Consumidor Final', documentType: 'V', documentNumber: '00000000', phone: '', balanceDue: 0 },
+  { id: 'c1', name: 'Automercado Miranda C.A.', documentType: 'J', documentNumber: '401234567', phone: '+584121112233', balanceDue: 145.50 },
+  { id: 'c2', name: 'Distribuidora Los Próceres', documentType: 'J', documentNumber: '309876543', phone: '+584149998877', balanceDue: 280.00 },
+  { id: 'c3', name: 'María Corina Machado', documentType: 'V', documentNumber: '14523988', phone: '+584145556677', balanceDue: 0 },
+];
+
+// Catálogo base con unidad de medida según categoría
 const DEFAULT_PRODUCTS = [
   {
     id: 'prod_harina_pan',
     name: 'Harina PAN Blanca 1kg',
     barcode: '7591001001019',
+    unitOfMeasure: 'paquete',
+    category: 'Alimentos',
     salePriceUsd: 1.25,
     taxRate: 0.0,
     isExempt: true,
@@ -32,6 +51,8 @@ const DEFAULT_PRODUCTS = [
     id: 'prod_arroz_primor',
     name: 'Arroz Primor Grano Entero 1kg',
     barcode: '7591003003035',
+    unitOfMeasure: 'kg',
+    category: 'Alimentos',
     salePriceUsd: 1.50,
     taxRate: 0.0,
     isExempt: true,
@@ -41,6 +62,8 @@ const DEFAULT_PRODUCTS = [
     id: 'prod_aceite_mazeite',
     name: 'Aceite de Maíz Mazeite 1L',
     barcode: '7591004004048',
+    unitOfMeasure: 'L',
+    category: 'Alimentos',
     salePriceUsd: 3.80,
     taxRate: 16.0,
     isExempt: false,
@@ -50,6 +73,8 @@ const DEFAULT_PRODUCTS = [
     id: 'prod_pepsi_cola',
     name: 'Refresco Pepsi Cola 1.5L',
     barcode: '7591002002026',
+    unitOfMeasure: 'botella',
+    category: 'Bebidas',
     salePriceUsd: 1.90,
     taxRate: 16.0,
     isExempt: false,
@@ -86,12 +111,18 @@ export const PosCheckoutScreen: React.FC = () => {
   // Catálogo y Búsqueda
   const [catalogSearch, setCatalogSearch] = useState('');
   const [catalogProducts, setCatalogProducts] = useState(DEFAULT_PRODUCTS);
+  const [quickBarcodeInput, setQuickBarcodeInput] = useState('');
 
-  // Formulario de Cliente Rápido
+  // Formulario de Cliente Rápido con Búsqueda por C.I.
   const [docType, setDocType] = useState<'V' | 'E' | 'J' | 'G'>('V');
   const [docNumber, setDocNumber] = useState('');
-  const [customerName, setCustomerName] = useState('');
+  const [customerFirstName, setCustomerFirstName] = useState('');
+  const [customerLastName, setCustomerLastName] = useState('');
   const [customerPhone, setCustomerPhone] = useState('');
+  const [customerSearchMsg, setCustomerSearchMsg] = useState<{ type: 'success' | 'warning' | null; text: string }>({
+    type: null,
+    text: '',
+  });
 
   // Selector de Vuelto y Pago
   const [paymentCurrency, setPaymentCurrency] = useState<'USD_CASH' | 'BS_PAGO_MOVIL' | 'BS_BIOPAGO'>('USD_CASH');
@@ -127,26 +158,151 @@ export const PosCheckoutScreen: React.FC = () => {
     loadLiveProducts();
   }, []);
 
-  // Registrar cliente rápido
-  const handleSaveQuickCustomer = () => {
-    if (!docNumber || !customerName) {
-      Alert.alert('Datos Incompletos', 'El documento y el nombre son obligatorios.');
+  // Escaneo de código de barra con fallback inteligente por nombre / SKU
+  const handleScanOrSearch = () => {
+    const query = quickBarcodeInput.trim();
+    if (!query) {
+      Alert.alert('Escáner / Búsqueda', 'Ingrese o escanee un código de barra o nombre de producto.');
       return;
     }
 
-    setCustomer({
-      id: `temp_${Date.now()}`,
-      name: customerName,
-      documentType: docType,
-      documentNumber: docNumber,
-      phone: customerPhone,
-      balanceDue: 0,
-    });
+    // 1. Coincidencia exacta por código de barra
+    const exactBarcode = catalogProducts.find((p) => p.barcode === query);
+    if (exactBarcode) {
+      addProduct({
+        id: exactBarcode.id,
+        name: exactBarcode.name,
+        barcode: exactBarcode.barcode,
+        salePriceUsd: exactBarcode.salePriceUsd,
+        taxRate: exactBarcode.taxRate,
+        isExempt: exactBarcode.isExempt,
+        unitOfMeasure: (exactBarcode as any).unitOfMeasure,
+      });
+      setQuickBarcodeInput('');
+      Alert.alert('✅ Producto Escaneado', `${exactBarcode.name} agregado al carrito.`);
+      return;
+    }
 
+    // 2. Fallback: búsqueda por SKU o coincidencia en el nombre
+    const lower = query.toLowerCase();
+    const matches = catalogProducts.filter(
+      (p) =>
+        p.barcode.includes(query) ||
+        p.id.toLowerCase().includes(lower) ||
+        p.name.toLowerCase().includes(lower)
+    );
+
+    if (matches.length === 1) {
+      const match = matches[0];
+      addProduct({
+        id: match.id,
+        name: match.name,
+        barcode: match.barcode,
+        salePriceUsd: match.salePriceUsd,
+        taxRate: match.taxRate,
+        isExempt: match.isExempt,
+        unitOfMeasure: (match as any).unitOfMeasure,
+      });
+      setQuickBarcodeInput('');
+      Alert.alert('🔍 Coincidencia Encontrada', `${match.name} agregado al carrito.`);
+    } else if (matches.length > 1) {
+      // Múltiples coincidencias: abrir catálogo pre-filtrado
+      setCatalogSearch(query);
+      setShowCatalogModal(true);
+      setQuickBarcodeInput('');
+    } else {
+      Alert.alert(
+        '⚠️ No Encontrado',
+        `No se encontró ningún producto con código "${query}". Verifique el código o abra el catálogo manual.`
+      );
+    }
+  };
+
+  // Consultar Cliente Registrado por Cédula / RIF
+  const handleSearchCustomerByCi = () => {
+    const cleanNum = docNumber.trim();
+    if (!cleanNum) {
+      Alert.alert('Cédula Requerida', 'Por favor ingrese el número de cédula o RIF a consultar.');
+      return;
+    }
+
+    const found = KNOWN_CUSTOMERS.find(
+      (c) => c.documentType === docType && c.documentNumber === cleanNum
+    );
+
+    if (found) {
+      const nameParts = found.name.split(' ');
+      setCustomerFirstName(nameParts[0] || '');
+      setCustomerLastName(nameParts.slice(1).join(' ') || '');
+      setCustomerPhone(found.phone || '');
+      setCustomerSearchMsg({
+        type: 'success',
+        text: `✅ Cliente registrado: ${found.name}`,
+      });
+    } else {
+      setCustomerFirstName('');
+      setCustomerLastName('');
+      setCustomerPhone('');
+      setCustomerSearchMsg({
+        type: 'warning',
+        text: `⚠️ Cédula no registrada (${docType}-${cleanNum}). Ingrese Nombre, Apellido y Teléfono para afiliar:`,
+      });
+    }
+  };
+
+  // Registrar cliente rápido (Nombre, Apellido, Teléfono) y asignar al carrito
+  const handleSaveQuickCustomer = () => {
+    const cleanNum = docNumber.trim();
+    const cleanFirst = customerFirstName.trim();
+    const cleanLast = customerLastName.trim();
+
+    if (!cleanNum || !cleanFirst) {
+      Alert.alert('Datos Incompletos', 'El documento y al menos el primer nombre son obligatorios.');
+      return;
+    }
+
+    const fullName = cleanLast ? `${cleanFirst} ${cleanLast}` : cleanFirst;
+
+    const newCustomer = {
+      id: `c_${Date.now()}`,
+      name: fullName,
+      documentType: docType,
+      documentNumber: cleanNum,
+      phone: customerPhone.trim(),
+      balanceDue: 0,
+    };
+
+    // Agregar a clientes conocidos para futuras consultas en la sesión
+    KNOWN_CUSTOMERS.push(newCustomer);
+
+    setCustomer(newCustomer);
     setShowQuickCustomerModal(false);
     setDocNumber('');
-    setCustomerName('');
+    setCustomerFirstName('');
+    setCustomerLastName('');
     setCustomerPhone('');
+    setCustomerSearchMsg({ type: null, text: '' });
+  };
+
+  // Agregar otra venta paralela (+ Otra Venta) sin perder la actual
+  const handleCreateAnotherSale = () => {
+    if (activeLines.length > 0) {
+      const label = activeCustomer
+        ? activeCustomer.name.split(' ')[0]
+        : `Venta #${heldCarts.length + 1}`;
+      const res = parkCurrentCart(label);
+      if (res.success) {
+        Alert.alert(
+          'Venta Pausada en Fichero',
+          `La venta de ${label} fue guardada en el fichero superior. Carrito listo para el nuevo cliente.`
+        );
+      } else {
+        Alert.alert('Aviso', res.error || 'No se pudo pausar la venta.');
+      }
+    } else {
+      clearActiveCart();
+      Alert.alert('Nueva Venta', 'Venta limpia lista para registrar productos.');
+    }
   };
 
   // Confirmar Venta Atómica con Reglas SENIAT
@@ -229,24 +385,93 @@ export const PosCheckoutScreen: React.FC = () => {
         </View>
       </View>
 
-      {/* 2. Barra de Herramientas Rápidas (Catálogo y Cuentas en Espera) */}
-      <View style={styles.quickBar}>
+      {/* 2. Fichero Superior de Ventas en Espera (Cuentas Paralelas) */}
+      <View style={styles.ticketsTabBar}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.ticketsScrollContent}
+        >
+          {/* Ticket Activo Actual */}
+          <View style={styles.activeTicketTab}>
+            <Text style={styles.activeTicketIcon}>🛒</Text>
+            <View>
+              <Text style={styles.activeTicketTitle}>
+                {activeCustomer ? activeCustomer.name.split(' ')[0] : 'Venta Activa'}
+              </Text>
+              <Text style={styles.activeTicketSubtitle}>
+                {activeLines.length} prod. | ${getTotalUsd().toFixed(2)}
+              </Text>
+            </View>
+          </View>
+
+          {/* Cuentas en Espera (Held Carts) */}
+          {heldCarts.map((h) => (
+            <TouchableOpacity
+              key={h.id}
+              style={styles.heldTicketTab}
+              onPress={() => resumeHeldCart(h.id)}
+            >
+              <Text style={styles.heldTicketIcon}>⏸️</Text>
+              <View style={{ marginRight: 6 }}>
+                <Text style={styles.heldTicketTitle}>{h.label}</Text>
+                <Text style={styles.heldTicketSubtitle}>
+                  {h.lines.length} prod. | ${h.totalUsd.toFixed(2)}
+                </Text>
+              </View>
+              <TouchableOpacity
+                onPress={() => {
+                  Alert.alert(
+                    'Descartar Cuenta',
+                    `¿Deseas descartar ${h.label}?`,
+                    [
+                      { text: 'Cancelar', style: 'cancel' },
+                      {
+                        text: 'Descartar',
+                        style: 'destructive',
+                        onPress: () => discardHeldCart(h.id),
+                      },
+                    ]
+                  );
+                }}
+                style={styles.discardTabBtn}
+              >
+                <Text style={styles.discardTabBtnText}>✕</Text>
+              </TouchableOpacity>
+            </TouchableOpacity>
+          ))}
+
+          {/* Botón "+ Otra Venta" */}
+          <TouchableOpacity style={styles.newTicketBtn} onPress={handleCreateAnotherSale}>
+            <Text style={styles.newTicketBtnText}>➕ Otra Venta</Text>
+          </TouchableOpacity>
+        </ScrollView>
+      </View>
+
+      {/* 3. Barra de Escáner de Código de Barras con Fallback a Nombre / SKU */}
+      <View style={styles.barcodeScannerBar}>
+        <TextInput
+          style={styles.barcodeInput}
+          placeholder="📷 Escanear código de barra o buscar..."
+          placeholderTextColor="#64748B"
+          value={quickBarcodeInput}
+          onChangeText={setQuickBarcodeInput}
+          onSubmitEditing={handleScanOrSearch}
+          returnKeyType="search"
+          autoCapitalize="none"
+        />
+        <TouchableOpacity style={styles.barcodeScanActionBtn} onPress={handleScanOrSearch}>
+          <Text style={styles.barcodeScanActionBtnText}>Escanear</Text>
+        </TouchableOpacity>
         <TouchableOpacity
-          style={styles.quickCatalogBtn}
+          style={styles.openCatalogIconBtn}
           onPress={() => setShowCatalogModal(true)}
         >
-          <Text style={styles.quickCatalogBtnText}>🔍 + Catálogo y Precios</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={styles.heldButton}
-          onPress={() => setShowHeldCartsModal(true)}
-        >
-          <Text style={styles.heldButtonText}>Cuentas en Espera ({heldCarts.length})</Text>
+          <Text style={styles.openCatalogIconBtnText}>🔍 Catálogo</Text>
         </TouchableOpacity>
       </View>
 
-      {/* 3. Barra de Cliente Activo */}
+      {/* 4. Barra de Cliente Activo */}
       <View style={styles.customerBar}>
         <View style={{ flex: 1 }}>
           <Text style={styles.customerLabel}>Cliente Asignado:</Text>
@@ -266,7 +491,7 @@ export const PosCheckoutScreen: React.FC = () => {
           style={styles.quickCustomerBtn}
           onPress={() => setShowQuickCustomerModal(true)}
         >
-          <Text style={styles.quickCustomerBtnText}>+ Cliente</Text>
+          <Text style={styles.quickCustomerBtnText}>+ Cliente / C.I.</Text>
         </TouchableOpacity>
       </View>
 
@@ -293,7 +518,7 @@ export const PosCheckoutScreen: React.FC = () => {
                 <View style={{ flex: 1 }}>
                   <Text style={styles.itemName}>{item.name}</Text>
                   <Text style={styles.itemPrice}>
-                    ${item.unitPriceUsd.toFixed(2)} USD ≈ {(item.unitPriceUsd * rate).toFixed(2)} Bs
+                    ${item.unitPriceUsd.toFixed(2)} USD / {item.unitOfMeasure || 'ud'} ≈ {(item.unitPriceUsd * rate).toFixed(2)} Bs
                   </Text>
                 </View>
 
@@ -392,9 +617,13 @@ export const PosCheckoutScreen: React.FC = () => {
                   <View style={styles.catalogItemRow}>
                     <View style={{ flex: 1 }}>
                       <Text style={styles.catalogItemName}>{item.name}</Text>
-                      <Text style={styles.catalogItemBarcode}>EAN-13: {item.barcode}</Text>
+                      <Text style={styles.catalogItemBarcode}>
+                        EAN-13: {item.barcode} • Medida: {(item as any).unitOfMeasure || 'unidad'}
+                      </Text>
                       <View style={{ flexDirection: 'row', gap: 10, marginTop: 4 }}>
-                        <Text style={styles.catalogItemPriceUsd}>${item.salePriceUsd.toFixed(2)} USD</Text>
+                        <Text style={styles.catalogItemPriceUsd}>
+                          ${item.salePriceUsd.toFixed(2)} USD / {(item as any).unitOfMeasure || 'ud'}
+                        </Text>
                         <Text style={styles.catalogItemPriceBs}>({priceBs} Bs)</Text>
                       </View>
                     </View>
@@ -409,6 +638,7 @@ export const PosCheckoutScreen: React.FC = () => {
                           salePriceUsd: item.salePriceUsd,
                           taxRate: item.taxRate,
                           isExempt: item.isExempt,
+                          unitOfMeasure: (item as any).unitOfMeasure,
                         });
                         setShowCatalogModal(false);
                       }}
@@ -423,11 +653,11 @@ export const PosCheckoutScreen: React.FC = () => {
         </View>
       </Modal>
 
-      {/* MODAL 2: REGISTRO RÁPIDO DE CLIENTE */}
+      {/* MODAL 2: BÚSQUEDA POR C.I. Y REGISTRO RÁPIDO DE CLIENTE */}
       <Modal visible={showQuickCustomerModal} animationType="slide" transparent>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Registro Rápido de Cliente</Text>
+            <Text style={styles.modalTitle}>Búsqueda y Registro de Cliente</Text>
 
             <View style={styles.docTypeRow}>
               {(['V', 'E', 'J', 'G'] as const).map((t) => (
@@ -436,28 +666,73 @@ export const PosCheckoutScreen: React.FC = () => {
                   style={[styles.docTypeChip, docType === t && styles.docTypeChipActive]}
                   onPress={() => setDocType(t)}
                 >
-                  <Text style={[styles.docTypeText, docType === t && styles.docTypeTextActive]}>{t}</Text>
+                  <Text style={[styles.docTypeText, docType === t && styles.docTypeTextActive]}>
+                    {t}
+                  </Text>
                 </TouchableOpacity>
               ))}
             </View>
 
-            <TextInput
-              style={styles.input}
-              placeholder="Número de Cédula o RIF"
-              placeholderTextColor="#64748B"
-              keyboardType="numeric"
-              value={docNumber}
-              onChangeText={setDocNumber}
-            />
+            {/* Consulta directa por Cédula / RIF */}
+            <View style={styles.ciSearchRow}>
+              <TextInput
+                style={styles.ciInput}
+                placeholder="Número de Cédula o RIF"
+                placeholderTextColor="#64748B"
+                keyboardType="numeric"
+                value={docNumber}
+                onChangeText={(val) => {
+                  setDocNumber(val);
+                  setCustomerSearchMsg({ type: null, text: '' });
+                }}
+              />
+              <TouchableOpacity style={styles.ciSearchBtn} onPress={handleSearchCustomerByCi}>
+                <Text style={styles.ciSearchBtnText}>🔍 Buscar C.I.</Text>
+              </TouchableOpacity>
+            </View>
 
-            <TextInput
-              style={styles.input}
-              placeholder="Nombre o Razón Social"
-              placeholderTextColor="#64748B"
-              value={customerName}
-              onChangeText={setCustomerName}
-            />
+            {/* Banner de resultado de la búsqueda */}
+            {customerSearchMsg.text ? (
+              <View
+                style={[
+                  styles.searchStatusBanner,
+                  customerSearchMsg.type === 'success'
+                    ? styles.searchStatusBannerSuccess
+                    : styles.searchStatusBannerWarning,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.searchStatusText,
+                    customerSearchMsg.type === 'success'
+                      ? styles.searchStatusTextSuccess
+                      : styles.searchStatusTextWarning,
+                  ]}
+                >
+                  {customerSearchMsg.text}
+                </Text>
+              </View>
+            ) : null}
 
+            {/* Campos separados: Nombre y Apellido */}
+            <View style={styles.nameRow}>
+              <TextInput
+                style={[styles.input, { flex: 1, marginRight: 4 }]}
+                placeholder="Nombre(s) *"
+                placeholderTextColor="#64748B"
+                value={customerFirstName}
+                onChangeText={setCustomerFirstName}
+              />
+              <TextInput
+                style={[styles.input, { flex: 1, marginLeft: 4 }]}
+                placeholder="Apellido(s)"
+                placeholderTextColor="#64748B"
+                value={customerLastName}
+                onChangeText={setCustomerLastName}
+              />
+            </View>
+
+            {/* Teléfono WhatsApp */}
             <TextInput
               style={styles.input}
               placeholder="Teléfono WhatsApp (ej. 04141234567)"
@@ -470,7 +745,10 @@ export const PosCheckoutScreen: React.FC = () => {
             <View style={styles.modalButtons}>
               <TouchableOpacity
                 style={styles.cancelModalBtn}
-                onPress={() => setShowQuickCustomerModal(false)}
+                onPress={() => {
+                  setShowQuickCustomerModal(false);
+                  setCustomerSearchMsg({ type: null, text: '' });
+                }}
               >
                 <Text style={styles.cancelModalBtnText}>Cancelar</Text>
               </TouchableOpacity>
@@ -741,6 +1019,142 @@ const styles = StyleSheet.create({
     borderColor: '#334155',
   },
   heldButtonText: { color: '#F8FAFC', fontSize: 12, fontWeight: '600' },
+
+  ticketsTabBar: {
+    backgroundColor: '#0B2933',
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#164E63',
+  },
+  ticketsScrollContent: {
+    paddingHorizontal: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  activeTicketTab: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#0F766E',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#2DD4BF',
+    gap: 6,
+  },
+  activeTicketIcon: { fontSize: 14 },
+  activeTicketTitle: { color: '#FFFFFF', fontSize: 12, fontWeight: 'bold' },
+  activeTicketSubtitle: { color: '#A7F3D0', fontSize: 10 },
+  heldTicketTab: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#1E293B',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#475569',
+    gap: 6,
+  },
+  heldTicketIcon: { fontSize: 13 },
+  heldTicketTitle: { color: '#E2E8F0', fontSize: 12, fontWeight: '600' },
+  heldTicketSubtitle: { color: '#94A3B8', fontSize: 10 },
+  discardTabBtn: {
+    backgroundColor: '#334155',
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: 4,
+  },
+  discardTabBtnText: { color: '#F87171', fontSize: 10, fontWeight: 'bold' },
+  newTicketBtn: {
+    backgroundColor: '#0284C7',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  newTicketBtnText: { color: '#FFFFFF', fontSize: 11, fontWeight: 'bold' },
+
+  barcodeScannerBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 10,
+    backgroundColor: '#0F172A',
+    gap: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1E293B',
+  },
+  barcodeInput: {
+    flex: 1,
+    backgroundColor: '#1E293B',
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    color: '#FFFFFF',
+    fontSize: 12,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  barcodeScanActionBtn: {
+    backgroundColor: '#10B981',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+  },
+  barcodeScanActionBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: 'bold' },
+  openCatalogIconBtn: {
+    backgroundColor: '#334155',
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#475569',
+  },
+  openCatalogIconBtnText: { color: '#E2E8F0', fontSize: 11, fontWeight: '600' },
+
+  ciSearchRow: { flexDirection: 'row', gap: 6, marginBottom: 10 },
+  ciInput: {
+    flex: 1,
+    backgroundColor: '#0F172A',
+    borderWidth: 1,
+    borderColor: '#334155',
+    color: '#FFFFFF',
+    borderRadius: 8,
+    padding: 10,
+    fontSize: 13,
+  },
+  ciSearchBtn: {
+    backgroundColor: '#0284C7',
+    paddingHorizontal: 14,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  ciSearchBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: 'bold' },
+  searchStatusBanner: {
+    padding: 8,
+    borderRadius: 6,
+    marginBottom: 10,
+  },
+  searchStatusBannerSuccess: {
+    backgroundColor: '#064E3B33',
+    borderWidth: 1,
+    borderColor: '#059669',
+  },
+  searchStatusBannerWarning: {
+    backgroundColor: '#78350F33',
+    borderWidth: 1,
+    borderColor: '#D97706',
+  },
+  searchStatusText: { fontSize: 11, fontWeight: '600' },
+  searchStatusTextSuccess: { color: '#34D399' },
+  searchStatusTextWarning: { color: '#FBBF24' },
+  nameRow: { flexDirection: 'row', marginBottom: 2 },
 
   customerBar: {
     flexDirection: 'row',

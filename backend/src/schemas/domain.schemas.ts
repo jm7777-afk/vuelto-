@@ -41,6 +41,7 @@ export const createInteractionSchema = z.object({
 export const createProductSchema = z.object({
   sku: z.string().max(50).optional(),
   name: z.string().min(2).max(150),
+  unitOfMeasure: z.string().max(20).default('UNIDAD').optional(),
   categoryId: z.string().uuid().optional(),
   costPriceUsd: z.number().min(0).default(0),
   salePriceUsd: z.number().min(0),

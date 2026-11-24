@@ -133,6 +133,7 @@ export class ProductService {
           tenantId,
           sku: data.sku || null,
           name: data.name.trim(),
+          unitOfMeasure: (data as any).unitOfMeasure || 'UNIDAD',
           categoryId: data.categoryId || null,
           costPriceUsd: (data.costPriceUsd || 0).toFixed(4),
           salePriceUsd: data.salePriceUsd.toFixed(4),

@@ -26,6 +26,7 @@ import { LateFeeController } from '../controllers/late-fee.controller.js';
 import { FinancesController } from '../controllers/finances.controller.js';
 import { ConfigController } from '../controllers/config.controller.js';
 import { AuditController } from '../controllers/audit.controller.js';
+import { TenantController } from '../controllers/tenant.controller.js';
 import { ExchangeRateService } from '../services/exchange-rate.service.js';
 import { FiscalReportService } from '../services/fiscal-report.service.js';
 
@@ -206,3 +207,10 @@ apiRouter.post('/exchange-rates/select-active', requireAdmin, ConfigController.s
 // --- AUDITORÍA INMUTABLE Y RESPALDOS (BACKUPS) ---
 apiRouter.get('/audit/logs', requireAdmin, AuditController.listLogs);
 apiRouter.get('/admin/backup', requireAdmin, AuditController.downloadBackup);
+
+// --- SÚPER ADMINISTRADOR GLOBAL (CRUD DE TODOS LOS NEGOCIOS / TENANTS) ---
+apiRouter.get('/super-admin/tenants', TenantController.listAll);
+apiRouter.get('/super-admin/tenants/:id', TenantController.getById);
+apiRouter.post('/super-admin/tenants', TenantController.create);
+apiRouter.put('/super-admin/tenants/:id', TenantController.update);
+apiRouter.patch('/super-admin/tenants/:id/toggle-active', TenantController.toggleActive);
