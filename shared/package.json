@@ -1,0 +1,7 @@
+{
+  "name": "@vuelto/shared",
+  "version": "1.0.0",
+  "description": "Tipos y constantes compartidas para Vuelto (Backend, Web, Mobile)",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

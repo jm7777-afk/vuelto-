@@ -12,6 +12,8 @@ import { globalRateLimiter } from './middlewares/rate-limit.middleware.js';
 import { correlationAndLoggingMiddleware } from './middlewares/logging.middleware.js';
 import { MetricsService } from './services/metrics.service.js';
 import { initBackendSentry } from './config/sentry.js';
+import swaggerUi from 'swagger-ui-express';
+import { openApiSpec } from './docs/openapi.js';
 
 // Inicializar Sentry si DSN está provisto
 initBackendSentry();
@@ -102,6 +104,13 @@ export const createApp = () => {
       next(err);
     }
   });
+
+  // 9b. Documentación OpenAPI 3.0 y Swagger UI (/api/docs y /api/docs.json)
+  app.get('/api/docs.json', (_req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    res.json(openApiSpec);
+  });
+  app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
 
   // 10. Rutas de Dominio API v1
   app.use('/api/v1', apiRouter);
