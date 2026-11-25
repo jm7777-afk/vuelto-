@@ -35,6 +35,37 @@ Plataforma integral de punto de venta (POS), inventario, clientes y facturación
 
 ---
 
+## 🐳 Despliegue con Docker (Producción en 1 Comando)
+
+El repositorio incluye un `Dockerfile` multi-stage y `docker-compose.yml` listos para producción con base de datos PostgreSQL 16 y compilación automática del frontend y backend:
+
+```bash
+# Iniciar base de datos y aplicación Vuelto en producción
+docker compose up -d --build
+
+# Verificar estado de los contenedores
+docker compose ps
+
+# Ver logs en tiempo real
+docker compose logs -f app
+```
+
+La aplicación quedará accesible en `http://localhost:4000` con la API REST y el panel web administrativo unificados.
+
+---
+
+## 🔑 Credenciales Iniciales de Producción y Demo
+
+Al iniciar el sistema por primera vez o ejecutar las migraciones (`npm run db:migrate`), se configuran los siguientes usuarios:
+
+| Rol | Usuario | Contraseña | Alcance y Permisos |
+|---|---|---|---|
+| **Súper Administrador** | `superadmin` | `SuperAdmin2026!` | Acceso global a todos los tenants, creación de negocios, edición fiscal y suspensión/baja. |
+| **Administrador de Tienda** | `admin` | `Vuelto2026!` | Control total de inventario, márgenes en USD, cuentas por cobrar y tasas de cambio. |
+| **Cajero / Vendedor** | `cajero1` | `Vuelto2026!` | Facturación en mostrador, terminal POS ultra-limpio, escáner y cobro con vuelto. |
+
+---
+
 ## ☁️ Despliegue en Render (Render Blueprint)
 
 El repositorio incluye el archivo [`render.yaml`](./render.yaml) listo para el despliegue automático en Render mediante **Blueprints**:
@@ -73,7 +104,7 @@ cd vuelto-
 ```bash
 cd backend
 npm install
-npm test            # Ejecutar suite de 42 pruebas automatizadas
+npm test            # Ejecutar suite de 50 pruebas automatizadas (100% passing)
 npm run dev         # Servidor de desarrollo con recarga en caliente
 ```
 
