@@ -292,4 +292,5 @@ apiRouter.get('/sync/discrepancies', requireAdmin, async (req, res, next) => {
 });
 
 // --- SÚPER ADMINISTRADOR GLOBAL (CRUD DE TODOS LOS NEGOCIOS / TENANTS) ---
+apiRouter.use('/tenants', tenantRouter);
 apiRouter.use('/super-admin/tenants', tenantRouter);
