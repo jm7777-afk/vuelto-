@@ -65,4 +65,19 @@ export class TenantController {
       next(err);
     }
   }
+
+  static async delete(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = String(req.params.id);
+      const superAdminUserId = req.user?.id || '00000000-0000-0000-0000-000000000000';
+      const deleted = await TenantService.deleteTenant(superAdminUserId, id);
+      if (!deleted) {
+        res.status(404).json({ code: 'TENANT_NOT_FOUND', message: 'Negocio no encontrado' });
+        return;
+      }
+      res.json({ message: 'Negocio dado de baja exitosamente', tenant: deleted });
+    } catch (err) {
+      next(err);
+    }
+  }
 }

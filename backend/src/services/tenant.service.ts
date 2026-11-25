@@ -206,4 +206,37 @@ export class TenantService {
   static async toggleTenantActive(superAdminUserId: string, id: string, isActive: boolean) {
     return this.updateTenant(superAdminUserId, id, { isActive });
   }
+
+  /**
+   * Elimina o da de baja un negocio (Tenant) de forma segura en la plataforma
+   */
+  static async deleteTenant(superAdminUserId: string, id: string) {
+    const [existing] = await db.select().from(tenants).where(eq(tenants.id, id)).limit(1);
+    if (!existing) return null;
+
+    // Marcamos como inactivo y registramos la baja en auditoría
+    const [deleted] = await db
+      .update(tenants)
+      .set({
+        isActive: false,
+        updatedAt: new Date(),
+      })
+      .where(eq(tenants.id, id))
+      .returning();
+
+    if (superAdminUserId && superAdminUserId !== '00000000-0000-0000-0000-000000000000') {
+      await AuditService.log({
+        tenantId: id,
+        userId: superAdminUserId,
+        action: 'TENANT_DELETED_OR_SUSPENDED_BY_SUPER_ADMIN',
+        entity: 'tenant',
+        entityId: id,
+        channel: 'WEB_ADMIN',
+        payload: { businessName: existing.businessName, slug: existing.slug },
+        result: 'SUCCESS',
+      });
+    }
+
+    return deleted || null;
+  }
 }

@@ -12,3 +12,4 @@ tenantRouter.get('/:id', TenantController.getById);
 tenantRouter.post('/', TenantController.create);
 tenantRouter.put('/:id', TenantController.update);
 tenantRouter.patch('/:id/toggle-active', TenantController.toggleActive);
+tenantRouter.delete('/:id', TenantController.delete);
