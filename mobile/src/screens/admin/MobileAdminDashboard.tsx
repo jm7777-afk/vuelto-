@@ -17,7 +17,100 @@ import { useAuthStore } from '../../stores/auth.store';
 export const MobileAdminDashboard: React.FC = () => {
   const { user, toggleMode, logout } = useAuthStore();
 
-  const [activeSection, setActiveSection] = useState<'STOCK' | 'ORDERS' | 'DEBTS' | 'SUPPLIERS' | 'SALES' | 'RATES' | 'USERS'>('STOCK');
+  const [activeSection, setActiveSection] = useState<'STOCK' | 'ORDERS' | 'DEBTS' | 'SUPPLIERS' | 'SALES' | 'RATES' | 'USERS' | 'TENANTS'>('STOCK');
+
+  const isSuperAdmin = user?.roleId === 'SUPER_ADMIN';
+
+  // Catálogo de Productos con Costos, Precios y Margen en Dólares
+  const [adminProducts, setAdminProducts] = useState([
+    {
+      id: 'p-1',
+      name: 'Harina PAN Blanca 1kg',
+      barcode: '7591001001019',
+      unit: 'paquete',
+      category: 'Alimentos',
+      costPriceUsd: 0.95,
+      salePriceUsd: 1.25,
+      stock: 145,
+      minStock: 20,
+      supplier: 'Empresas Polar C.A.',
+    },
+    {
+      id: 'p-2',
+      name: 'Arroz Primor Grano Entero 1kg',
+      barcode: '7591003003035',
+      unit: 'kg',
+      category: 'Alimentos',
+      costPriceUsd: 1.10,
+      salePriceUsd: 1.50,
+      stock: 82,
+      minStock: 15,
+      supplier: 'Empresas Polar C.A.',
+    },
+    {
+      id: 'p-3',
+      name: 'Aceite de Maíz Mazeite 1L',
+      barcode: '7591004004048',
+      unit: 'L',
+      category: 'Alimentos',
+      costPriceUsd: 2.80,
+      salePriceUsd: 3.80,
+      stock: 4,
+      minStock: 10,
+      supplier: 'Alimentos Polar',
+    },
+    {
+      id: 'p-4',
+      name: 'Refresco Pepsi Cola 1.5L',
+      barcode: '7591002002026',
+      unit: 'botella',
+      category: 'Bebidas',
+      costPriceUsd: 1.35,
+      salePriceUsd: 1.90,
+      stock: 35,
+      minStock: 12,
+      supplier: 'Pepsico Alimentos',
+    },
+  ]);
+
+  // Directorio de Comercios / Tenants para el Súper Administrador
+  const [tenantsList, setTenantsList] = useState([
+    {
+      id: 'tenant-demo',
+      slug: 'bodega-central',
+      businessName: 'Inversiones Bodega Central C.A.',
+      tradeName: 'Bodega Central',
+      documentType: 'J' as const,
+      documentNumber: '123456789',
+      phone: '04141234567',
+      email: 'contacto@bodegacentral.ve',
+      isActive: true,
+      isSpecialTaxpayer: true,
+    },
+    {
+      id: 'tenant-2',
+      slug: 'farmacia-vida',
+      businessName: 'Farmacia Vida y Salud C.A.',
+      tradeName: 'Farmacia Vida',
+      documentType: 'J' as const,
+      documentNumber: '298765432',
+      phone: '04128889900',
+      email: 'info@farmaciavida.ve',
+      isActive: true,
+      isSpecialTaxpayer: false,
+    },
+  ]);
+
+  // Formulario de Nuevo Negocio (Tenant)
+  const [showAddTenantModal, setShowAddTenantModal] = useState(false);
+  const [newTenantSlug, setNewTenantSlug] = useState('');
+  const [newTenantBusinessName, setNewTenantBusinessName] = useState('');
+  const [newTenantTradeName, setNewTenantTradeName] = useState('');
+  const [newTenantDocType, setNewTenantDocType] = useState<'J' | 'V' | 'G'>('J');
+  const [newTenantDocNumber, setNewTenantDocNumber] = useState('');
+  const [newTenantPhone, setNewTenantPhone] = useState('');
+  const [newTenantEmail, setNewTenantEmail] = useState('');
+  const [newTenantIsSpecial, setNewTenantIsSpecial] = useState(false);
 
   // Configuración de Mora Administrativa
   const [lateFeePercent, setLateFeePercent] = useState('5.0');
@@ -130,6 +223,60 @@ export const MobileAdminDashboard: React.FC = () => {
     setNewSupPhone('');
   };
 
+  const handleApplyGlobalMargin = () => {
+    const margin = parseFloat(globalMargin);
+    if (isNaN(margin) || margin <= 0) {
+      Alert.alert('Margen Inválido', 'Ingrese un porcentaje válido mayor a 0 (ej. 30).');
+      return;
+    }
+    const factor = 1 + margin / 100;
+    const updated = adminProducts.map((p) => {
+      const newSale = +(p.costPriceUsd * factor).toFixed(2);
+      return { ...p, salePriceUsd: newSale };
+    });
+    setAdminProducts(updated);
+    const avgGain = updated.reduce((a, b) => a + (b.salePriceUsd - b.costPriceUsd), 0) / updated.length;
+    Alert.alert(
+      'Margen Global Aplicado',
+      `Margen del ${margin}% aplicado a todo el inventario.\nGanancia neta promedio estimada: +$${avgGain.toFixed(2)} USD por producto.`
+    );
+  };
+
+  const handleCreateTenant = () => {
+    if (!newTenantBusinessName || !newTenantDocNumber) {
+      Alert.alert('Datos Incompletos', 'Indique la razón social y número de RIF del negocio.');
+      return;
+    }
+    const slug = newTenantSlug.trim() || newTenantBusinessName.toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 20);
+    const created = {
+      id: `t-${Date.now()}`,
+      slug,
+      businessName: newTenantBusinessName,
+      tradeName: newTenantTradeName || newTenantBusinessName,
+      documentType: newTenantDocType,
+      documentNumber: newTenantDocNumber,
+      phone: newTenantPhone || '04140000000',
+      email: newTenantEmail || `${slug}@vuelto.app`,
+      isActive: true,
+      isSpecialTaxpayer: newTenantIsSpecial,
+    };
+    setTenantsList([created, ...tenantsList]);
+    setShowAddTenantModal(false);
+    setNewTenantBusinessName('');
+    setNewTenantDocNumber('');
+    setNewTenantSlug('');
+    setNewTenantTradeName('');
+    setNewTenantPhone('');
+    setNewTenantEmail('');
+    Alert.alert('Negocio Creado', `El comercio "${created.tradeName}" fue registrado exitosamente en la plataforma.`);
+  };
+
+  const handleToggleTenant = (id: string) => {
+    setTenantsList(
+      tenantsList.map((t) => (t.id === id ? { ...t, isActive: !t.isActive } : t))
+    );
+  };
+
   const handleWhatsAppDebtReminder = (customer: any) => {
     const surcharge = customer.isOverdue ? (customer.balanceDueUsd * (parseFloat(lateFeePercent) / 100)) : 0;
     const totalToPay = customer.balanceDueUsd + surcharge;
@@ -197,19 +344,30 @@ export const MobileAdminDashboard: React.FC = () => {
       </View>
 
       {/* Barra de Navegación por Pestañas */}
-      <View style={styles.navBar}>
-        {(['STOCK', 'ORDERS', 'DEBTS', 'SUPPLIERS', 'SALES', 'RATES', 'USERS'] as const).map((sec) => (
-          <TouchableOpacity
-            key={sec}
-            style={[styles.navItem, activeSection === sec && styles.navItemActive]}
-            onPress={() => setActiveSection(sec)}
-          >
-            <Text style={[styles.navText, activeSection === sec && styles.navTextActive]}>
-              {sec === 'STOCK' ? 'Stock' : sec === 'ORDERS' ? 'Pedidos' : sec === 'DEBTS' ? 'Cobros' : sec === 'SUPPLIERS' ? 'Proveed.' : sec === 'SALES' ? 'Ventas' : sec === 'RATES' ? 'Tasas' : 'Cajeros'}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ maxHeight: 48, backgroundColor: '#062F3B' }}>
+        <View style={styles.navBar}>
+          {[
+            { id: 'STOCK', label: 'Stock ($)' },
+            { id: 'ORDERS', label: 'Pedidos' },
+            { id: 'DEBTS', label: 'Cobros' },
+            { id: 'SUPPLIERS', label: 'Proveed.' },
+            { id: 'SALES', label: 'Ventas' },
+            { id: 'RATES', label: 'Tasas' },
+            { id: 'USERS', label: 'Cajeros' },
+            ...(isSuperAdmin ? [{ id: 'TENANTS', label: '👑 Negocios' }] : []),
+          ].map((sec) => (
+            <TouchableOpacity
+              key={sec.id}
+              style={[styles.navItem, activeSection === sec.id && styles.navItemActive]}
+              onPress={() => setActiveSection(sec.id as any)}
+            >
+              <Text style={[styles.navText, activeSection === sec.id && styles.navTextActive]}>
+                {sec.label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      </ScrollView>
 
       <ScrollView style={styles.content}>
         {/* SECCIÓN 1: STOCK E INVENTARIO CON COSTOS Y MÁRGENES (SOLO ADMIN) */}
@@ -230,6 +388,59 @@ export const MobileAdminDashboard: React.FC = () => {
                 <Text style={styles.kpiLabel}>Margen Promedio</Text>
                 <Text style={[styles.kpiValue, { color: '#10B981' }]}>+36.8%</Text>
               </View>
+            </View>
+
+            {/* Fijar Margen Global de Ganancia Masivo (%) */}
+            <View style={styles.card}>
+              <Text style={styles.cardHeader}>Fijar Margen de Ganancia Masivo (%)</Text>
+              <Text style={{ fontSize: 11, color: '#94A3B8', marginBottom: 8 }}>
+                Establece tu margen sobre el costo al mayor para todo el catálogo sin definirlo uno por uno:
+              </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <TextInput
+                  style={[styles.input, { width: 70, marginBottom: 0, textAlign: 'center', color: '#A3E635', fontWeight: 'bold' }]}
+                  value={globalMargin}
+                  onChangeText={setGlobalMargin}
+                  keyboardType="numeric"
+                />
+                <Text style={{ color: '#A3E635', fontWeight: 'bold', fontSize: 14 }}>%</Text>
+                <TouchableOpacity
+                  style={[styles.primaryBtn, { flex: 1 }]}
+                  onPress={handleApplyGlobalMargin}
+                >
+                  <Text style={styles.primaryBtnText}>⚡ Aplicar a Todo el Catálogo</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* Catálogo Valorizado con Margen en Dólares ($) */}
+            <View style={styles.card}>
+              <Text style={styles.cardHeader}>Catálogo Valorizado & Margen en Dólares ($)</Text>
+              <Text style={{ fontSize: 11, color: '#94A3B8', marginBottom: 10 }}>
+                Visualización exclusiva para el Administrador del beneficio neto en divisas por unidad:
+              </Text>
+
+              {adminProducts.map((p) => {
+                const profitUsd = p.salePriceUsd - p.costPriceUsd;
+                const marginPercent = ((profitUsd / p.salePriceUsd) * 100).toFixed(1);
+                return (
+                  <View key={p.id} style={styles.productAdminRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.productAdminName}>{p.name}</Text>
+                      <Text style={styles.productAdminBarcode}>{p.barcode} • {p.category} ({p.unit})</Text>
+                      <View style={{ flexDirection: 'row', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
+                        <Text style={{ color: '#94A3B8', fontSize: 11 }}>Costo: ${p.costPriceUsd.toFixed(2)}</Text>
+                        <Text style={{ color: '#F8FAFC', fontSize: 11, fontWeight: 'bold' }}>Venta: ${p.salePriceUsd.toFixed(2)}</Text>
+                        <Text style={{ color: '#38BDF8', fontSize: 11 }}>Stock: {p.stock} ud</Text>
+                      </View>
+                    </View>
+                    <View style={styles.productAdminProfitBadge}>
+                      <Text style={styles.productAdminProfitVal}>+${profitUsd.toFixed(2)} USD</Text>
+                      <Text style={styles.productAdminProfitPct}>+{marginPercent}%</Text>
+                    </View>
+                  </View>
+                );
+              })}
             </View>
 
             {/* Alertas de Stock Bajo con Proveedores y WhatsApp */}
@@ -726,6 +937,173 @@ export const MobileAdminDashboard: React.FC = () => {
             </View>
           </View>
         )}
+
+        {/* SECCIÓN 8: SÚPER ADMINISTRADOR GLOBAL (CRUD DE TODOS LOS NEGOCIOS / TENANTS) */}
+        {activeSection === 'TENANTS' && isSuperAdmin && (
+          <View>
+            <Text style={[styles.sectionTitle, { color: '#C084FC' }]}>👑 Súper Administrador Global (Tenants)</Text>
+            <Text style={styles.sectionDesc}>
+              Control multi-tenant: crea comercios, suspende/activa tiendas y administra la plataforma.
+            </Text>
+
+            {/* KPIs de la Plataforma Global */}
+            <View style={styles.kpiRow}>
+              <View style={[styles.kpiCard, { borderColor: '#8B5CF6' }]}>
+                <Text style={styles.kpiLabel}>Total Negocios</Text>
+                <Text style={[styles.kpiValue, { color: '#C084FC' }]}>{tenantsList.length}</Text>
+              </View>
+              <View style={[styles.kpiCard, { borderColor: '#10B981' }]}>
+                <Text style={styles.kpiLabel}>Activos</Text>
+                <Text style={[styles.kpiValue, { color: '#10B981' }]}>
+                  {tenantsList.filter((t) => t.isActive).length}
+                </Text>
+              </View>
+            </View>
+
+            {/* Botón para Crear Nuevo Negocio */}
+            <TouchableOpacity
+              style={[styles.primaryBtn, { backgroundColor: '#8B5CF6', marginBottom: 14 }]}
+              onPress={() => setShowAddTenantModal(true)}
+            >
+              <Text style={styles.primaryBtnText}>➕ Crear Nuevo Negocio (Tenant)</Text>
+            </TouchableOpacity>
+
+            {/* Directorio de Negocios */}
+            <View style={styles.card}>
+              <Text style={styles.cardHeader}>Directorio de Comercios en Plataforma</Text>
+              {tenantsList.map((tenant) => (
+                <View key={tenant.id} style={styles.tenantAdminRow}>
+                  <View style={{ flex: 1 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      <Text style={styles.tenantAdminName}>{tenant.tradeName}</Text>
+                      <View style={[styles.tenantStatusBadge, tenant.isActive ? styles.tenantStatusActive : styles.tenantStatusSuspended]}>
+                        <Text style={styles.tenantStatusText}>{tenant.isActive ? 'ACTIVO' : 'SUSPENDIDO'}</Text>
+                      </View>
+                    </View>
+                    <Text style={styles.tenantAdminSub}>{tenant.businessName}</Text>
+                    <Text style={styles.tenantAdminRif}>{tenant.documentType}-{tenant.documentNumber} • {tenant.phone}</Text>
+                    {tenant.isSpecialTaxpayer && (
+                      <Text style={{ color: '#EAB308', fontSize: 10, marginTop: 2 }}>★ Contribuyente Especial (IGTF 3%)</Text>
+                    )}
+                  </View>
+
+                  <TouchableOpacity
+                    style={[styles.tenantToggleBtn, tenant.isActive ? styles.tenantSuspendBtn : styles.tenantActivateBtn]}
+                    onPress={() => handleToggleTenant(tenant.id)}
+                  >
+                    <Text style={styles.tenantToggleBtnText}>
+                      {tenant.isActive ? 'Suspender' : 'Activar'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              ))}
+            </View>
+          </View>
+        )}
+      </ScrollView>
+
+      {/* MODAL CREAR NUEVO NEGOCIO (SÚPER ADMIN) */}
+      <Modal visible={showAddTenantModal} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { maxHeight: '90%' }]}>
+            <Text style={[styles.modalTitle, { color: '#C084FC' }]}>👑 Registrar Nuevo Negocio (Tenant)</Text>
+            <Text style={{ color: '#94A3B8', fontSize: 11, marginBottom: 14 }}>
+              Alta de un comercio nuevo en la arquitectura SaaS de Vuelto:
+            </Text>
+
+            <ScrollView style={{ maxHeight: 380 }}>
+              <Text style={styles.fieldLabel}>Razón Social Fiscal:</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="ej. Distribuidora El Sol C.A."
+                placeholderTextColor="#64748B"
+                value={newTenantBusinessName}
+                onChangeText={setNewTenantBusinessName}
+              />
+
+              <Text style={styles.fieldLabel}>Nombre Comercial (Tienda):</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="ej. Bodegón El Sol"
+                placeholderTextColor="#64748B"
+                value={newTenantTradeName}
+                onChangeText={setNewTenantTradeName}
+              />
+
+              <Text style={styles.fieldLabel}>RIF / Documento Fiscal:</Text>
+              <View style={{ flexDirection: 'row', gap: 6, marginBottom: 10 }}>
+                {(['J', 'V', 'G'] as const).map((dt) => (
+                  <TouchableOpacity
+                    key={dt}
+                    style={[styles.docTypeBtn, newTenantDocType === dt && styles.docTypeBtnActive]}
+                    onPress={() => setNewTenantDocType(dt)}
+                  >
+                    <Text style={[styles.docTypeBtnText, newTenantDocType === dt && styles.docTypeBtnTextActive]}>
+                      {dt}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+                <TextInput
+                  style={[styles.input, { flex: 1, marginBottom: 0 }]}
+                  placeholder="301234567"
+                  placeholderTextColor="#64748B"
+                  value={newTenantDocNumber}
+                  onChangeText={setNewTenantDocNumber}
+                  keyboardType="numeric"
+                />
+              </View>
+
+              <Text style={styles.fieldLabel}>Teléfono de Contacto:</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="ej. 04141234567"
+                placeholderTextColor="#64748B"
+                value={newTenantPhone}
+                onChangeText={setNewTenantPhone}
+                keyboardType="phone-pad"
+              />
+
+              <Text style={styles.fieldLabel}>Correo Electrónico:</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="ej. contacto@elsol.ve"
+                placeholderTextColor="#64748B"
+                value={newTenantEmail}
+                onChangeText={setNewTenantEmail}
+                autoCapitalize="none"
+              />
+
+              <TouchableOpacity
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 8,
+                  marginVertical: 10,
+                  padding: 10,
+                  backgroundColor: '#0F172A',
+                  borderRadius: 8,
+                }}
+                onPress={() => setNewTenantIsSpecial(!newTenantIsSpecial)}
+              >
+                <Text style={{ color: newTenantIsSpecial ? '#10B981' : '#64748B', fontSize: 16 }}>
+                  {newTenantIsSpecial ? '☑' : '☐'}
+                </Text>
+                <Text style={{ color: '#F8FAFC', fontSize: 12 }}>
+                  Es Contribuyente Especial SENIAT (Aplica IGTF 3%)
+                </Text>
+              </TouchableOpacity>
+            </ScrollView>
+
+            <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#8B5CF6' }]} onPress={handleCreateTenant}>
+              <Text style={styles.primaryBtnText}>✓ Crear y Habilitar Negocio</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={styles.cancelModalBtn} onPress={() => setShowAddTenantModal(false)}>
+              <Text style={styles.cancelModalBtnText}>Cancelar</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
       </ScrollView>
     </SafeAreaView>
   );
@@ -870,5 +1248,162 @@ const styles = StyleSheet.create({
     padding: 10,
     backgroundColor: '#0F172A',
     borderRadius: 8,
+  },
+
+  // Estilos de Productos con Margen en Dólares ($)
+  productAdminRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#334155',
+  },
+  productAdminName: {
+    color: '#F8FAFC',
+    fontWeight: 'bold',
+    fontSize: 13,
+  },
+  productAdminBarcode: {
+    color: '#64748B',
+    fontSize: 10,
+    marginTop: 2,
+    fontFamily: 'monospace',
+  },
+  productAdminProfitBadge: {
+    backgroundColor: '#10B98118',
+    borderWidth: 1,
+    borderColor: '#10B98155',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    alignItems: 'flex-end',
+  },
+  productAdminProfitVal: {
+    color: '#A3E635',
+    fontWeight: 'bold',
+    fontSize: 12,
+  },
+  productAdminProfitPct: {
+    color: '#10B981',
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
+
+  // Estilos de Súper Administrador Global (Tenants)
+  tenantAdminRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#334155',
+  },
+  tenantAdminName: {
+    color: '#F8FAFC',
+    fontWeight: 'bold',
+    fontSize: 14,
+  },
+  tenantAdminSub: {
+    color: '#94A3B8',
+    fontSize: 11,
+    marginTop: 2,
+  },
+  tenantAdminRif: {
+    color: '#64748B',
+    fontSize: 10,
+    marginTop: 2,
+    fontFamily: 'monospace',
+  },
+  tenantStatusBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  tenantStatusActive: {
+    backgroundColor: '#10B98122',
+  },
+  tenantStatusSuspended: {
+    backgroundColor: '#EF444422',
+  },
+  tenantStatusText: {
+    fontSize: 9,
+    fontWeight: 'bold',
+    color: '#A3E635',
+  },
+  tenantToggleBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  tenantSuspendBtn: {
+    backgroundColor: '#EF444422',
+    borderWidth: 1,
+    borderColor: '#EF4444',
+  },
+  tenantActivateBtn: {
+    backgroundColor: '#10B98122',
+    borderWidth: 1,
+    borderColor: '#10B981',
+  },
+  tenantToggleBtnText: {
+    fontSize: 11,
+    fontWeight: 'bold',
+    color: '#F8FAFC',
+  },
+
+  // Modal Súper Admin
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.75)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  modalContent: {
+    width: '100%',
+    backgroundColor: '#0B3B49',
+    borderRadius: 16,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: '#155E75',
+  },
+  modalTitle: {
+    fontSize: 17,
+    fontWeight: 'bold',
+    marginBottom: 4,
+  },
+  cancelModalBtn: {
+    marginTop: 8,
+    padding: 10,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  cancelModalBtnText: {
+    color: '#94A3B8',
+    fontWeight: '600',
+    fontSize: 12,
+  },
+  docTypeBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 6,
+    backgroundColor: '#0F172A',
+    borderWidth: 1,
+    borderColor: '#334155',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  docTypeBtnActive: {
+    backgroundColor: '#8B5CF6',
+    borderColor: '#8B5CF6',
+  },
+  docTypeBtnText: {
+    color: '#94A3B8',
+    fontWeight: 'bold',
+    fontSize: 12,
+  },
+  docTypeBtnTextActive: {
+    color: '#FFFFFF',
   },
 });

@@ -12,7 +12,9 @@ import {
   StatusBar,
   ScrollView,
   Image,
+  Vibration,
 } from 'react-native';
+import { CameraView, useCameraPermissions } from 'expo-camera';
 import { useCartStore, CartLine } from '../../stores/cart.store';
 import { useAuthStore } from '../../stores/auth.store';
 import { NativeShareService } from '../../services/share.service';
@@ -113,6 +115,76 @@ export const PosCheckoutScreen: React.FC = () => {
   const [catalogSearch, setCatalogSearch] = useState('');
   const [catalogProducts, setCatalogProducts] = useState(DEFAULT_PRODUCTS);
   const [quickBarcodeInput, setQuickBarcodeInput] = useState('');
+
+  // Escáner Físico con Cámara del Celular (expo-camera)
+  const [showCameraScanner, setShowCameraScanner] = useState(false);
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+  const [torchEnabled, setTorchEnabled] = useState(false);
+  const [isScanPaused, setIsScanPaused] = useState(false);
+  const [lastScannedCode, setLastScannedCode] = useState<string | null>(null);
+  const [scanFeedbackMsg, setScanFeedbackMsg] = useState<string | null>(null);
+
+  const handleOpenPhysicalCamera = async () => {
+    if (!cameraPermission?.granted) {
+      const res = await requestCameraPermission();
+      if (!res.granted) {
+        Alert.alert(
+          'Permiso Requerido',
+          'La app necesita permiso para usar la cámara del teléfono y escanear códigos de barra físicos.'
+        );
+        return;
+      }
+    }
+    setTorchEnabled(false);
+    setIsScanPaused(false);
+    setScanFeedbackMsg(null);
+    setShowCameraScanner(true);
+  };
+
+  const handleBarcodeScanned = (barcode: string) => {
+    if (isScanPaused || !barcode) return;
+    setIsScanPaused(true);
+    setLastScannedCode(barcode);
+    try {
+      Vibration.vibrate(80);
+    } catch {}
+
+    const clean = barcode.trim();
+    const exact = catalogProducts.find((p) => p.barcode === clean || p.barcode.toLowerCase() === clean.toLowerCase());
+
+    if (exact) {
+      addProduct({
+        id: exact.id,
+        name: exact.name,
+        barcode: exact.barcode,
+        salePriceUsd: exact.salePriceUsd,
+        taxRate: exact.taxRate,
+        isExempt: exact.isExempt,
+        unitOfMeasure: (exact as any).unitOfMeasure,
+      });
+      setScanFeedbackMsg(`✅ ${exact.name} añadido ($${exact.salePriceUsd.toFixed(2)} USD)`);
+    } else {
+      const partial = catalogProducts.find((p) => p.barcode.includes(clean) || p.name.toLowerCase().includes(clean.toLowerCase()));
+      if (partial) {
+        addProduct({
+          id: partial.id,
+          name: partial.name,
+          barcode: partial.barcode,
+          salePriceUsd: partial.salePriceUsd,
+          taxRate: partial.taxRate,
+          isExempt: partial.isExempt,
+          unitOfMeasure: (partial as any).unitOfMeasure,
+        });
+        setScanFeedbackMsg(`🔍 ${partial.name} añadido ($${partial.salePriceUsd.toFixed(2)} USD)`);
+      } else {
+        setScanFeedbackMsg(`⚠️ Código no registrado: ${clean}`);
+      }
+    }
+
+    setTimeout(() => {
+      setIsScanPaused(false);
+    }, 1400);
+  };
 
   // Formulario de Cliente Rápido con Búsqueda por C.I.
   const [docType, setDocType] = useState<'V' | 'E' | 'J' | 'G'>('V');
@@ -453,11 +525,11 @@ export const PosCheckoutScreen: React.FC = () => {
         </ScrollView>
       </View>
 
-      {/* 3. Barra de Escáner de Código de Barras con Fallback a Nombre / SKU */}
+      {/* 3. Barra de Escáner de Código de Barras con Cámara Física y Fallback a Nombre / SKU */}
       <View style={styles.barcodeScannerBar}>
         <TextInput
           style={styles.barcodeInput}
-          placeholder="📷 Escanear código de barra o buscar..."
+          placeholder="Código EAN o buscar producto..."
           placeholderTextColor="#64748B"
           value={quickBarcodeInput}
           onChangeText={setQuickBarcodeInput}
@@ -465,14 +537,17 @@ export const PosCheckoutScreen: React.FC = () => {
           returnKeyType="search"
           autoCapitalize="none"
         />
+        <TouchableOpacity style={styles.cameraScanActionBtn} onPress={handleOpenPhysicalCamera}>
+          <Text style={styles.cameraScanActionBtnText}>📷 Cámara</Text>
+        </TouchableOpacity>
         <TouchableOpacity style={styles.barcodeScanActionBtn} onPress={handleScanOrSearch}>
-          <Text style={styles.barcodeScanActionBtnText}>Escanear</Text>
+          <Text style={styles.barcodeScanActionBtnText}>Buscar</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.openCatalogIconBtn}
           onPress={() => setShowCatalogModal(true)}
         >
-          <Text style={styles.openCatalogIconBtnText}>🔍 Catálogo</Text>
+          <Text style={styles.openCatalogIconBtnText}>🔍</Text>
         </TouchableOpacity>
       </View>
 
@@ -946,6 +1021,121 @@ export const PosCheckoutScreen: React.FC = () => {
           </View>
         </View>
       </Modal>
+
+      {/* MODAL: ESCÁNER CON CÁMARA FÍSICA DEL TELÉFONO (EXPO-CAMERA) */}
+      <Modal
+        visible={showCameraScanner}
+        animationType="slide"
+        onRequestClose={() => setShowCameraScanner(false)}
+      >
+        <SafeAreaView style={styles.cameraModalContainer}>
+          <StatusBar barStyle="light-content" backgroundColor="#000000" />
+
+          {/* Cabecera del Escáner */}
+          <View style={styles.cameraHeader}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.cameraHeaderTitle}>📷 Escáner de Código de Barras</Text>
+              <Text style={styles.cameraHeaderSubtitle}>Apunta la cámara del celular al código EAN-13, UPC o QR</Text>
+            </View>
+            <TouchableOpacity
+              style={styles.cameraCloseBtn}
+              onPress={() => setShowCameraScanner(false)}
+            >
+              <Text style={styles.cameraCloseBtnText}>✕ Cerrar</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Visor de Cámara con Retícula */}
+          <View style={styles.cameraViewWrapper}>
+            <CameraView
+              style={StyleSheet.absoluteFillObject}
+              facing="back"
+              enableTorch={torchEnabled}
+              barcodeScannerSettings={{
+                barcodeTypes: ['ean13', 'ean8', 'upc_a', 'upc_e', 'qr', 'code128', 'code39'],
+              }}
+              onBarcodeScanned={(result) => {
+                if (result.data) handleBarcodeScanned(result.data);
+              }}
+            />
+
+            {/* Guía Visual y Retícula Láser */}
+            <View style={styles.viewfinderOverlay}>
+              <View style={styles.viewfinderBox}>
+                <View style={[styles.cornerBracket, styles.topLeftBracket]} />
+                <View style={[styles.cornerBracket, styles.topRightBracket]} />
+                <View style={[styles.cornerBracket, styles.bottomLeftBracket]} />
+                <View style={[styles.cornerBracket, styles.bottomRightBracket]} />
+                <View style={styles.laserLine} />
+              </View>
+            </View>
+
+            {/* Notificación Flotante de Escaneo Exitoso o Error */}
+            {scanFeedbackMsg && (
+              <View style={styles.scanFeedbackToast}>
+                <Text style={styles.scanFeedbackToastText}>{scanFeedbackMsg}</Text>
+              </View>
+            )}
+          </View>
+
+          {/* Controles del Escáner: Linterna, Resumen y Fallback */}
+          <View style={styles.cameraFooter}>
+            <View style={styles.cameraControlsRow}>
+              <TouchableOpacity
+                style={[styles.torchToggleBtn, torchEnabled && styles.torchToggleBtnActive]}
+                onPress={() => setTorchEnabled(!torchEnabled)}
+              >
+                <Text style={styles.torchToggleBtnText}>
+                  {torchEnabled ? '🔦 Linterna ENCENDIDA' : '💡 Encender Linterna'}
+                </Text>
+              </TouchableOpacity>
+
+              <View style={styles.scannedCountBadge}>
+                <Text style={styles.scannedCountBadgeText}>
+                  En Carrito: {activeLines.length} unids (${getTotalUsd().toFixed(2)})
+                </Text>
+              </View>
+            </View>
+
+            {/* Entrada Manual de Fallback si el código está roto o borroso */}
+            <View style={styles.cameraManualRow}>
+              <TextInput
+                style={styles.cameraManualInput}
+                placeholder="¿Código dañado? Escribir número o nombre..."
+                placeholderTextColor="#64748B"
+                value={quickBarcodeInput}
+                onChangeText={setQuickBarcodeInput}
+                onSubmitEditing={() => {
+                  handleScanOrSearch();
+                  if (quickBarcodeInput.trim()) {
+                    setScanFeedbackMsg(`Búsqueda: ${quickBarcodeInput}`);
+                  }
+                }}
+              />
+              <TouchableOpacity
+                style={styles.cameraManualBtn}
+                onPress={() => {
+                  handleScanOrSearch();
+                  if (quickBarcodeInput.trim()) {
+                    setScanFeedbackMsg(`Búsqueda: ${quickBarcodeInput}`);
+                  }
+                }}
+              >
+                <Text style={styles.cameraManualBtnText}>Cargar</Text>
+              </TouchableOpacity>
+            </View>
+
+            <TouchableOpacity
+              style={styles.cameraDoneBtn}
+              onPress={() => setShowCameraScanner(false)}
+            >
+              <Text style={styles.cameraDoneBtnText}>
+                ✓ Finalizar y Volver al Carrito ({activeLines.length} ítems)
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </SafeAreaView>
+      </Modal>
     </SafeAreaView>
   );
 };
@@ -1390,4 +1580,222 @@ const styles = StyleSheet.create({
   postSaleBtnPrintText: { color: '#FFF', fontWeight: 'bold', fontSize: 13 },
   postSaleBtnShare: { backgroundColor: '#10B981', padding: 14, borderRadius: 8, alignItems: 'center', marginBottom: 10 },
   postSaleBtnShareText: { color: '#FFF', fontWeight: 'bold', fontSize: 13 },
+
+  // Botón Cámara en Barra de Búsqueda
+  cameraScanActionBtn: {
+    backgroundColor: '#10B981',
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  cameraScanActionBtnText: {
+    color: '#071F27',
+    fontWeight: 'bold',
+    fontSize: 12,
+  },
+
+  // Modal de Cámara Físico (expo-camera)
+  cameraModalContainer: {
+    flex: 1,
+    backgroundColor: '#000000',
+  },
+  cameraHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: '#071F27',
+    borderBottomWidth: 1,
+    borderBottomColor: '#155E75',
+  },
+  cameraHeaderTitle: {
+    color: '#A3E635',
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
+  cameraHeaderSubtitle: {
+    color: '#94A3B8',
+    fontSize: 11,
+    marginTop: 2,
+  },
+  cameraCloseBtn: {
+    backgroundColor: '#334155',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  cameraCloseBtnText: {
+    color: '#F8FAFC',
+    fontWeight: 'bold',
+    fontSize: 12,
+  },
+  cameraViewWrapper: {
+    flex: 1,
+    position: 'relative',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  viewfinderOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  viewfinderBox: {
+    width: 280,
+    height: 180,
+    position: 'relative',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.4)',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  cornerBracket: {
+    position: 'absolute',
+    width: 24,
+    height: 24,
+    borderColor: '#A3E635',
+  },
+  topLeftBracket: {
+    top: -2,
+    left: -2,
+    borderTopWidth: 4,
+    borderLeftWidth: 4,
+    borderTopLeftRadius: 10,
+  },
+  topRightBracket: {
+    top: -2,
+    right: -2,
+    borderTopWidth: 4,
+    borderRightWidth: 4,
+    borderTopRightRadius: 10,
+  },
+  bottomLeftBracket: {
+    bottom: -2,
+    left: -2,
+    borderBottomWidth: 4,
+    borderLeftWidth: 4,
+    borderBottomLeftRadius: 10,
+  },
+  bottomRightBracket: {
+    bottom: -2,
+    right: -2,
+    borderBottomWidth: 4,
+    borderRightWidth: 4,
+    borderBottomRightRadius: 10,
+  },
+  laserLine: {
+    width: '90%',
+    height: 2,
+    backgroundColor: '#A3E635',
+    shadowColor: '#A3E635',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.9,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  scanFeedbackToast: {
+    position: 'absolute',
+    top: 24,
+    backgroundColor: '#071F27EE',
+    borderWidth: 1,
+    borderColor: '#10B981',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    elevation: 8,
+  },
+  scanFeedbackToastText: {
+    color: '#A3E635',
+    fontWeight: 'bold',
+    fontSize: 13,
+  },
+  cameraFooter: {
+    backgroundColor: '#071F27',
+    padding: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#155E75',
+  },
+  cameraControlsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  torchToggleBtn: {
+    backgroundColor: '#062F3B',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#155E75',
+  },
+  torchToggleBtnActive: {
+    backgroundColor: '#EAB30833',
+    borderColor: '#EAB308',
+  },
+  torchToggleBtnText: {
+    color: '#F8FAFC',
+    fontWeight: 'bold',
+    fontSize: 12,
+  },
+  scannedCountBadge: {
+    backgroundColor: '#062F3B',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#10B98155',
+  },
+  scannedCountBadgeText: {
+    color: '#A3E635',
+    fontWeight: 'bold',
+    fontSize: 12,
+  },
+  cameraManualRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 12,
+  },
+  cameraManualInput: {
+    flex: 1,
+    backgroundColor: '#062F3B',
+    borderWidth: 1,
+    borderColor: '#155E75',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    color: '#FFFFFF',
+    fontSize: 13,
+  },
+  cameraManualBtn: {
+    backgroundColor: '#0284C7',
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  cameraManualBtnText: {
+    color: '#FFFFFF',
+    fontWeight: 'bold',
+    fontSize: 12,
+  },
+  cameraDoneBtn: {
+    backgroundColor: '#10B981',
+    paddingVertical: 14,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  cameraDoneBtnText: {
+    color: '#071F27',
+    fontWeight: 'bold',
+    fontSize: 14,
+  },
 });

@@ -66,7 +66,22 @@ export async function runMigrationAndSeed() {
         })
         .onConflictDoNothing();
 
-      console.log('✓ Tenant y usuarios demo creados (admin / cajero1, clave: Vuelto2026!)');
+      // 5. Usuario Súper Administrador Maestro (Control Global Multi-Tenant)
+      const superAdminPasswordHash = await bcrypt.hash('SuperAdmin2026!', 10);
+      await db
+        .insert(users)
+        .values({
+          tenantId: demoTenant.id,
+          roleId: 'SUPER_ADMIN',
+          username: 'superadmin',
+          email: 'superadmin@vuelto.app',
+          passwordHash: superAdminPasswordHash,
+          fullName: 'Súper Administrador Maestro',
+          phone: '04140000000',
+        })
+        .onConflictDoNothing();
+
+      console.log('✓ Tenant y usuarios demo creados (superadmin [SuperAdmin2026!], admin / cajero1 [Vuelto2026!])');
     }
 
     console.log('Migración y sembrado completados con éxito.');

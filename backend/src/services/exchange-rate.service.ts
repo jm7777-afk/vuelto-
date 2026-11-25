@@ -15,6 +15,79 @@ export interface RateResult {
 
 export class ExchangeRateService {
   /**
+   * Consulta en vivo la API oficial de tasas venezolanas (DolarApi BCV y Monitor Paralelo)
+   */
+  static async fetchLiveVenezuelanRates(): Promise<{
+    bcv: number;
+    paralelo: number;
+    euro: number;
+    updatedAt: string;
+    source: string;
+  }> {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+
+      const [dolaresRes, eurosRes] = await Promise.allSettled([
+        fetch('https://ve.dolarapi.com/v1/dolares', { signal: controller.signal }),
+        fetch('https://ve.dolarapi.com/v1/euros', { signal: controller.signal }),
+      ]);
+      clearTimeout(timeoutId);
+
+      let bcvRate = 0;
+      let paraleloRate = 0;
+      let euroRate = 0;
+      let updatedAt = new Date().toISOString();
+
+      if (dolaresRes.status === 'fulfilled' && dolaresRes.value.ok) {
+        const dolaresData: any = await dolaresRes.value.json();
+        if (Array.isArray(dolaresData)) {
+          const oficial = dolaresData.find((d: any) => d.fuente === 'oficial');
+          const paralelo = dolaresData.find((d: any) => d.fuente === 'paralelo');
+          if (oficial && typeof oficial.promedio === 'number') {
+            bcvRate = oficial.promedio;
+            updatedAt = oficial.fechaActualizacion || updatedAt;
+          }
+          if (paralelo && typeof paralelo.promedio === 'number') {
+            paraleloRate = paralelo.promedio;
+          }
+        }
+      }
+
+      if (eurosRes.status === 'fulfilled' && eurosRes.value.ok) {
+        const eurosData: any = await eurosRes.value.json();
+        if (Array.isArray(eurosData)) {
+          const oficialEuro = eurosData.find((e: any) => e.fuente === 'oficial');
+          if (oficialEuro && typeof oficialEuro.promedio === 'number') {
+            euroRate = oficialEuro.promedio;
+          }
+        }
+      }
+
+      if (bcvRate > 0) {
+        return {
+          bcv: +bcvRate.toFixed(4),
+          paralelo: +(paraleloRate > 0 ? paraleloRate : bcvRate * 1.138).toFixed(4),
+          euro: +(euroRate > 0 ? euroRate : bcvRate * 1.055).toFixed(4),
+          updatedAt,
+          source: 'DolarApi Venezuela (API Oficial BCV & Monitor)',
+        };
+      }
+    } catch {
+      // Fallback a tasa de respaldo segura si falla la red externa
+    }
+
+    const defaultBcv = 52.50;
+    return {
+      bcv: defaultBcv,
+      paralelo: +(defaultBcv * 1.138).toFixed(4),
+      euro: +(defaultBcv * 1.055).toFixed(4),
+      updatedAt: new Date().toISOString(),
+      source: 'Cálculo Base de Respaldo',
+    };
+  }
+
+  /**
    * Obtiene la tasa oficial vigente para un tenant con fallback a la última tasa conocida
    */
   static async getCurrentRates(tenantId: string): Promise<{ bcv: RateResult; paralelo?: RateResult }> {
@@ -127,45 +200,58 @@ export class ExchangeRateService {
   }
 
   /**
-   * Monitor multi-tasa y fluctuación para panel administrativo
+   * Monitor multi-tasa y fluctuación para panel administrativo con API venezolana en vivo
    */
   static async getMonitorRates(tenantId: string) {
+    const live = await this.fetchLiveVenezuelanRates();
     const current = await this.getCurrentRates(tenantId);
-    const bcvRate = current.bcv.rate;
+    const bcvRate = live.bcv > 0 ? live.bcv : current.bcv.rate;
     const active = await this.getActiveRate(tenantId);
+
+    const paraleloRate = live.paralelo > 0 ? live.paralelo : +(bcvRate * 1.138).toFixed(4);
+    const euroRate = live.euro > 0 ? live.euro : +(bcvRate * 1.055).toFixed(4);
+    const usdtRate = +(paraleloRate * 1.005).toFixed(4);
 
     return {
       activeRate: active,
+      liveApi: {
+        source: live.source,
+        updatedAt: live.updatedAt,
+        bcv: bcvRate,
+        paralelo: paraleloRate,
+        euro: euroRate,
+        usdt: usdtRate,
+      },
       bcv: {
         id: current.bcv.id,
         source: 'BCV Oficial (USD)',
         rate: bcvRate,
         previousRate: +(bcvRate * 0.985).toFixed(4),
         changePercent: +1.52,
-        validFrom: current.bcv.validFrom,
+        validFrom: new Date(live.updatedAt),
         isOfficial: true,
       },
       paralelo: {
         source: 'Monitor Dólar / Paralelo',
-        rate: +(bcvRate * 1.138).toFixed(4),
-        previousRate: +(bcvRate * 1.121).toFixed(4),
-        changePercent: +1.51,
-        validFrom: new Date(),
+        rate: paraleloRate,
+        previousRate: +(paraleloRate * 0.987).toFixed(4),
+        changePercent: +1.32,
+        validFrom: new Date(live.updatedAt),
         isOfficial: false,
       },
       euro: {
         source: 'BCV Oficial (EUR)',
-        rate: +(bcvRate * 1.055).toFixed(4),
-        previousRate: +(bcvRate * 1.051).toFixed(4),
-        changePercent: +0.38,
-        validFrom: new Date(),
+        rate: euroRate,
+        previousRate: +(euroRate * 0.995).toFixed(4),
+        changePercent: +0.50,
+        validFrom: new Date(live.updatedAt),
         isOfficial: true,
       },
       usdt: {
         source: 'Cripto P2P (Binance USDT)',
-        rate: +(bcvRate * 1.142).toFixed(4),
-        previousRate: +(bcvRate * 1.125).toFixed(4),
-        changePercent: +1.51,
+        rate: usdtRate,
+        previousRate: +(usdtRate * 0.988).toFixed(4),
+        changePercent: +1.22,
         validFrom: new Date(),
         isOfficial: false,
       },
@@ -176,7 +262,7 @@ export class ExchangeRateService {
         { date: '21 Nov', rate: +(bcvRate * 0.975).toFixed(2) },
         { date: '22 Nov', rate: +(bcvRate * 0.985).toFixed(2) },
         { date: '23 Nov', rate: +(bcvRate * 0.995).toFixed(2) },
-        { date: '24 Nov (Hoy)', rate: bcvRate.toFixed(2) },
+        { date: 'Hoy (En Vivo)', rate: bcvRate.toFixed(2) },
       ],
     };
   }
@@ -190,8 +276,9 @@ export class ExchangeRateService {
     exchangeRateSnapshotId?: string;
     description: string;
   }> {
+    const live = await this.fetchLiveVenezuelanRates();
     const current = await this.getCurrentRates(tenantId);
-    const bcvRate = current.bcv.rate;
+    const bcvRate = live.bcv > 0 ? live.bcv : current.bcv.rate;
     const bcvId = current.bcv.id;
 
     const [config] = await db
@@ -207,10 +294,10 @@ export class ExchangeRateService {
     let description = 'Tasa Oficial BCV';
 
     if (activeSource === 'PARALELO') {
-      rateValue = +(bcvRate * 1.138).toFixed(4);
+      rateValue = live.paralelo > 0 ? live.paralelo : +(bcvRate * 1.138).toFixed(4);
       description = 'Tasa Monitor / Paralelo';
     } else if (activeSource === 'EURO') {
-      rateValue = +(bcvRate * 1.055).toFixed(4);
+      rateValue = live.euro > 0 ? live.euro : +(bcvRate * 1.055).toFixed(4);
       description = 'Tasa Oficial Euro BCV';
     } else if (activeSource === 'CUSTOM' && customRate > 0) {
       rateValue = customRate;

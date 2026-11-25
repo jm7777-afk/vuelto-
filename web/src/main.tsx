@@ -433,7 +433,7 @@ export const App: React.FC = () => {
     updateActiveTicket((t) => ({ ...t, customer: cust, adminApproved: false }));
   };
 
-  const setPosPaymentMethod = (method: 'CASH_USD' | 'PAGO_MOVIL' | 'DEBIT_CARD' | 'TRANSFER' | 'CREDIT_DEBT') => {
+  const setPosPaymentMethod = (method: 'CASH_USD' | 'CASH_VES' | 'PAGO_MOVIL' | 'DEBIT_CARD' | 'TRANSFER' | 'CREDIT_DEBT' | 'DERIVAR_ADMIN') => {
     updateActiveTicket((t) => ({ ...t, paymentMethod: method }));
   };
 
@@ -496,6 +496,48 @@ export const App: React.FC = () => {
   const [posCategoryFilter, setPosCategoryFilter] = useState('TODAS');
   const [posScanFeedback, setPosScanFeedback] = useState<{ type: 'success' | 'info' | 'warning'; message: string } | null>(null);
 
+  // UX Refactorizada POS: Ref de Autofocus, Flash de Escáner y Feedback de Audio
+  const posSearchInputRef = useRef<HTMLInputElement>(null);
+  const [isScanSuccessFlash, setIsScanSuccessFlash] = useState(false);
+  const [posCashAmountVes, setPosCashAmountVes] = useState('0.00');
+
+  // Asistente (Wizard) de Cobro en Modal de 3 Pasos
+  const [isCheckoutWizardOpen, setIsCheckoutWizardOpen] = useState(false);
+  const [checkoutStep, setCheckoutStep] = useState<1 | 2 | 3>(1);
+
+  // Modal para que el Administrador consulte la factura y lo que se llevó en Morosidad
+  const [selectedDebtorDetail, setSelectedDebtorDetail] = useState<CustomerDebt | null>(null);
+  const [isDebtorDetailModalOpen, setIsDebtorDetailModalOpen] = useState(false);
+
+  // Síntesis de Sonido Web Audio API para feedback sonoro de escaneo POS
+  const playScanBeep = (success = true) => {
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = 'sine';
+      if (success) {
+        osc.frequency.setValueAtTime(880, ctx.currentTime);
+        gain.gain.setValueAtTime(0.18, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.12);
+      } else {
+        osc.frequency.setValueAtTime(220, ctx.currentTime);
+        gain.gain.setValueAtTime(0.22, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.22);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.22);
+      }
+    } catch {
+      // Audio fallback silencioso si el navegador restringe audio sin clic previo
+    }
+  };
+
   // Búsqueda por C.I. y Registro Rápido
   const [posCiSearchInput, setPosCiSearchInput] = useState('');
   const [posCiDocType, setPosCiDocType] = useState<'V' | 'E' | 'J' | 'G'>('V');
@@ -507,6 +549,69 @@ export const App: React.FC = () => {
 
   const [posAdminPinInput, setPosAdminPinInput] = useState('');
   const [completedSaleModal, setCompletedSaleModal] = useState<any | null>(null);
+
+  // Autofocus permanente en la barra de escaneo si no hay modal abierto
+  useEffect(() => {
+    if (activeTab === 'POS' && !isCheckoutWizardOpen && !completedSaleModal && !isDebtorDetailModalOpen) {
+      posSearchInputRef.current?.focus();
+    }
+  }, [activeTab, isCheckoutWizardOpen, completedSaleModal, isDebtorDetailModalOpen]);
+
+  // Atajos de Teclado Globales: F2 (Cobro Wizard), Esc (Atrás/Cerrar), Enter (Pasos/Confirmar)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // F2: Abrir asistente wizard de cobro si el carrito tiene productos
+      if (e.key === 'F2') {
+        e.preventDefault();
+        if (activeTab === 'POS' && !isCheckoutWizardOpen && cartLines.length > 0) {
+          setIsCheckoutWizardOpen(true);
+          setCheckoutStep(1);
+        }
+        return;
+      }
+
+      // Esc: Retroceder un paso o cerrar modales sin perder el carrito
+      if (e.key === 'Escape') {
+        if (isDebtorDetailModalOpen) {
+          setIsDebtorDetailModalOpen(false);
+          return;
+        }
+        if (completedSaleModal) {
+          setCompletedSaleModal(null);
+          return;
+        }
+        if (isCheckoutWizardOpen) {
+          e.preventDefault();
+          if (checkoutStep > 1) {
+            setCheckoutStep((s) => (s - 1) as any);
+          } else {
+            setIsCheckoutWizardOpen(false);
+          }
+          return;
+        }
+      }
+
+      // Enter dentro del wizard (cuando no se está editando un campo de texto que tenga su propio submit)
+      if (e.key === 'Enter' && isCheckoutWizardOpen) {
+        const activeTag = document.activeElement?.tagName;
+        if (activeTag === 'INPUT' || activeTag === 'TEXTAREA') {
+          return;
+        }
+        e.preventDefault();
+        if (checkoutStep === 1) {
+          setCheckoutStep(2);
+        } else if (checkoutStep === 2) {
+          setCheckoutStep(3);
+        } else if (checkoutStep === 3) {
+          handlePosConfirmSale();
+          setIsCheckoutWizardOpen(false);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeTab, isCheckoutWizardOpen, checkoutStep, cartLines, isDebtorDetailModalOpen, completedSaleModal]);
 
   // Auditoría y Backups
   const [auditLogsList, setAuditLogsList] = useState<any[]>([
@@ -982,23 +1087,47 @@ export const App: React.FC = () => {
   const totalOtherIncomeUsd = financialTransactionsList.filter((t) => t.type === 'INGRESO').reduce((acc, t) => acc + t.amountUsd, 0);
   const netProfitUsd = totalGrossSalesUsd + totalOtherIncomeUsd - totalExpensesUsd;
 
-  // Login handler
-  const handleLogin = (roleToSet?: 'ADMIN' | 'VENDEDOR') => {
-    const userRole = roleToSet || (usernameInput === 'cajero1' ? 'VENDEDOR' : 'ADMIN');
-    const uName = roleToSet === 'VENDEDOR' ? 'cajero1' : roleToSet === 'ADMIN' ? 'admin' : usernameInput;
+  // Login handler con soporte completo para Súper Admin, Admin y Vendedor
+  const handleLogin = (roleToSet?: 'SUPER_ADMIN' | 'ADMIN' | 'VENDEDOR') => {
+    let userRole = roleToSet;
+    let uName = usernameInput.trim();
+
+    if (!userRole) {
+      if (uName === 'superadmin') userRole = 'SUPER_ADMIN';
+      else if (uName === 'cajero1') userRole = 'VENDEDOR';
+      else userRole = 'ADMIN';
+    } else {
+      if (userRole === 'SUPER_ADMIN') uName = 'superadmin';
+      else if (userRole === 'VENDEDOR') uName = 'cajero1';
+      else uName = 'admin';
+    }
 
     const loggedProfile: UserProfile = {
-      id: uName === 'cajero1' ? '8cb3bb66-6b60-4966-9bc6-e8220f122557' : '24a8eccf-b45e-4d5a-ac01-b44b77198c10',
+      id:
+        userRole === 'SUPER_ADMIN'
+          ? '00000000-0000-0000-0000-000000000001'
+          : userRole === 'VENDEDOR'
+          ? '8cb3bb66-6b60-4966-9bc6-e8220f122557'
+          : '24a8eccf-b45e-4d5a-ac01-b44b77198c10',
       tenantId: 'a0000000-0000-0000-0000-000000000001',
       username: uName,
-      fullName: uName === 'cajero1' ? 'Carlos Mendoza (Cajero)' : 'Dueño Administrador',
+      fullName:
+        userRole === 'SUPER_ADMIN'
+          ? 'Súper Administrador Global'
+          : userRole === 'VENDEDOR'
+          ? 'Carlos Mendoza (Cajero)'
+          : 'Dueño Administrador',
       roleId: userRole,
-      businessName: 'Inversiones Bodega Central C.A.',
+      businessName:
+        userRole === 'SUPER_ADMIN'
+          ? 'Plataforma Global Vuelto SaaS'
+          : 'Inversiones Bodega Central C.A.',
     };
 
     setUser(loggedProfile);
+    setUserRoleMode(userRole);
     localStorage.setItem('vuelto_user_session', JSON.stringify(loggedProfile));
-    setActiveTab(userRole === 'VENDEDOR' ? 'INVENTORY' : 'METRICS');
+    setActiveTab(userRole === 'SUPER_ADMIN' ? 'SUPER_ADMIN' : userRole === 'VENDEDOR' ? 'POS' : 'METRICS');
   };
 
   const handleLogout = () => {
@@ -1308,6 +1437,9 @@ export const App: React.FC = () => {
         },
       ]);
     }
+    playScanBeep(true);
+    setIsScanSuccessFlash(true);
+    setTimeout(() => setIsScanSuccessFlash(false), 350);
   };
 
   const handlePosUpdateCartQty = (productId: string, newQty: number) => {
@@ -1339,7 +1471,7 @@ export const App: React.FC = () => {
     }
 
     // 2. Fallback: Búsqueda por SKU o Código Interno
-    const matchSku = inventoryList.find((p) => p.sku.toLowerCase() === query);
+    const matchSku = inventoryList.find((p) => p.sku.toLowerCase() === query || p.sku.toUpperCase() === rawQuery.toUpperCase());
     if (matchSku) {
       handlePosAddToCart(matchSku, 1);
       setPosBarcodeQuery('');
@@ -1357,21 +1489,23 @@ export const App: React.FC = () => {
       setPosBarcodeQuery('');
       setPosScanFeedback({
         type: 'info',
-        message: `🔍 Agregado por coincidencia de nombre: ${nameMatches[0].name} (${nameMatches[0].unitOfMeasure || 'UNIDAD'})`,
+        message: `🔍 Agregado por coincidencia: ${nameMatches[0].name} (${nameMatches[0].unitOfMeasure || 'UNIDAD'})`,
       });
       return;
     } else if (nameMatches.length > 1) {
+      playScanBeep(true);
       setPosScanFeedback({
         type: 'info',
-        message: `🔍 Coincidencias encontradas para "${rawQuery}". Presione "+ Agregar" en la lista de abajo:`,
+        message: `🔍 ${nameMatches.length} coincidencias encontradas. Selecciona una en el listado desplegable:`,
       });
       return;
     }
 
     // 4. Si no se encuentra
+    playScanBeep(false);
     setPosScanFeedback({
       type: 'warning',
-      message: `⚠️ No se encontró "${rawQuery}" por código de barras ni nombre. Puede verificar el catálogo.`,
+      message: `⚠️ No se encontró "${rawQuery}" por código de barras ni nombre.`,
     });
   };
 
@@ -1448,8 +1582,19 @@ export const App: React.FC = () => {
   const posTotalBs = posTotalUsd * activeRate;
 
   const posCashAmountNum = parseFloat(posCashAmountUsd) || 0;
-  const posChangeUsd = posPaymentMethod === 'CASH_USD' && posCashAmountNum > posTotalUsd ? posCashAmountNum - posTotalUsd : 0;
-  const posChangeBs = posChangeUsd * activeRate;
+  const posCashVesNum = parseFloat(posCashAmountVes) || 0;
+  const posChangeUsd =
+    posPaymentMethod === 'CASH_USD' && posCashAmountNum > posTotalUsd
+      ? posCashAmountNum - posTotalUsd
+      : posPaymentMethod === 'CASH_VES' && posCashVesNum > posTotalBs
+      ? (posCashVesNum - posTotalBs) / (activeRate || 1)
+      : 0;
+  const posChangeBs =
+    posPaymentMethod === 'CASH_USD' && posCashAmountNum > posTotalUsd
+      ? (posCashAmountNum - posTotalUsd) * activeRate
+      : posPaymentMethod === 'CASH_VES' && posCashVesNum > posTotalBs
+      ? posCashVesNum - posTotalBs
+      : 0;
 
   // Confirmar Venta POS y Emitir Comprobante Digital
   const handlePosConfirmSale = () => {
@@ -1520,6 +1665,38 @@ export const App: React.FC = () => {
     };
     setSalesHistory([saleItem, ...salesHistory]);
 
+    // Si el método de pago es Derivar a Administrador, registrar en Morosidad con lista detallada de lo llevado
+    if (posPaymentMethod === 'DERIVAR_ADMIN') {
+      const newDebtItem: CustomerDebt = {
+        id: `debt-${Date.now()}`,
+        name: posSelectedCustomer.name,
+        document: `${posSelectedCustomer.documentType}-${posSelectedCustomer.documentNumber}`,
+        phone: posSelectedCustomer.phone || '',
+        balanceDueUsd: posTotalUsd,
+        dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+        isOverdue: false,
+        lateDays: 0,
+        surchargeUsd: 0,
+        waived: false,
+        invoiceNumber: nextInvoiceNum,
+        cashierName: `${user?.fullName} (${user?.username})`,
+        itemsTaken: cartLines.map((c) => ({
+          name: c.name,
+          qty: c.qty,
+          priceUsd: c.priceUsd,
+          subtotalUsd: +(c.priceUsd * c.qty).toFixed(2),
+        })),
+      };
+      setCustomerDebts((prev) => [newDebtItem, ...prev]);
+      setPosCustomerList((prev) =>
+        prev.map((c) =>
+          c.id === posSelectedCustomer.id
+            ? { ...c, balanceDue: +(c.balanceDue + posTotalUsd).toFixed(2), isSpecialMoraCustomer: true }
+            : c
+        )
+      );
+    }
+
     // Registrar en Auditoría
     setAuditLogsList((prev) => [
       {
@@ -1547,7 +1724,7 @@ export const App: React.FC = () => {
     setCompletedSaleModal({
       ...saleItem,
       customerPhone: posSelectedCustomer.phone,
-      paymentMethod: posPaymentMethod,
+      paymentMethod: posPaymentMethod === 'DERIVAR_ADMIN' ? 'DERIVADO A ADMINISTRADOR (MOROSIDAD)' : posPaymentMethod,
       vueltoUsd: posChangeUsd,
       vueltoBs: posChangeBs,
     });
@@ -1868,14 +2045,36 @@ export const App: React.FC = () => {
             <div style={{ flex: 1, height: '1px', backgroundColor: '#155E75' }} />
           </div>
 
+          {/* Tarjeta de Credenciales Oficiales */}
+          <div style={{ backgroundColor: '#062F3B', padding: '12px 14px', borderRadius: '10px', border: '1px solid #155E75', marginBottom: '16px' }}>
+            <p style={{ fontSize: '11px', fontWeight: 'bold', color: '#A3E635', marginBottom: '6px' }}>
+              🔑 Credenciales del Sistema:
+            </p>
+            <div style={{ fontSize: '11px', color: '#CBD5E1', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              <div>👑 <strong style={{ color: '#C084FC' }}>Súper Admin:</strong> <code style={{ color: '#F8FAFC' }}>superadmin</code> / <code style={{ color: '#A3E635' }}>SuperAdmin2026!</code> (Crear y gestionar negocios)</div>
+              <div>🏢 <strong style={{ color: '#38BDF8' }}>Admin Tienda:</strong> <code style={{ color: '#F8FAFC' }}>admin</code> / <code style={{ color: '#A3E635' }}>Vuelto2026!</code> (Costos, margen en $, tasas, compras)</div>
+              <div>🛒 <strong style={{ color: '#10B981' }}>Cajero/Vendedor:</strong> <code style={{ color: '#F8FAFC' }}>cajero1</code> / <code style={{ color: '#A3E635' }}>Vuelto2026!</code> (POS, escaneo con cámara, cobro)</div>
+            </div>
+          </div>
+
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            <button
+              onClick={() => handleLogin('SUPER_ADMIN')}
+              style={{ padding: '12px', borderRadius: '10px', border: '1px solid #8B5CF644', backgroundColor: '#8B5CF615', color: '#C084FC', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer', textAlign: 'left' }}
+            >
+              👑 Entrar como Súper Administrador Global (superadmin)
+              <span style={{ display: 'block', fontSize: '10px', color: '#94A3B8', marginTop: '2px', fontWeight: 'normal' }}>
+                Control multi-tenant: crea comercios, suspende/activa tiendas y visualiza volumen global
+              </span>
+            </button>
+
             <button
               onClick={() => handleLogin('ADMIN')}
               style={{ padding: '12px', borderRadius: '10px', border: '1px solid #0284C744', backgroundColor: '#0284C715', color: '#38BDF8', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer', textAlign: 'left' }}
             >
-              👑 Entrar como Administrador Total (admin)
+              🏢 Entrar como Dueño Administrador (admin)
               <span style={{ display: 'block', fontSize: '10px', color: '#94A3B8', marginTop: '2px', fontWeight: 'normal' }}>
-                Acceso a todos los CRUDs: Proveedores, Costos, Márgenes, Mora y Finanzas
+                Control total de tienda: Proveedores, Costos, Margen en $, Mora, Finanzas y Tasas BCV
               </span>
             </button>
 
@@ -1885,7 +2084,7 @@ export const App: React.FC = () => {
             >
               🛒 Entrar como Cajero / Vendedor (cajero1)
               <span style={{ display: 'block', fontSize: '10px', color: '#94A3B8', marginTop: '2px', fontWeight: 'normal' }}>
-                Solo POS, Precios de salida y Facturación (Costos y Márgenes estrictamente ocultos)
+                Vista aislada de ventas: POS, escaneo con cámara, clientes por C.I. y WhatsApp (Costos ocultos)
               </span>
             </button>
           </div>
@@ -2119,406 +2318,428 @@ export const App: React.FC = () => {
         <main className="vuelto-main-view" style={{ flex: 1, padding: '28px', overflowY: 'auto' }}>
           {/* TAB 0: TERMINAL DE VENTAS POS (CAJERO & ADMIN) */}
           {activeTab === 'POS' && (
-            <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '20px', flexWrap: 'wrap', gap: '12px' }}>
-                <div>
-                  <h2 style={{ fontSize: '24px', fontWeight: 'bold' }}>Punto de Venta & Facturación Rápida (POS)</h2>
-                  <p style={{ color: '#94A3B8', fontSize: '13px' }}>
-                    Escaneo de código de barras, cobro bimoneda, verificación de mora y emisión de nota de entrega digital.
-                  </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxWidth: '1200px', margin: '0 auto' }}>
+              {/* FICHERO SUPERIOR: MULTI-TICKETS / VENTAS SIMULTÁNEAS */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px', backgroundColor: '#0B3B49', padding: '8px 14px', borderRadius: '12px', border: '1px solid #155E75' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', overflowX: 'auto', maxWidth: '85%' }}>
+                  <span style={{ fontSize: '11px', color: '#94A3B8', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                    Fichero de Ventas:
+                  </span>
+                  {posTickets.map((t) => {
+                    const isActive = t.id === activeTicketId;
+                    const itemsCount = t.cartLines.reduce((acc, c) => acc + c.qty, 0);
+                    const ticketTotal = t.cartLines.reduce((acc, c) => acc + c.priceUsd * c.qty, 0);
+                    return (
+                      <div
+                        key={t.id}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                          padding: '6px 12px',
+                          borderRadius: '8px',
+                          cursor: 'pointer',
+                          backgroundColor: isActive ? '#062F3B' : '#071F27',
+                          border: isActive ? '2px solid #10B981' : '1px solid #155E75',
+                          transition: 'all 0.15s ease',
+                        }}
+                        onClick={() => setActiveTicketId(t.id)}
+                      >
+                        <ShoppingCart size={13} color={isActive ? '#10B981' : '#94A3B8'} />
+                        <span style={{ fontSize: '12px', fontWeight: isActive ? 'bold' : '500', color: isActive ? '#F8FAFC' : '#CBD5E1' }}>
+                          {t.label}
+                        </span>
+                        {itemsCount > 0 && (
+                          <span style={{ backgroundColor: isActive ? '#10B98122' : '#155E7544', color: isActive ? '#A3E635' : '#94A3B8', padding: '1px 5px', borderRadius: '4px', fontSize: '10px', fontWeight: 'bold' }}>
+                            {itemsCount} • ${ticketTotal.toFixed(2)}
+                          </span>
+                        )}
+                        {posTickets.length > 1 && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleCloseTicket(t.id);
+                            }}
+                            title="Cerrar esta venta"
+                            style={{ background: 'none', border: 'none', color: '#94A3B8', cursor: 'pointer', padding: '0 2px', display: 'flex', alignItems: 'center' }}
+                          >
+                            <X size={12} />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                  <button
+                    onClick={handleCreateNewTicket}
+                    title="Pausar venta actual y abrir nuevo ticket"
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '4px',
+                      padding: '6px 10px',
+                      borderRadius: '8px',
+                      border: '1px dashed #10B981',
+                      backgroundColor: 'transparent',
+                      color: '#A3E635',
+                      fontSize: '11px',
+                      fontWeight: 'bold',
+                      cursor: 'pointer',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    <Plus size={13} />
+                    <span>+ Nueva Venta</span>
+                  </button>
                 </div>
 
-                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-                  <div style={{ padding: '6px 12px', borderRadius: '8px', backgroundColor: '#062F3B', border: '1px solid #10B98155', fontSize: '12px', color: '#A3E635', fontWeight: 'bold' }}>
-                    Tasa de Cobro: {activeRate.toFixed(2)} Bs/$ ({activeRateSource})
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <div style={{ padding: '4px 10px', borderRadius: '6px', backgroundColor: '#062F3B', border: '1px solid #10B98144', fontSize: '11px', color: '#A3E635', fontWeight: 'bold' }}>
+                    Tasa: {activeRate.toFixed(2)} Bs/$
                   </div>
-                  <div style={{ padding: '6px 12px', borderRadius: '8px', backgroundColor: '#062F3B', border: '1px solid #0284C755', fontSize: '12px', color: '#38BDF8', fontWeight: 'bold' }}>
-                    Régimen: {enableIva ? 'IVA 16%' : 'IVA 0% (Emprendimiento)'}
+                  <div style={{ padding: '4px 10px', borderRadius: '6px', backgroundColor: '#062F3B', border: '1px solid #0284C744', fontSize: '11px', color: '#38BDF8', fontWeight: 'bold' }}>
+                    {enableIva ? 'IVA 16%' : 'IVA 0%'}
                   </div>
                 </div>
               </div>
 
-              {/* GRID PRINCIPAL: 2 COLUMNAS (CATÁLOGO A LA IZQUIERDA / CARRITO Y COBRO A LA DERECHA) */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '20px' }}>
-                {/* COLUMNA 1: CATÁLOGO DE PRODUCTOS & ESCÁNER */}
-                <div style={{ backgroundColor: '#0B3B49', padding: '20px', borderRadius: '16px', border: '1px solid #155E75' }}>
-                  {/* Barra de Búsqueda y Escáner */}
-                  <form onSubmit={handlePosBarcodeScan} style={{ display: 'flex', gap: '8px', marginBottom: '14px' }}>
-                    <div style={{ position: 'relative', flex: 1 }}>
-                      <Search size={16} color="#94A3B8" style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)' }} />
-                      <input
-                        type="text"
-                        placeholder="Escanear código de barras EAN-13 o buscar producto..."
-                        value={posBarcodeQuery}
-                        onChange={(e) => setPosBarcodeQuery(e.target.value)}
-                        style={{ width: '100%', padding: '10px 10px 10px 36px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#FFFFFF', fontSize: '13px', outline: 'none' }}
-                      />
-                    </div>
-                    <button
-                      type="submit"
-                      style={{ padding: '10px 16px', borderRadius: '8px', border: 'none', backgroundColor: '#0284C7', color: '#FFFFFF', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer' }}
-                    >
-                      Buscar
-                    </button>
-                  </form>
-
-                  {/* Filtro por Categorías */}
-                  <div style={{ display: 'flex', gap: '6px', overflowX: 'auto', paddingBottom: '8px', marginBottom: '14px' }}>
-                    {['TODAS', 'Alimentos', 'Bebidas', 'Lácteos', 'Limpieza', 'Víveres'].map((cat) => (
-                      <button
-                        key={cat}
-                        onClick={() => setPosCategoryFilter(cat)}
-                        style={{
-                          padding: '6px 12px',
-                          borderRadius: '16px',
-                          border: 'none',
-                          fontSize: '11px',
-                          fontWeight: 'bold',
-                          cursor: 'pointer',
-                          backgroundColor: posCategoryFilter === cat ? '#A3E635' : '#062F3B',
-                          color: posCategoryFilter === cat ? '#071F27' : '#94A3B8',
-                          transition: 'all 0.15s ease',
-                          whiteSpace: 'nowrap',
-                        }}
-                      >
-                        {cat}
-                      </button>
-                    ))}
+              {/* ZONA 1: BARRA DE ESCÁNER Y BÚSQUEDA ÚNICA ULTRA-LIMPIA */}
+              <div style={{ position: 'relative', width: '100%' }}>
+                <form
+                  onSubmit={handlePosBarcodeScan}
+                  style={{
+                    position: 'relative',
+                    display: 'flex',
+                    alignItems: 'center',
+                    width: '100%',
+                    borderRadius: '12px',
+                    border: isScanSuccessFlash ? '2px solid #10B981' : '1px solid #155E75',
+                    boxShadow: isScanSuccessFlash ? '0 0 16px rgba(16, 185, 129, 0.6)' : '0 4px 12px rgba(0, 0, 0, 0.25)',
+                    backgroundColor: '#062F3B',
+                    transition: 'border 0.2s ease, box-shadow 0.2s ease',
+                  }}
+                >
+                  <div style={{ padding: '0 14px', display: 'flex', alignItems: 'center', color: isScanSuccessFlash ? '#10B981' : '#94A3B8' }}>
+                    <Search size={20} />
                   </div>
+                  <input
+                    ref={posSearchInputRef}
+                    autoFocus
+                    type="text"
+                    value={posBarcodeQuery}
+                    onChange={(e) => setPosBarcodeQuery(e.target.value)}
+                    placeholder="Escanear código de barras (EAN-13), SKU o escribir nombre del producto (Enter para agregar)..."
+                    style={{
+                      flex: 1,
+                      padding: '16px 12px 16px 0',
+                      border: 'none',
+                      outline: 'none',
+                      backgroundColor: 'transparent',
+                      color: '#F8FAFC',
+                      fontSize: '15px',
+                      fontWeight: '500',
+                    }}
+                  />
+                  {posBarcodeQuery && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPosBarcodeQuery('');
+                        posSearchInputRef.current?.focus();
+                      }}
+                      style={{ background: 'none', border: 'none', color: '#94A3B8', cursor: 'pointer', padding: '0 12px' }}
+                    >
+                      <X size={16} />
+                    </button>
+                  )}
+                  <button
+                    type="submit"
+                    style={{
+                      padding: '12px 20px',
+                      marginRight: '6px',
+                      borderRadius: '8px',
+                      border: 'none',
+                      backgroundColor: '#0284C7',
+                      color: '#FFFFFF',
+                      fontWeight: 'bold',
+                      fontSize: '13px',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Agregar (Enter)
+                  </button>
+                </form>
 
-                  {/* Lista de Productos Scanneables / Recomendados */}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxHeight: '540px', overflowY: 'auto' }}>
-                    {inventoryList
-                      .filter((p) => posCategoryFilter === 'TODAS' || p.category === posCategoryFilter)
-                      .map((prod) => (
+                {/* POPOVER / DROPDOWN FLOTANTE COMPACTO (1 SOLA LÍNEA POR PRODUCTO) - OCULTO SI ESTÁ VACÍO */}
+                {posBarcodeQuery.trim().length > 0 && (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      top: 'calc(100% + 6px)',
+                      left: 0,
+                      right: 0,
+                      backgroundColor: '#062F3B',
+                      border: '1px solid #10B981',
+                      borderRadius: '10px',
+                      boxShadow: '0 12px 30px rgba(0, 0, 0, 0.7)',
+                      zIndex: 50,
+                      maxHeight: '300px',
+                      overflowY: 'auto',
+                    }}
+                  >
+                    {(() => {
+                      const query = posBarcodeQuery.trim().toLowerCase();
+                      const matches = inventoryList
+                        .filter(
+                          (p) =>
+                            p.name.toLowerCase().includes(query) ||
+                            p.barcode.toLowerCase().includes(query) ||
+                            p.sku.toLowerCase().includes(query)
+                        )
+                        .slice(0, 8);
+
+                      if (matches.length === 0) {
+                        return (
+                          <div style={{ padding: '14px 16px', color: '#94A3B8', fontSize: '13px', textAlign: 'center' }}>
+                            Sin coincidencias para "<strong>{posBarcodeQuery}</strong>". Presiona Enter para intentar escaneo directo.
+                          </div>
+                        );
+                      }
+
+                      return matches.map((item) => (
                         <div
-                          key={prod.id}
+                          key={item.id}
+                          onClick={() => {
+                            handlePosAddToCart(item, 1);
+                            setPosBarcodeQuery('');
+                            posSearchInputRef.current?.focus();
+                          }}
                           style={{
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'space-between',
-                            backgroundColor: '#062F3B',
-                            padding: '12px 14px',
-                            borderRadius: '10px',
-                            border: '1px solid #155E7544',
-                          }}
-                        >
-                          <div style={{ flex: 1, marginRight: '10px' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                              <h4 style={{ fontSize: '14px', fontWeight: 'bold', color: '#FFFFFF' }}>{prod.name}</h4>
-                              <span style={{ fontSize: '9px', padding: '1px 5px', borderRadius: '4px', backgroundColor: prod.stock <= prod.minStockAlert ? '#EF444422' : '#10B98122', color: prod.stock <= prod.minStockAlert ? '#EF4444' : '#10B981', fontWeight: 'bold' }}>
-                                {prod.stock} disp.
-                              </span>
-                            </div>
-                            <p style={{ fontSize: '11px', color: '#64748B', fontFamily: 'monospace' }}>
-                              EAN: {prod.barcode} • SKU: {prod.sku}
-                            </p>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' }}>
-                              <span style={{ fontSize: '14px', fontWeight: 'bold', color: '#10B981' }}>
-                                ${prod.salePriceUsd.toFixed(2)} USD
-                              </span>
-                              <span style={{ fontSize: '12px', color: '#94A3B8' }}>
-                                ≈ {(prod.salePriceUsd * activeRate).toFixed(2)} Bs
-                              </span>
-                            </div>
-                          </div>
-
-                          {/* Botones de Cantidades Rápidas Recomendadas */}
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', alignItems: 'flex-end' }}>
-                            <button
-                              onClick={() => handlePosAddToCart(prod, 1)}
-                              style={{
-                                padding: '6px 12px',
-                                borderRadius: '6px',
-                                border: 'none',
-                                backgroundColor: '#10B981',
-                                color: '#FFFFFF',
-                                fontWeight: 'bold',
-                                fontSize: '12px',
-                                cursor: 'pointer',
-                              }}
-                            >
-                              + Agregar
-                            </button>
-                            <div style={{ display: 'flex', gap: '4px' }}>
-                              {[2, 5, 10].map((q) => (
-                                <button
-                                  key={q}
-                                  onClick={() => handlePosAddToCart(prod, q)}
-                                  style={{
-                                    padding: '2px 6px',
-                                    borderRadius: '4px',
-                                    border: '1px solid #334155',
-                                    backgroundColor: '#071F27',
-                                    color: '#A3E635',
-                                    fontSize: '10px',
-                                    fontWeight: 'bold',
-                                    cursor: 'pointer',
-                                  }}
-                                >
-                                  +{q}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                  </div>
-                </div>
-
-                {/* COLUMNA 2: CARRITO DE COMPRAS, CLIENTE Y COBRO */}
-                <div style={{ backgroundColor: '#0B3B49', padding: '20px', borderRadius: '16px', border: '1px solid #155E75', display: 'flex', flexDirection: 'column' }}>
-                  {/* Selector y Verificación de Cliente (MORA) */}
-                  <div style={{ marginBottom: '14px', backgroundColor: '#062F3B', padding: '12px', borderRadius: '10px', border: '1px solid #155E75' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-                      <span style={{ fontSize: '11px', color: '#94A3B8', fontWeight: 'bold' }}>CLIENTE ASIGNADO</span>
-                      <span style={{ fontSize: '10px', color: '#38BDF8' }}>{posSelectedCustomer.phone || 'Sin WhatsApp'}</span>
-                    </div>
-
-                    <select
-                      value={posSelectedCustomer.id}
-                      onChange={(e) => {
-                        const c = posCustomerList.find((cust) => cust.id === e.target.value) || posCustomerList[0];
-                        setPosSelectedCustomer(c);
-                        setPosAdminApproved(false);
-                      }}
-                      style={{ width: '100%', padding: '8px', borderRadius: '6px', border: '1px solid #334155', backgroundColor: '#071F27', color: '#FFFFFF', fontSize: '13px', outline: 'none', marginBottom: '8px' }}
-                    >
-                      {posCustomerList.map((cust) => (
-                        <option key={cust.id} value={cust.id}>
-                          {cust.documentType}-{cust.documentNumber} {cust.name} {cust.balanceDue > 0 ? `(Deuda: $${cust.balanceDue})` : ''}
-                        </option>
-                      ))}
-                    </select>
-
-                    {/* ALERTA DE MORA / CLIENTE ESPECIAL */}
-                    {(posSelectedCustomer.balanceDue > 0 || posSelectedCustomer.isSpecialMoraCustomer) && (
-                      <div style={{ backgroundColor: '#EF444422', border: '1px solid #EF4444', borderRadius: '8px', padding: '8px 10px', fontSize: '11px', color: '#FCA5A5' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 'bold', color: '#EF4444' }}>
-                          <AlertTriangle size={14} />
-                          <span>CLIENTE ESPECIAL CON MORA ACTIVA</span>
-                        </div>
-                        <p style={{ marginTop: '2px' }}>
-                          Saldo Deudor: <strong>${posSelectedCustomer.balanceDue.toFixed(2)} USD</strong> (≈ {(posSelectedCustomer.balanceDue * activeRate).toFixed(2)} Bs).
-                          Ventas a crédito requieren autorización expresa del Administrador.
-                        </p>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Tabla de Ítems en Carrito */}
-                  <div style={{ flex: 1, minHeight: '180px', maxHeight: '260px', overflowY: 'auto', marginBottom: '14px', borderBottom: '1px solid #155E7544', paddingBottom: '10px' }}>
-                    {cartLines.length === 0 ? (
-                      <div style={{ textAlign: 'center', padding: '30px', color: '#64748B' }}>
-                        <ShoppingCart size={36} style={{ margin: '0 auto 8px', opacity: 0.5 }} />
-                        <p style={{ fontSize: '13px' }}>El carrito está vacío.</p>
-                        <p style={{ fontSize: '11px' }}>Escanea productos o presiona "+ Agregar" desde el catálogo.</p>
-                      </div>
-                    ) : (
-                      cartLines.map((line) => (
-                        <div
-                          key={line.productId}
-                          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid #155E7522' }}
-                        >
-                          <div style={{ flex: 1, marginRight: '10px' }}>
-                            <p style={{ fontSize: '13px', fontWeight: '600', color: '#F8FAFC' }}>{line.name}</p>
-                            <p style={{ fontSize: '11px', color: '#94A3B8' }}>
-                              ${line.priceUsd.toFixed(2)} USD ≈ {(line.priceUsd * activeRate).toFixed(2)} Bs
-                            </p>
-                          </div>
-
-                          {/* Control de Cantidad */}
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                            <button
-                              onClick={() => handlePosUpdateCartQty(line.productId, line.qty - 1)}
-                              style={{ width: '24px', height: '24px', borderRadius: '4px', border: '1px solid #334155', backgroundColor: '#062F3B', color: '#CBD5E1', cursor: 'pointer', fontWeight: 'bold' }}
-                            >
-                              -
-                            </button>
-                            <span style={{ fontSize: '13px', fontWeight: 'bold', minWidth: '18px', textAlign: 'center' }}>
-                              {line.qty}
-                            </span>
-                            <button
-                              onClick={() => handlePosUpdateCartQty(line.productId, line.qty + 1)}
-                              style={{ width: '24px', height: '24px', borderRadius: '4px', border: '1px solid #334155', backgroundColor: '#062F3B', color: '#CBD5E1', cursor: 'pointer', fontWeight: 'bold' }}
-                            >
-                              +
-                            </button>
-                          </div>
-
-                          <div style={{ minWidth: '70px', textAlign: 'right', marginLeft: '12px' }}>
-                            <p style={{ fontSize: '13px', fontWeight: 'bold', color: '#10B981' }}>
-                              ${(line.priceUsd * line.qty).toFixed(2)}
-                            </p>
-                            <p style={{ fontSize: '10px', color: '#64748B' }}>
-                              {((line.priceUsd * line.qty) * activeRate).toFixed(2)} Bs
-                            </p>
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-
-                  {/* Resumen Financiero y Desglose de Impuestos */}
-                  <div style={{ backgroundColor: '#062F3B', padding: '12px', borderRadius: '10px', marginBottom: '14px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#94A3B8', marginBottom: '4px' }}>
-                      <span>Subtotal:</span>
-                      <span>${posSubtotalUsd.toFixed(2)} USD</span>
-                    </div>
-
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#94A3B8', marginBottom: '4px' }}>
-                      <span>IVA (16%):</span>
-                      <span>{enableIva ? `$${posTax16Usd.toFixed(2)} USD` : '0% (Régimen Emprendimiento)'}</span>
-                    </div>
-
-                    {enableIgtf && posPaymentMethod === 'CASH_USD' && (
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#F59E0B', marginBottom: '4px' }}>
-                        <span>IGTF (3% Divisas en Efectivo):</span>
-                        <span>${posIgtfUsd.toFixed(2)} USD</span>
-                      </div>
-                    )}
-
-                    <div style={{ height: '1px', backgroundColor: '#155E75', margin: '8px 0' }} />
-
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontSize: '15px', fontWeight: 'bold', color: '#FFFFFF' }}>TOTAL A PAGAR:</span>
-                      <div style={{ textAlign: 'right' }}>
-                        <span style={{ fontSize: '20px', fontWeight: '900', color: '#10B981' }}>
-                          ${posTotalUsd.toFixed(2)} USD
-                        </span>
-                        <p style={{ fontSize: '13px', fontWeight: 'bold', color: '#A3E635' }}>
-                          ≈ {posTotalBs.toFixed(2)} Bs
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Selección de Método de Pago */}
-                  <div style={{ marginBottom: '14px' }}>
-                    <label style={{ display: 'block', fontSize: '11px', color: '#94A3B8', fontWeight: 'bold', marginBottom: '6px' }}>
-                      MÉTODO DE PAGO
-                    </label>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px', marginBottom: '10px' }}>
-                      {[
-                        { id: 'CASH_USD', label: '💵 Divisas $' },
-                        { id: 'PAGO_MOVIL', label: '📱 Pago Móvil' },
-                        { id: 'DEBIT_CARD', label: '💳 Tarjeta Déb.' },
-                        { id: 'TRANSFER', label: '🏛️ Transferencia' },
-                        { id: 'CREDIT_DEBT', label: '🤝 Crédito' },
-                      ].map((m) => (
-                        <button
-                          key={m.id}
-                          onClick={() => setPosPaymentMethod(m.id as any)}
-                          style={{
-                            padding: '8px 4px',
-                            borderRadius: '6px',
-                            border: '1px solid #155E75',
-                            backgroundColor: posPaymentMethod === m.id ? '#0284C7' : '#062F3B',
-                            color: posPaymentMethod === m.id ? '#FFFFFF' : '#CBD5E1',
-                            fontSize: '11px',
-                            fontWeight: 'bold',
+                            padding: '10px 16px',
+                            borderBottom: '1px solid #155E7533',
                             cursor: 'pointer',
+                            transition: 'background 0.15s ease',
                           }}
+                          onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#0B3B49')}
+                          onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
                         >
-                          {m.label}
-                        </button>
-                      ))}
-                    </div>
-
-                    {/* Detalles según método de pago */}
-                    {posPaymentMethod === 'CASH_USD' && (
-                      <div style={{ backgroundColor: '#062F3B', padding: '10px', borderRadius: '8px', border: '1px solid #10B98144' }}>
-                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                          <span style={{ fontSize: '12px', color: '#CBD5E1' }}>Monto Recibido ($):</span>
-                          <input
-                            type="number"
-                            value={posCashAmountUsd}
-                            onChange={(e) => setPosCashAmountUsd(e.target.value)}
-                            style={{ width: '90px', padding: '6px', borderRadius: '6px', border: '1px solid #334155', backgroundColor: '#071F27', color: '#10B981', fontWeight: 'bold', fontSize: '14px' }}
-                          />
-                        </div>
-                        {posChangeUsd > 0 && (
-                          <div style={{ marginTop: '6px', fontSize: '12px', color: '#A3E635', fontWeight: 'bold' }}>
-                            Vuelto a entregar: ${posChangeUsd.toFixed(2)} USD (≈ {posChangeBs.toFixed(2)} Bs)
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#F8FAFC' }}>
+                              {item.name}
+                            </span>
+                            <span style={{ fontSize: '11px', color: '#38BDF8', backgroundColor: '#0284C722', padding: '1px 6px', borderRadius: '4px' }}>
+                              {item.unitOfMeasure || 'UNIDAD'}
+                            </span>
+                            <span style={{ fontSize: '11px', color: '#64748B', fontFamily: 'monospace' }}>
+                              SKU: {item.sku}
+                            </span>
                           </div>
-                        )}
-                      </div>
-                    )}
 
-                    {posPaymentMethod === 'PAGO_MOVIL' && (
-                      <div style={{ display: 'flex', gap: '8px', backgroundColor: '#062F3B', padding: '10px', borderRadius: '8px' }}>
-                        <input
-                          type="text"
-                          placeholder="N° Referencia Pago Móvil (ej. 4892)"
-                          value={posPagoMovilRef}
-                          onChange={(e) => setPosPagoMovilRef(e.target.value)}
-                          style={{ flex: 1, padding: '6px 8px', borderRadius: '6px', border: '1px solid #334155', backgroundColor: '#071F27', color: '#FFFFFF', fontSize: '12px' }}
-                        />
-                      </div>
-                    )}
-
-                    {posPaymentMethod === 'CREDIT_DEBT' && (posSelectedCustomer.balanceDue > 0 || posSelectedCustomer.isSpecialMoraCustomer) && !isAdmin && (
-                      <div style={{ backgroundColor: '#EF444415', border: '1px solid #EF4444', padding: '10px', borderRadius: '8px', marginTop: '6px' }}>
-                        <p style={{ fontSize: '11px', color: '#FCA5A5', marginBottom: '6px' }}>
-                          Requiere Clave de Aprobación de Administrador para otorgar crédito a cliente moroso:
-                        </p>
-                        <div style={{ display: 'flex', gap: '6px' }}>
-                          <input
-                            type="password"
-                            placeholder="Clave Admin (admin123)"
-                            value={posAdminPinInput}
-                            onChange={(e) => setPosAdminPinInput(e.target.value)}
-                            style={{ flex: 1, padding: '6px 8px', borderRadius: '6px', border: '1px solid #EF4444', backgroundColor: '#071F27', color: '#FFFFFF', fontSize: '12px' }}
-                          />
-                          <button
-                            onClick={() => {
-                              if (posAdminPinInput === 'admin123' || posAdminPinInput === 'Vuelto2026!') {
-                                setPosAdminApproved(true);
-                                alert('✅ Crédito autorizado por el Administrador.');
-                              } else {
-                                alert('❌ Clave de administrador incorrecta.');
-                              }
-                            }}
-                            style={{ padding: '6px 12px', borderRadius: '6px', border: 'none', backgroundColor: '#10B981', color: '#FFFFFF', fontWeight: 'bold', fontSize: '11px', cursor: 'pointer' }}
-                          >
-                            {posAdminApproved ? '✓ Autorizado' : 'Validar'}
-                          </button>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+                            <span style={{ fontSize: '11px', color: item.stock <= item.minStockAlert ? '#EF4444' : '#94A3B8' }}>
+                              Stock: <strong>{item.stock}</strong>
+                            </span>
+                            <div style={{ textAlign: 'right' }}>
+                              <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#10B981' }}>
+                                ${item.salePriceUsd.toFixed(2)} USD
+                              </span>
+                              <span style={{ fontSize: '11px', color: '#94A3B8', marginLeft: '6px' }}>
+                                ≈ {(item.salePriceUsd * activeRate).toFixed(2)} Bs
+                              </span>
+                            </div>
+                            <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#A3E635', backgroundColor: '#10B98122', padding: '2px 8px', borderRadius: '4px' }}>
+                              + Agregar
+                            </span>
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      ));
+                    })()}
+                  </div>
+                )}
+              </div>
+
+              {/* FEEDBACK DE ESCÁNER */}
+              {posScanFeedback && (
+                <div
+                  style={{
+                    padding: '8px 14px',
+                    borderRadius: '8px',
+                    fontSize: '12px',
+                    fontWeight: 'bold',
+                    backgroundColor: posScanFeedback.type === 'success' ? '#10B98122' : posScanFeedback.type === 'warning' ? '#EF444422' : '#0284C722',
+                    color: posScanFeedback.type === 'success' ? '#A3E635' : posScanFeedback.type === 'warning' ? '#FCA5A5' : '#38BDF8',
+                    border: `1px solid ${posScanFeedback.type === 'success' ? '#10B981' : posScanFeedback.type === 'warning' ? '#EF4444' : '#0284C7'}`,
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                  }}
+                >
+                  <span>{posScanFeedback.message}</span>
+                  <button onClick={() => setPosScanFeedback(null)} style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer' }}>
+                    <X size={13} />
+                  </button>
+                </div>
+              )}
+
+              {/* ZONA 2: CARRITO DE VENTA ACTUAL */}
+              <div style={{ backgroundColor: '#0B3B49', borderRadius: '16px', border: '1px solid #155E75', padding: '20px', display: 'flex', flexDirection: 'column' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', borderBottom: '1px solid #155E75', paddingBottom: '10px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <ShoppingCart size={18} color="#10B981" />
+                    <h3 style={{ fontSize: '16px', fontWeight: 'bold', color: '#F8FAFC' }}>
+                      Carrito de Compra: {activeTicket?.label || 'Venta Actual'}
+                    </h3>
+                    <span style={{ fontSize: '11px', backgroundColor: '#062F3B', color: '#38BDF8', padding: '2px 8px', borderRadius: '6px', border: '1px solid #155E75' }}>
+                      Cliente: {posSelectedCustomer.name} ({posSelectedCustomer.documentType}-{posSelectedCustomer.documentNumber})
+                    </span>
                   </div>
 
-                  {/* Botón de Confirmación y Facturación */}
-                  <div style={{ display: 'flex', gap: '8px', marginTop: 'auto' }}>
+                  {cartLines.length > 0 && (
                     <button
                       onClick={() => setCartLines([])}
-                      style={{ padding: '12px', borderRadius: '8px', border: '1px solid #334155', backgroundColor: '#062F3B', color: '#94A3B8', fontWeight: 'bold', fontSize: '12px', cursor: 'pointer' }}
+                      style={{ background: 'none', border: 'none', color: '#EF4444', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}
                     >
-                      Vaciar
+                      <Trash2 size={13} />
+                      <span>Vaciar Carrito</span>
                     </button>
-                    <button
-                      onClick={handlePosConfirmSale}
-                      disabled={cartLines.length === 0}
-                      style={{
-                        flex: 1,
-                        padding: '14px',
-                        borderRadius: '8px',
-                        border: 'none',
-                        backgroundColor: cartLines.length === 0 ? '#334155' : '#10B981',
-                        color: '#FFFFFF',
-                        fontWeight: 'bold',
-                        fontSize: '14px',
-                        cursor: cartLines.length === 0 ? 'not-allowed' : 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: '8px',
-                      }}
-                    >
-                      <Zap size={18} />
-                      <span>Cobrar y Facturar (${posTotalUsd.toFixed(2)} USD ≈ {posTotalBs.toFixed(2)} Bs)</span>
-                    </button>
+                  )}
+                </div>
+
+                {/* TABLA DE PRODUCTOS EN EL CARRITO */}
+                <div style={{ minHeight: '220px', maxHeight: '420px', overflowY: 'auto', marginBottom: '16px' }}>
+                  {cartLines.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: '50px 20px', color: '#64748B' }}>
+                      <ShoppingCart size={48} style={{ margin: '0 auto 12px auto', opacity: 0.3 }} />
+                      <p style={{ fontSize: '15px', fontWeight: 'bold', color: '#94A3B8' }}>El carrito de esta venta está vacío</p>
+                      <p style={{ fontSize: '12px', marginTop: '4px' }}>
+                        Usa la barra de escaneo arriba para pasar el código de barras o escribe para buscar.
+                      </p>
+                    </div>
+                  ) : (
+                    <table style={{ width: '100%', textAlign: 'left', borderCollapse: 'collapse', fontSize: '13px' }}>
+                      <thead>
+                        <tr style={{ color: '#94A3B8', borderBottom: '1px solid #155E75', fontSize: '12px' }}>
+                          <th style={{ padding: '8px 10px' }}>Producto</th>
+                          <th style={{ padding: '8px 10px' }}>Unidad</th>
+                          <th style={{ padding: '8px 10px' }}>Precio Unit. ($)</th>
+                          <th style={{ padding: '8px 10px', textAlign: 'center' }}>Cantidad</th>
+                          <th style={{ padding: '8px 10px', textAlign: 'right' }}>Subtotal ($)</th>
+                          <th style={{ padding: '8px 10px', textAlign: 'right' }}>Subtotal (Bs)</th>
+                          <th style={{ padding: '8px 10px', textAlign: 'center' }}></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {cartLines.map((line) => {
+                          const lineSubtotalUsd = line.priceUsd * line.qty;
+                          const lineSubtotalBs = lineSubtotalUsd * activeRate;
+                          return (
+                            <tr key={line.productId} style={{ borderBottom: '1px solid #155E7533' }}>
+                              <td style={{ padding: '10px', fontWeight: 'bold', color: '#F8FAFC' }}>
+                                {line.name}
+                              </td>
+                              <td style={{ padding: '10px', color: '#38BDF8', fontSize: '11px' }}>
+                                {line.unitOfMeasure || 'UNIDAD'}
+                              </td>
+                              <td style={{ padding: '10px', color: '#CBD5E1' }}>
+                                ${line.priceUsd.toFixed(2)}
+                              </td>
+                              <td style={{ padding: '10px', textAlign: 'center' }}>
+                                <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                                  <button
+                                    onClick={() => handlePosUpdateCartQty(line.productId, line.qty - 1)}
+                                    style={{ width: '26px', height: '26px', borderRadius: '6px', border: '1px solid #334155', backgroundColor: '#062F3B', color: '#CBD5E1', cursor: 'pointer', fontWeight: 'bold' }}
+                                  >
+                                    -
+                                  </button>
+                                  <span style={{ fontSize: '13px', fontWeight: 'bold', minWidth: '24px', textAlign: 'center' }}>
+                                    {line.qty}
+                                  </span>
+                                  <button
+                                    onClick={() => handlePosUpdateCartQty(line.productId, line.qty + 1)}
+                                    style={{ width: '26px', height: '26px', borderRadius: '6px', border: '1px solid #334155', backgroundColor: '#062F3B', color: '#CBD5E1', cursor: 'pointer', fontWeight: 'bold' }}
+                                  >
+                                    +
+                                  </button>
+                                </div>
+                              </td>
+                              <td style={{ padding: '10px', textAlign: 'right', fontWeight: 'bold', color: '#10B981' }}>
+                                ${lineSubtotalUsd.toFixed(2)}
+                              </td>
+                              <td style={{ padding: '10px', textAlign: 'right', color: '#94A3B8', fontSize: '12px' }}>
+                                {lineSubtotalBs.toFixed(2)} Bs
+                              </td>
+                              <td style={{ padding: '10px', textAlign: 'center' }}>
+                                <button
+                                  onClick={() => handlePosUpdateCartQty(line.productId, 0)}
+                                  title="Eliminar producto"
+                                  style={{ background: 'none', border: 'none', color: '#EF4444', cursor: 'pointer', padding: '4px' }}
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+
+                {/* RESUMEN INFERIOR & BOTÓN CONTINUAR AL COBRO (F2) */}
+                <div style={{ backgroundColor: '#062F3B', padding: '16px 20px', borderRadius: '12px', border: '1px solid #155E75', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '14px' }}>
+                  <div style={{ display: 'flex', gap: '20px', alignItems: 'center', flexWrap: 'wrap' }}>
+                    <div>
+                      <span style={{ fontSize: '11px', color: '#94A3B8', display: 'block' }}>Ítems en Carrito:</span>
+                      <strong style={{ fontSize: '16px', color: '#F8FAFC' }}>
+                        {cartLines.reduce((acc, c) => acc + c.qty, 0)} productos
+                      </strong>
+                    </div>
+                    <div style={{ borderLeft: '1px solid #155E75', paddingLeft: '16px' }}>
+                      <span style={{ fontSize: '11px', color: '#94A3B8', display: 'block' }}>Subtotal Base:</span>
+                      <strong style={{ fontSize: '16px', color: '#F8FAFC' }}>
+                        ${posSubtotalUsd.toFixed(2)} USD
+                      </strong>
+                    </div>
+                    <div style={{ borderLeft: '1px solid #155E75', paddingLeft: '16px' }}>
+                      <span style={{ fontSize: '11px', color: '#94A3B8', display: 'block' }}>Total Estimado:</span>
+                      <strong style={{ fontSize: '20px', color: '#10B981' }}>
+                        ${posTotalUsd.toFixed(2)} USD
+                      </strong>
+                      <span style={{ fontSize: '12px', color: '#A3E635', marginLeft: '6px', fontWeight: 'bold' }}>
+                        (≈ {posTotalBs.toFixed(2)} Bs)
+                      </span>
+                    </div>
                   </div>
+
+                  <button
+                    onClick={() => {
+                      if (cartLines.length > 0) {
+                        setIsCheckoutWizardOpen(true);
+                        setCheckoutStep(1);
+                      }
+                    }}
+                    disabled={cartLines.length === 0}
+                    style={{
+                      padding: '14px 28px',
+                      borderRadius: '10px',
+                      border: 'none',
+                      background: cartLines.length === 0 ? '#334155' : 'linear-gradient(135deg, #10B981 0%, #059669 100%)',
+                      color: '#FFFFFF',
+                      fontWeight: 'bold',
+                      fontSize: '15px',
+                      cursor: cartLines.length === 0 ? 'not-allowed' : 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '10px',
+                      boxShadow: cartLines.length === 0 ? 'none' : '0 4px 14px rgba(16, 185, 129, 0.4)',
+                      transition: 'transform 0.15s ease',
+                    }}
+                  >
+                    <Zap size={18} />
+                    <span>Continuar al Cobro (F2)</span>
+                  </button>
                 </div>
               </div>
             </div>
@@ -2668,7 +2889,7 @@ export const App: React.FC = () => {
                     <div>
                       <h4 style={{ fontSize: '14px', fontWeight: 'bold', color: '#FFFFFF' }}>Fijar Margen de Ganancia Masivo (%)</h4>
                       <p style={{ fontSize: '11px', color: '#94A3B8' }}>
-                        Establece tu ganancia sobre el costo al mayor sin tener que editar producto por producto.
+                        Establece tu ganancia sobre el costo al mayor sin editar producto por producto. El sistema muestra la ganancia en dólares (+USD) para cada artículo.
                       </p>
                     </div>
                   </div>
@@ -2697,9 +2918,13 @@ export const App: React.FC = () => {
                       <option value="Limpieza">Solo Limpieza</option>
                     </select>
 
+                    <div style={{ backgroundColor: '#062F3B', padding: '6px 10px', borderRadius: '6px', border: '1px solid #10B98144', fontSize: '11px', color: '#A3E635', fontWeight: 'bold' }}>
+                      Ganancia estimada: +${((inventoryList.reduce((a, b) => a + b.costPriceUsd, 0) / (inventoryList.length || 1)) * (parseFloat(globalMarginInput) || 30) / 100).toFixed(2)} USD / ud
+                    </div>
+
                     <button
                       onClick={handleApplyGlobalMargin}
-                      style={{ padding: '8px 16px', borderRadius: '6px', border: 'none', backgroundColor: '#10B981', color: '#FFFFFF', fontWeight: 'bold', fontSize: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}
+                      style={{ padding: '8px 16px', borderRadius: '6px', border: 'none', backgroundColor: '#10B981', color: '#071F27', fontWeight: 'bold', fontSize: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}
                     >
                       <Zap size={14} />
                       <span>Aplicar a Todos</span>
@@ -2731,7 +2956,7 @@ export const App: React.FC = () => {
                       {isAdmin && <th style={{ padding: '12px 14px' }}>Costo Mayor ($)</th>}
                       <th style={{ padding: '12px 14px' }}>Precio Salida ($)</th>
                       <th style={{ padding: '12px 14px' }}>Precio Salida (Bs)</th>
-                      {isAdmin && <th style={{ padding: '12px 14px' }}>Margen Ganancia</th>}
+                      {isAdmin && <th style={{ padding: '12px 14px' }}>Ganancia Neta ($ / %)</th>}
                       <th style={{ padding: '12px 14px' }}>Stock</th>
                       {isAdmin && <th style={{ padding: '12px 14px', textAlign: 'center' }}>Acciones</th>}
                     </tr>
@@ -2754,9 +2979,14 @@ export const App: React.FC = () => {
                             <td style={{ padding: '12px 14px', color: '#CBD5E1' }}>{(item.salePriceUsd * bcvRate).toFixed(2)} Bs</td>
                             {isAdmin && (
                               <td style={{ padding: '12px 14px' }}>
-                                <span style={{ backgroundColor: '#10B98122', color: '#10B981', padding: '2px 8px', borderRadius: '4px', fontWeight: 'bold', fontSize: '11px' }}>
-                                  +{itemMargin}% (+${itemProfit.toFixed(2)})
-                                </span>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                  <span style={{ backgroundColor: '#10B98122', color: '#10B981', padding: '3px 8px', borderRadius: '4px', fontWeight: 'bold', fontSize: '12px' }}>
+                                    +${itemProfit.toFixed(2)} USD
+                                  </span>
+                                  <span style={{ color: '#94A3B8', fontSize: '10px' }}>
+                                    +{itemMargin}% margen
+                                  </span>
+                                </div>
                               </td>
                             )}
                             <td style={{ padding: '12px 14px' }}>
@@ -3158,7 +3388,19 @@ export const App: React.FC = () => {
                             <span style={{ color: '#94A3B8', fontSize: '11px', display: 'block' }}>({totalPayBs} Bs)</span>
                           </td>
                           <td style={{ padding: '12px 14px', textAlign: 'center' }}>
-                            <div style={{ display: 'flex', gap: '6px', justifyContent: 'center' }}>
+                            <div style={{ display: 'flex', gap: '6px', justifyContent: 'center', flexWrap: 'wrap' }}>
+                              <button
+                                onClick={() => {
+                                  setSelectedDebtorDetail(debt);
+                                  setIsDebtorDetailModalOpen(true);
+                                }}
+                                title="Ver factura y mercancía que se llevó"
+                                style={{ backgroundColor: '#0F766E', border: 'none', color: '#FFFFFF', padding: '6px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}
+                              >
+                                <FileText size={13} />
+                                <span>👁️ Factura</span>
+                              </button>
+
                               <button
                                 onClick={() => {
                                   setSelectedDebtor(debt);
@@ -3873,7 +4115,609 @@ export const App: React.FC = () => {
         </main>
       </div>
 
-      {/* MODAL: COMPROBANTE DIGITAL / ENVÍO POR WHATSAPP (CERO IMPRESORA) */}
+      {/* ASISTENTE (WIZARD) DE COBRO EN MODAL DE 3 PASOS (F2 / CONTINUAR AL COBRO) */}
+      {isCheckoutWizardOpen && (
+        <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(2, 6, 23, 0.85)', backdropFilter: 'blur(5px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px', zIndex: 1100 }}>
+          <div style={{ width: '100%', maxWidth: '640px', backgroundColor: '#0B3B49', borderRadius: '20px', border: '1px solid #10B981', boxShadow: '0 25px 60px rgba(0, 0, 0, 0.8)', overflow: 'hidden', display: 'flex', flexDirection: 'column', maxHeight: '90vh' }}>
+            {/* CABECERA DEL WIZARD */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 22px', borderBottom: '1px solid #155E75', backgroundColor: '#062F3B' }}>
+              <div>
+                <h3 style={{ fontSize: '18px', fontWeight: 'bold', color: '#F8FAFC' }}>
+                  Asistente de Cobro & Facturación
+                </h3>
+                <p style={{ fontSize: '11px', color: '#38BDF8' }}>
+                  {activeTicket?.label || 'Venta Actual'} • {cartLines.length} productos • Total: ${posTotalUsd.toFixed(2)} USD (≈ {posTotalBs.toFixed(2)} Bs)
+                </p>
+              </div>
+              <button
+                onClick={() => setIsCheckoutWizardOpen(false)}
+                title="Cerrar modal (Esc)"
+                style={{ background: 'none', border: 'none', color: '#94A3B8', cursor: 'pointer', padding: '4px' }}
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* BARRA DE PROGRESO DE 3 PASOS SECUENCIALES */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', backgroundColor: '#071F27', borderBottom: '1px solid #155E75' }}>
+              {[
+                { step: 1, label: '1. Cliente' },
+                { step: 2, label: '2. Pago & Vuelto' },
+                { step: 3, label: '3. Resumen' },
+              ].map((s) => {
+                const isCurrent = checkoutStep === s.step;
+                const isPassed = checkoutStep > s.step;
+                return (
+                  <div
+                    key={s.step}
+                    style={{
+                      padding: '10px 8px',
+                      textAlign: 'center',
+                      fontSize: '12px',
+                      fontWeight: isCurrent ? 'bold' : '500',
+                      color: isCurrent ? '#A3E635' : isPassed ? '#10B981' : '#64748B',
+                      borderBottom: isCurrent ? '3px solid #10B981' : '3px solid transparent',
+                      backgroundColor: isCurrent ? '#0B3B49' : 'transparent',
+                      transition: 'all 0.15s ease',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '6px',
+                    }}
+                  >
+                    {isPassed ? <Check size={14} color="#10B981" /> : <span>{s.step}</span>}
+                    <span>{s.label}</span>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* CUERPO DEL WIZARD SEGÚN PASO */}
+            <div style={{ padding: '20px', overflowY: 'auto', flex: 1 }}>
+              {/* PASO 1: ASIGNACIÓN O REGISTRO DE CLIENTE */}
+              {checkoutStep === 1 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                  {/* Opción Rápida 1 Clic: Consumidor Final */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#062F3B', padding: '12px 14px', borderRadius: '10px', border: '1px solid #155E75' }}>
+                    <div>
+                      <h4 style={{ fontSize: '13px', fontWeight: 'bold', color: '#F8FAFC' }}>¿Venta Rápida sin Documento?</h4>
+                      <p style={{ fontSize: '11px', color: '#94A3B8' }}>Asigna directamente Consumidor Final genérico en 1 solo clic</p>
+                    </div>
+                    <button
+                      onClick={() => {
+                        const cf = posCustomerList.find((c) => c.documentNumber === '00000000') || posCustomerList[0];
+                        setPosSelectedCustomer(cf);
+                        setShowQuickCustomerForm(false);
+                        setPosCustomerFeedback({ type: 'success', message: '✅ V-00000000 Consumidor Final asignado' });
+                      }}
+                      style={{
+                        padding: '8px 14px',
+                        borderRadius: '8px',
+                        border: 'none',
+                        backgroundColor: posSelectedCustomer.documentNumber === '00000000' ? '#10B981' : '#0284C7',
+                        color: '#FFFFFF',
+                        fontWeight: 'bold',
+                        fontSize: '12px',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                      }}
+                    >
+                      <Zap size={14} />
+                      <span>{posSelectedCustomer.documentNumber === '00000000' ? '✓ Asignado' : 'Consumidor Final'}</span>
+                    </button>
+                  </div>
+
+                  {/* Búsqueda Directa por Cédula / RIF */}
+                  <form onSubmit={handlePosSearchCustomerByCi} style={{ display: 'flex', gap: '8px' }}>
+                    <select
+                      value={posCiDocType}
+                      onChange={(e) => setPosCiDocType(e.target.value as any)}
+                      style={{ padding: '10px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#F8FAFC', fontWeight: 'bold', fontSize: '13px' }}
+                    >
+                      <option value="V">V-</option>
+                      <option value="E">E-</option>
+                      <option value="J">J-</option>
+                      <option value="G">G-</option>
+                    </select>
+                    <input
+                      type="text"
+                      placeholder="Buscar por Cédula o RIF (ej. 14523988)..."
+                      value={posCiSearchInput}
+                      onChange={(e) => setPosCiSearchInput(e.target.value)}
+                      style={{ flex: 1, padding: '10px 12px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#FFFFFF', fontSize: '13px', outline: 'none' }}
+                    />
+                    <button
+                      type="submit"
+                      style={{ padding: '10px 18px', borderRadius: '8px', border: 'none', backgroundColor: '#0284C7', color: '#FFFFFF', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer' }}
+                    >
+                      Buscar
+                    </button>
+                  </form>
+
+                  {/* Mini-Formulario de Registro Express Inline (Si la C.I. no existe) */}
+                  {showQuickCustomerForm && (
+                    <div style={{ backgroundColor: '#062F3B', padding: '14px', borderRadius: '10px', border: '1px solid #F59E0B' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#F59E0B', fontWeight: 'bold', fontSize: '12px', marginBottom: '8px' }}>
+                        <AlertTriangle size={15} />
+                        <span>C.I. no registrada. Formulario Express:</span>
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px' }}>
+                        <div>
+                          <label style={{ display: 'block', fontSize: '11px', color: '#94A3B8', marginBottom: '4px' }}>Nombre / Razón Social *</label>
+                          <input
+                            type="text"
+                            placeholder="Nombre del cliente"
+                            value={quickCustomerFirstName}
+                            onChange={(e) => setQuickCustomerFirstName(e.target.value)}
+                            style={{ width: '100%', padding: '8px', borderRadius: '6px', border: '1px solid #334155', backgroundColor: '#071F27', color: '#FFFFFF', fontSize: '12px' }}
+                          />
+                        </div>
+                        <div>
+                          <label style={{ display: 'block', fontSize: '11px', color: '#94A3B8', marginBottom: '4px' }}>Teléfono WhatsApp (Opcional)</label>
+                          <input
+                            type="text"
+                            placeholder="04141234567"
+                            value={quickCustomerPhone}
+                            onChange={(e) => setQuickCustomerPhone(e.target.value)}
+                            style={{ width: '100%', padding: '8px', borderRadius: '6px', border: '1px solid #334155', backgroundColor: '#071F27', color: '#FFFFFF', fontSize: '12px' }}
+                          />
+                        </div>
+                      </div>
+                      <button
+                        onClick={handleSaveQuickPosCustomer}
+                        style={{ padding: '8px 14px', borderRadius: '6px', border: 'none', backgroundColor: '#10B981', color: '#FFFFFF', fontWeight: 'bold', fontSize: '12px', cursor: 'pointer' }}
+                      >
+                        💾 Guardar y Asignar Cliente
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Tarjeta del Cliente Actualmente Asignado */}
+                  <div style={{ backgroundColor: '#062F3B', padding: '14px', borderRadius: '12px', border: '1px solid #155E75' }}>
+                    <span style={{ fontSize: '11px', color: '#94A3B8', fontWeight: 'bold', textTransform: 'uppercase' }}>Cliente Asignado a la Venta:</span>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
+                      <div>
+                        <h4 style={{ fontSize: '15px', fontWeight: 'bold', color: '#FFFFFF' }}>{posSelectedCustomer.name}</h4>
+                        <p style={{ fontSize: '12px', color: '#38BDF8', fontFamily: 'monospace' }}>
+                          Documento: {posSelectedCustomer.documentType}-{posSelectedCustomer.documentNumber} • Tel: {posSelectedCustomer.phone || 'Sin WhatsApp'}
+                        </p>
+                      </div>
+                      <span style={{ fontSize: '11px', color: '#10B981', backgroundColor: '#10B98122', padding: '3px 8px', borderRadius: '6px', fontWeight: 'bold' }}>
+                        ✓ Listo para cobrar
+                      </span>
+                    </div>
+
+                    {/* Alerta de Mora si posee deuda */}
+                    {(posSelectedCustomer.balanceDue > 0 || posSelectedCustomer.isSpecialMoraCustomer) && (
+                      <div style={{ backgroundColor: '#EF444422', border: '1px solid #EF4444', borderRadius: '8px', padding: '8px 12px', marginTop: '10px', fontSize: '11px', color: '#FCA5A5' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 'bold', color: '#EF4444' }}>
+                          <AlertTriangle size={14} />
+                          <span>CLIENTE CON MORA ACTIVA</span>
+                        </div>
+                        <p style={{ marginTop: '2px' }}>
+                          Saldo Deudor Previo: <strong>${posSelectedCustomer.balanceDue.toFixed(2)} USD</strong> (≈ {(posSelectedCustomer.balanceDue * activeRate).toFixed(2)} Bs).
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* PASO 2: MÉTODO DE PAGO Y CÁLCULO DE VUELTO */}
+              {checkoutStep === 2 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                  {/* Selector de Método de Pago */}
+                  <div>
+                    <label style={{ display: 'block', fontSize: '11px', color: '#94A3B8', fontWeight: 'bold', marginBottom: '8px' }}>
+                      SELECCIONA EL MÉTODO DE PAGO
+                    </label>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
+                      {[
+                        { id: 'CASH_USD', label: '💵 Efectivo USD ($)' },
+                        { id: 'CASH_VES', label: '🇻🇪 Efectivo Bs' },
+                        { id: 'PAGO_MOVIL', label: '📱 Pago Móvil' },
+                        { id: 'DEBIT_CARD', label: '💳 Punto / Biopago' },
+                        { id: 'TRANSFER', label: '🏛️ Transferencia' },
+                        { id: 'DERIVAR_ADMIN', label: '📋 Derivar a Admin (Mora)' },
+                      ].map((m) => {
+                        const isSelected = posPaymentMethod === m.id;
+                        return (
+                          <button
+                            key={m.id}
+                            type="button"
+                            onClick={() => setPosPaymentMethod(m.id as any)}
+                            style={{
+                              padding: '10px 8px',
+                              borderRadius: '8px',
+                              border: isSelected ? '2px solid #10B981' : '1px solid #155E75',
+                              backgroundColor: isSelected ? '#0284C7' : '#062F3B',
+                              color: isSelected ? '#FFFFFF' : '#CBD5E1',
+                              fontSize: '12px',
+                              fontWeight: 'bold',
+                              cursor: 'pointer',
+                              textAlign: 'center',
+                              transition: 'all 0.15s ease',
+                            }}
+                          >
+                            {m.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Resumen de Total & Cálculo automático de 3% IGTF (solo si CASH_USD) */}
+                  <div style={{ backgroundColor: '#062F3B', padding: '14px', borderRadius: '10px', border: '1px solid #155E75' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#94A3B8', marginBottom: '4px' }}>
+                      <span>Subtotal:</span>
+                      <span>${posSubtotalUsd.toFixed(2)} USD</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#94A3B8', marginBottom: '4px' }}>
+                      <span>IVA (16%):</span>
+                      <span>{enableIva ? `$${posTax16Usd.toFixed(2)} USD` : '0% Exento'}</span>
+                    </div>
+                    {enableIgtf && posPaymentMethod === 'CASH_USD' && (
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#F59E0B', marginBottom: '4px', fontWeight: 'bold' }}>
+                        <span>IGTF (3% Divisas en Efectivo):</span>
+                        <span>+${posIgtfUsd.toFixed(2)} USD</span>
+                      </div>
+                    )}
+                    <div style={{ height: '1px', backgroundColor: '#155E75', margin: '8px 0' }} />
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '14px', fontWeight: 'bold', color: '#FFFFFF' }}>TOTAL A COBRAR:</span>
+                      <div style={{ textAlign: 'right' }}>
+                        <span style={{ fontSize: '20px', fontWeight: '900', color: '#10B981' }}>
+                          ${posTotalUsd.toFixed(2)} USD
+                        </span>
+                        <p style={{ fontSize: '13px', fontWeight: 'bold', color: '#A3E635' }}>
+                          ≈ {posTotalBs.toFixed(2)} Bs (Tasa: {activeRate.toFixed(2)})
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Campo de Monto Recibido y Cálculo de Vuelto para Efectivo USD */}
+                  {posPaymentMethod === 'CASH_USD' && (
+                    <div style={{ backgroundColor: '#062F3B', padding: '14px', borderRadius: '10px', border: '1px solid #10B98144' }}>
+                      <label style={{ display: 'block', fontSize: '11px', color: '#94A3B8', fontWeight: 'bold', marginBottom: '6px' }}>
+                        MONTO RECIBIDO EN DÓLARES ($)
+                      </label>
+                      <div style={{ display: 'flex', gap: '6px', marginBottom: '10px', flexWrap: 'wrap' }}>
+                        {[
+                          { label: 'Exacto', amt: posTotalUsd.toFixed(2) },
+                          { label: '$1', amt: '1.00' },
+                          { label: '$5', amt: '5.00' },
+                          { label: '$10', amt: '10.00' },
+                          { label: '$20', amt: '20.00' },
+                          { label: '$50', amt: '50.00' },
+                          { label: '$100', amt: '100.00' },
+                        ].map((b) => (
+                          <button
+                            key={b.label}
+                            type="button"
+                            onClick={() => setPosCashAmountUsd(b.amt)}
+                            style={{
+                              padding: '5px 10px',
+                              borderRadius: '6px',
+                              border: '1px solid #334155',
+                              backgroundColor: '#071F27',
+                              color: '#A3E635',
+                              fontSize: '11px',
+                              fontWeight: 'bold',
+                              cursor: 'pointer',
+                            }}
+                          >
+                            {b.label}
+                          </button>
+                        ))}
+                      </div>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={posCashAmountUsd}
+                        onChange={(e) => setPosCashAmountUsd(e.target.value)}
+                        placeholder="Monto recibido $"
+                        style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #10B981', backgroundColor: '#071F27', color: '#10B981', fontSize: '18px', fontWeight: 'bold' }}
+                      />
+                      {posChangeUsd > 0 && (
+                        <div style={{ marginTop: '10px', padding: '10px', borderRadius: '8px', backgroundColor: '#10B98122', border: '1px solid #10B981', color: '#A3E635', fontWeight: 'bold', fontSize: '14px', display: 'flex', justifyContent: 'space-between' }}>
+                          <span>VUELTO A ENTREGAR:</span>
+                          <span>${posChangeUsd.toFixed(2)} USD (≈ {posChangeBs.toFixed(2)} Bs)</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Campo de Monto Recibido para Efectivo Bolívares */}
+                  {posPaymentMethod === 'CASH_VES' && (
+                    <div style={{ backgroundColor: '#062F3B', padding: '14px', borderRadius: '10px', border: '1px solid #10B98144' }}>
+                      <label style={{ display: 'block', fontSize: '11px', color: '#94A3B8', fontWeight: 'bold', marginBottom: '6px' }}>
+                        MONTO RECIBIDO EN BOLÍVARES (Bs)
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={posCashAmountVes}
+                        onChange={(e) => setPosCashAmountVes(e.target.value)}
+                        placeholder="Monto recibido en Bs"
+                        style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #10B981', backgroundColor: '#071F27', color: '#A3E635', fontSize: '18px', fontWeight: 'bold' }}
+                      />
+                      {posChangeBs > 0 && (
+                        <div style={{ marginTop: '10px', padding: '10px', borderRadius: '8px', backgroundColor: '#10B98122', border: '1px solid #10B981', color: '#A3E635', fontWeight: 'bold', fontSize: '14px', display: 'flex', justifyContent: 'space-between' }}>
+                          <span>VUELTO A ENTREGAR:</span>
+                          <span>{posChangeBs.toFixed(2)} Bs (≈ ${posChangeUsd.toFixed(2)} USD)</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Detalle para Pago Móvil */}
+                  {posPaymentMethod === 'PAGO_MOVIL' && (
+                    <div style={{ backgroundColor: '#062F3B', padding: '14px', borderRadius: '10px', border: '1px solid #155E75' }}>
+                      <label style={{ display: 'block', fontSize: '11px', color: '#94A3B8', fontWeight: 'bold', marginBottom: '6px' }}>N° DE REFERENCIA PAGO MÓVIL</label>
+                      <input
+                        type="text"
+                        placeholder="Últimos 4 o 6 dígitos (ej. 4892)"
+                        value={posPagoMovilRef}
+                        onChange={(e) => setPosPagoMovilRef(e.target.value)}
+                        style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #334155', backgroundColor: '#071F27', color: '#FFFFFF', fontSize: '13px' }}
+                      />
+                    </div>
+                  )}
+
+                  {/* Detalle para Derivar a Administrador */}
+                  {posPaymentMethod === 'DERIVAR_ADMIN' && (
+                    <div style={{ backgroundColor: '#062F3B', padding: '14px', borderRadius: '10px', border: '1px solid #38BDF8' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#38BDF8', fontWeight: 'bold', fontSize: '13px', marginBottom: '4px' }}>
+                        <FileText size={16} />
+                        <span>Derivar a Administrador (Morosidad / Crédito)</span>
+                      </div>
+                      <p style={{ fontSize: '12px', color: '#94A3B8' }}>
+                        Esta venta se guardará directamente en la sección de <strong>Cobranzas & Mora</strong> del Administrador. Quedará registrado el ticket con el desglose exacto de los productos que el cliente se llevó para su seguimiento o cobranza.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* PASO 3: RESUMEN Y EMISIÓN */}
+              {checkoutStep === 3 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                  <div style={{ backgroundColor: '#062F3B', padding: '16px', borderRadius: '12px', border: '1px solid #155E75' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid #155E7533', paddingBottom: '8px', marginBottom: '8px' }}>
+                      <span style={{ fontSize: '12px', color: '#94A3B8' }}>Cliente:</span>
+                      <strong style={{ fontSize: '12px', color: '#F8FAFC' }}>
+                        {posSelectedCustomer.name} ({posSelectedCustomer.documentType}-{posSelectedCustomer.documentNumber})
+                      </strong>
+                    </div>
+
+                    <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid #155E7533', paddingBottom: '8px', marginBottom: '8px' }}>
+                      <span style={{ fontSize: '12px', color: '#94A3B8' }}>Método de Pago:</span>
+                      <strong style={{ fontSize: '12px', color: '#A3E635' }}>
+                        {posPaymentMethod === 'CASH_USD' ? '💵 Efectivo USD' : posPaymentMethod === 'CASH_VES' ? '🇻🇪 Efectivo Bs' : posPaymentMethod === 'DERIVAR_ADMIN' ? '📋 Derivado a Admin (Mora)' : posPaymentMethod}
+                      </strong>
+                    </div>
+
+                    {/* Desglose de Ítems */}
+                    <div style={{ maxHeight: '160px', overflowY: 'auto', margin: '8px 0', borderBottom: '1px solid #155E7533', paddingBottom: '8px' }}>
+                      <span style={{ fontSize: '11px', color: '#94A3B8', fontWeight: 'bold' }}>PRODUCTOS A ENTREGAR:</span>
+                      {cartLines.map((line) => (
+                        <div key={line.productId} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', padding: '4px 0' }}>
+                          <span style={{ color: '#F8FAFC' }}>{line.qty}x {line.name}</span>
+                          <span style={{ color: '#10B981', fontWeight: 'bold' }}>${(line.priceUsd * line.qty).toFixed(2)}</span>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#94A3B8', marginBottom: '4px' }}>
+                      <span>Subtotal:</span>
+                      <span>${posSubtotalUsd.toFixed(2)} USD</span>
+                    </div>
+
+                    {enableIgtf && posPaymentMethod === 'CASH_USD' && (
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#F59E0B', marginBottom: '4px' }}>
+                        <span>IGTF (3%):</span>
+                        <span>+${posIgtfUsd.toFixed(2)} USD</span>
+                      </div>
+                    )}
+
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px', paddingTop: '6px', borderTop: '1px solid #155E75' }}>
+                      <span style={{ fontSize: '14px', fontWeight: 'bold', color: '#FFFFFF' }}>TOTAL FACTURADO:</span>
+                      <div style={{ textAlign: 'right' }}>
+                        <strong style={{ fontSize: '18px', color: '#10B981' }}>${posTotalUsd.toFixed(2)} USD</strong>
+                        <span style={{ fontSize: '12px', color: '#A3E635', marginLeft: '6px' }}>(≈ {posTotalBs.toFixed(2)} Bs)</span>
+                      </div>
+                    </div>
+
+                    {posChangeUsd > 0 && (
+                      <div style={{ display: 'flex', justifyContent: 'space-between', color: '#A3E635', fontSize: '12px', fontWeight: 'bold', marginTop: '6px' }}>
+                        <span>Vuelto Entregado:</span>
+                        <span>${posChangeUsd.toFixed(2)} USD (≈ {posChangeBs.toFixed(2)} Bs)</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* BOTONES DE NAVEGACIÓN Y ACCIÓN INFERIOR */}
+            <div style={{ padding: '14px 20px', borderTop: '1px solid #155E75', backgroundColor: '#062F3B', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              {checkoutStep === 1 ? (
+                <button
+                  type="button"
+                  onClick={() => setIsCheckoutWizardOpen(false)}
+                  style={{ padding: '10px 18px', borderRadius: '8px', border: '1px solid #334155', backgroundColor: 'transparent', color: '#94A3B8', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer' }}
+                >
+                  Cancelar (Esc)
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setCheckoutStep((s) => (s - 1) as any)}
+                  style={{ padding: '10px 18px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#071F27', color: '#CBD5E1', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer' }}
+                >
+                  ⬅ Volver (Esc)
+                </button>
+              )}
+
+              {checkoutStep < 3 ? (
+                <button
+                  type="button"
+                  onClick={() => setCheckoutStep((s) => (s + 1) as any)}
+                  style={{
+                    padding: '12px 24px',
+                    borderRadius: '8px',
+                    border: 'none',
+                    backgroundColor: '#0284C7',
+                    color: '#FFFFFF',
+                    fontWeight: 'bold',
+                    fontSize: '13px',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                  }}
+                >
+                  <span>Continuar (Enter)</span>
+                  <ChevronRight size={16} />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    handlePosConfirmSale();
+                    setIsCheckoutWizardOpen(false);
+                  }}
+                  style={{
+                    padding: '12px 24px',
+                    borderRadius: '8px',
+                    border: 'none',
+                    backgroundColor: '#10B981',
+                    color: '#FFFFFF',
+                    fontWeight: 'bold',
+                    fontSize: '14px',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    boxShadow: '0 4px 14px rgba(16, 185, 129, 0.4)',
+                  }}
+                >
+                  <Zap size={16} />
+                  <span>Emitir Factura / Nota (Enter)</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: ADMINISTRADOR CONSULTA FACTURA Y LO QUE SE LLEVÓ EL CLIENTE EN MOROSIDAD */}
+      {isDebtorDetailModalOpen && selectedDebtorDetail && (
+        <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(2, 6, 23, 0.85)', backdropFilter: 'blur(5px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px', zIndex: 1200 }}>
+          <div style={{ width: '100%', maxWidth: '600px', backgroundColor: '#0B3B49', borderRadius: '18px', border: '1px solid #0284C7', padding: '24px', boxShadow: '0 25px 60px rgba(0,0,0,0.8)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px', borderBottom: '1px solid #155E75', paddingBottom: '12px' }}>
+              <div>
+                <h3 style={{ fontSize: '18px', fontWeight: 'bold', color: '#F8FAFC' }}>
+                  Detalle de Venta a Crédito / Morosidad
+                </h3>
+                <p style={{ fontSize: '12px', color: '#38BDF8' }}>
+                  Comprobante: {selectedDebtorDetail.invoiceNumber || 'FACT-CREDITO'} • Despachado por: {selectedDebtorDetail.cashierName || 'Cajero de Turno'}
+                </p>
+              </div>
+              <button onClick={() => setIsDebtorDetailModalOpen(false)} style={{ background: 'none', border: 'none', color: '#94A3B8', cursor: 'pointer' }}>
+                <X size={20} />
+              </button>
+            </div>
+
+            <div style={{ backgroundColor: '#062F3B', padding: '12px 16px', borderRadius: '10px', border: '1px solid #155E75', marginBottom: '16px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                <span style={{ fontSize: '12px', color: '#94A3B8' }}>Cliente:</span>
+                <strong style={{ fontSize: '13px', color: '#FFFFFF' }}>{selectedDebtorDetail.name}</strong>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                <span style={{ fontSize: '12px', color: '#94A3B8' }}>Cédula / RIF:</span>
+                <span style={{ fontSize: '12px', color: '#38BDF8' }}>{selectedDebtorDetail.document}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ fontSize: '12px', color: '#94A3B8' }}>Teléfono:</span>
+                <span style={{ fontSize: '12px', color: '#CBD5E1' }}>{selectedDebtorDetail.phone || 'Sin número'}</span>
+              </div>
+            </div>
+
+            {/* TABLA DE PRODUCTOS QUE EL CLIENTE SE LLEVÓ */}
+            <h4 style={{ fontSize: '13px', fontWeight: 'bold', color: '#F8FAFC', marginBottom: '8px' }}>
+              Mercancía que el cliente se llevó:
+            </h4>
+            <div style={{ maxHeight: '200px', overflowY: 'auto', backgroundColor: '#062F3B', borderRadius: '10px', border: '1px solid #155E75', marginBottom: '16px' }}>
+              <table style={{ width: '100%', textAlign: 'left', borderCollapse: 'collapse', fontSize: '12px' }}>
+                <thead>
+                  <tr style={{ color: '#94A3B8', borderBottom: '1px solid #155E75', backgroundColor: '#071F27' }}>
+                    <th style={{ padding: '8px 10px' }}>Cant.</th>
+                    <th style={{ padding: '8px 10px' }}>Producto</th>
+                    <th style={{ padding: '8px 10px', textAlign: 'right' }}>Precio Unit.</th>
+                    <th style={{ padding: '8px 10px', textAlign: 'right' }}>Subtotal ($)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {selectedDebtorDetail.itemsTaken && selectedDebtorDetail.itemsTaken.length > 0 ? (
+                    selectedDebtorDetail.itemsTaken.map((it, idx) => (
+                      <tr key={idx} style={{ borderBottom: '1px solid #155E7522' }}>
+                        <td style={{ padding: '8px 10px', fontWeight: 'bold', color: '#A3E635' }}>{it.qty}</td>
+                        <td style={{ padding: '8px 10px', color: '#F8FAFC' }}>{it.name}</td>
+                        <td style={{ padding: '8px 10px', textAlign: 'right', color: '#CBD5E1' }}>${it.priceUsd.toFixed(2)}</td>
+                        <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 'bold', color: '#10B981' }}>${it.subtotalUsd.toFixed(2)}</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={4} style={{ padding: '16px', textAlign: 'center', color: '#94A3B8' }}>
+                        Registro anterior sin desglose de ítems específicos. Deuda base: ${selectedDebtorDetail.balanceDueUsd.toFixed(2)} USD.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* TOTALES DE LA DEUDA */}
+            <div style={{ backgroundColor: '#062F3B', padding: '12px 16px', borderRadius: '10px', border: '1px solid #155E75', marginBottom: '16px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#94A3B8', marginBottom: '4px' }}>
+                <span>Deuda Base:</span>
+                <span>${selectedDebtorDetail.balanceDueUsd.toFixed(2)} USD</span>
+              </div>
+              {selectedDebtorDetail.surchargeUsd > 0 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#EF4444', marginBottom: '4px' }}>
+                  <span>Recargo por Mora:</span>
+                  <span>+${selectedDebtorDetail.surchargeUsd.toFixed(2)} USD</span>
+                </div>
+              )}
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '15px', fontWeight: 'bold', color: '#FFFFFF', borderTop: '1px solid #155E75', paddingTop: '6px' }}>
+                <span>TOTAL A COBRAR:</span>
+                <span style={{ color: '#10B981' }}>${(selectedDebtorDetail.balanceDueUsd + (selectedDebtorDetail.surchargeUsd || 0)).toFixed(2)} USD</span>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button
+                onClick={() => handleSendDebtReminderWhatsApp(selectedDebtorDetail)}
+                style={{ flex: 1, padding: '12px', borderRadius: '8px', border: 'none', backgroundColor: '#16A34A', color: '#FFFFFF', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+              >
+                <MessageCircle size={16} />
+                <span>Cobrar por WhatsApp</span>
+              </button>
+              <button
+                onClick={() => setIsDebtorDetailModalOpen(false)}
+                style={{ padding: '12px 20px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#94A3B8', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer' }}
+              >
+                Cerrar (Esc)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {completedSaleModal && (
         <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px', zIndex: 1000 }}>
           <div style={{ width: '100%', maxWidth: '500px', backgroundColor: '#0B3B49', borderRadius: '20px', padding: '28px', border: '1px solid #10B981', boxShadow: '0 25px 50px -12px rgba(0,0,0,0.7)', textAlign: 'center' }}>
@@ -4063,6 +4907,24 @@ export const App: React.FC = () => {
                   style={{ width: '100%', padding: '9px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#10B981', fontSize: '13px', fontWeight: 'bold' }}
                 />
               </div>
+
+              {/* Cálculo en vivo de Ganancia Neta en Dólares ($) */}
+              {parseFloat(newProdSaleUsd) > 0 && (
+                <div style={{ gridColumn: 'span 2', backgroundColor: '#062F3B', padding: '10px 14px', borderRadius: '8px', border: '1px solid #10B98155', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <span style={{ fontSize: '11px', color: '#94A3B8' }}>Ganancia Neta en Dólares ($):</span>
+                    <p style={{ fontSize: '15px', fontWeight: 'bold', color: '#A3E635', margin: 0 }}>
+                      +${(parseFloat(newProdSaleUsd) - (parseFloat(newProdCostUsd) || 0)).toFixed(2)} USD
+                    </p>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <span style={{ fontSize: '11px', color: '#94A3B8' }}>Margen Comercial:</span>
+                    <p style={{ fontSize: '13px', fontWeight: 'bold', color: '#10B981', margin: 0 }}>
+                      +{(((parseFloat(newProdSaleUsd) - (parseFloat(newProdCostUsd) || 0)) / parseFloat(newProdSaleUsd)) * 100).toFixed(1)}%
+                    </p>
+                  </div>
+                </div>
+              )}
 
               <div>
                 <label style={{ display: 'block', fontSize: '11px', color: '#94A3B8', marginBottom: '4px' }}>Categoría del Producto *</label>

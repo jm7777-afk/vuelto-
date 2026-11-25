@@ -85,6 +85,14 @@ export async function ensureSchema() {
       ALTER TABLE tenant_configurations ADD COLUMN IF NOT EXISTS default_iva_percentage NUMERIC(5, 2) NOT NULL DEFAULT 16.00;
       ALTER TABLE tenant_configurations ADD COLUMN IF NOT EXISTS default_profit_margin NUMERIC(5, 2) NOT NULL DEFAULT 30.00;
       ALTER TABLE tenant_configurations ADD COLUMN IF NOT EXISTS require_admin_for_overdue_debt BOOLEAN NOT NULL DEFAULT true;
+
+      -- Roles mandatorios del sistema
+      INSERT INTO roles (id, name, description) VALUES
+        ('SUPER_ADMIN', 'Super Administrador Global', 'Control de plataforma multi-tenant y creación de negocios'),
+        ('ADMIN', 'Administrador de Negocio', 'Control total de la tienda, inventario, finanzas y tasas'),
+        ('VENDEDOR', 'Cajero / Vendedor', 'Facturación rápida en mostrador, escáner y cobro'),
+        ('CONSULTA', 'Consulta / Auditor', 'Solo lectura para contadores o fiscalización')
+      ON CONFLICT (id) DO NOTHING;
     `);
     console.log('✓ Tablas y columnas verificadas en PostgreSQL.');
   } catch (err) {

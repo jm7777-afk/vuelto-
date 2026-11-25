@@ -93,6 +93,9 @@ export interface CustomerDebt {
   lateDays: number;
   surchargeUsd: number;
   waived?: boolean;
+  itemsTaken?: Array<{ name: string; qty: number; priceUsd: number; subtotalUsd: number }>;
+  invoiceNumber?: string;
+  cashierName?: string;
 }
 
 export interface ReceivablePaymentRecord {
@@ -172,7 +175,7 @@ export interface PosTicket {
     isSpecialMoraCustomer: boolean;
   };
   cartLines: PosCartLine[];
-  paymentMethod: 'CASH_USD' | 'PAGO_MOVIL' | 'DEBIT_CARD' | 'TRANSFER' | 'CREDIT_DEBT';
+  paymentMethod: 'CASH_USD' | 'CASH_VES' | 'PAGO_MOVIL' | 'DEBIT_CARD' | 'TRANSFER' | 'CREDIT_DEBT' | 'DERIVAR_ADMIN';
   cashAmountUsd: string;
   pagoMovilBank: string;
   pagoMovilPhone: string;

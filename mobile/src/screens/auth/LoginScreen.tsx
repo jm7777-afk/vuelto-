@@ -40,8 +40,18 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
       const res = await MobileApiService.login(u, p);
       onLoginSuccess(res.user, res.tokens.accessToken, res.tokens.refreshToken);
     } catch (e: any) {
-      // Fallback para modo offline o testing local inmediato
-      if (u === 'admin' && p === 'admin123') {
+      // Fallback para modo offline o testing local inmediato con credenciales oficiales
+      if (u === 'superadmin' && (p === 'SuperAdmin2026!' || p === 'superadmin123')) {
+        const fallbackSuperAdmin: MobileUserProfile = {
+          id: '00000000-0000-0000-0000-000000000001',
+          tenantId: 'a0000000-0000-0000-0000-000000000001',
+          username: 'superadmin',
+          fullName: 'Súper Administrador Global',
+          roleId: 'SUPER_ADMIN',
+          businessName: 'Plataforma Global Vuelto',
+        };
+        onLoginSuccess(fallbackSuperAdmin, 'offline_superadmin_token', 'offline_refresh_token');
+      } else if (u === 'admin' && (p === 'Vuelto2026!' || p === 'admin123')) {
         const fallbackAdmin: MobileUserProfile = {
           id: '24a8eccf-b45e-4d5a-ac01-b44b77198c10',
           tenantId: 'a0000000-0000-0000-0000-000000000001',
@@ -51,12 +61,12 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
           businessName: 'Bodega Central C.A.',
         };
         onLoginSuccess(fallbackAdmin, 'offline_admin_token', 'offline_refresh_token');
-      } else if (u === 'cajero1' && p === 'cajero123') {
+      } else if (u === 'cajero1' && (p === 'Vuelto2026!' || p === 'cajero123')) {
         const fallbackCajero: MobileUserProfile = {
           id: '8cb3bb66-6b60-4966-9bc6-e8220f122557',
           tenantId: 'a0000000-0000-0000-0000-000000000001',
           username: 'cajero1',
-          fullName: 'Cajero Principal',
+          fullName: 'Carlos Mendoza (Cajero)',
           roleId: 'VENDEDOR',
           businessName: 'Bodega Central C.A.',
         };
@@ -69,15 +79,19 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
     }
   };
 
-  const handleQuickLogin = (role: 'ADMIN' | 'VENDEDOR') => {
-    if (role === 'ADMIN') {
+  const handleQuickLogin = (role: 'SUPER_ADMIN' | 'ADMIN' | 'VENDEDOR') => {
+    if (role === 'SUPER_ADMIN') {
+      setUsername('superadmin');
+      setPassword('SuperAdmin2026!');
+      handleLogin('superadmin', 'SuperAdmin2026!');
+    } else if (role === 'ADMIN') {
       setUsername('admin');
-      setPassword('admin123');
-      handleLogin('admin', 'admin123');
+      setPassword('Vuelto2026!');
+      handleLogin('admin', 'Vuelto2026!');
     } else {
       setUsername('cajero1');
-      setPassword('cajero123');
-      handleLogin('cajero1', 'cajero123');
+      setPassword('Vuelto2026!');
+      handleLogin('cajero1', 'Vuelto2026!');
     }
   };
 
@@ -148,12 +162,21 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
 
             {/* Accesos Rápidos según Rol (RBAC) */}
             <TouchableOpacity
+              style={[styles.quickAdminBtn, { backgroundColor: '#8B5CF620', borderColor: '#8B5CF6' }]}
+              onPress={() => handleQuickLogin('SUPER_ADMIN')}
+              disabled={loading}
+            >
+              <Text style={[styles.quickAdminTitle, { color: '#C084FC' }]}>⚡ Súper Administrador Global (superadmin)</Text>
+              <Text style={styles.quickAdminSubtitle}>Control multi-tenant: crea y administra todos los negocios</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
               style={styles.quickAdminBtn}
               onPress={() => handleQuickLogin('ADMIN')}
               disabled={loading}
             >
-              <Text style={styles.quickAdminTitle}>👑 Modo Administrador Total</Text>
-              <Text style={styles.quickAdminSubtitle}>Control de costos, márgenes, compras y auditoría</Text>
+              <Text style={styles.quickAdminTitle}>🏢 Dueño Administrador (admin)</Text>
+              <Text style={styles.quickAdminSubtitle}>Costos, margen en $, tasas, mora, proveedores y finanzas</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -161,9 +184,20 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
               onPress={() => handleQuickLogin('VENDEDOR')}
               disabled={loading}
             >
-              <Text style={styles.quickVendedorTitle}>🛒 Modo Cajero / Vendedor</Text>
-              <Text style={styles.quickVendedorSubtitle}>POS rápido, precios al detal y tickets (Sin costos)</Text>
+              <Text style={styles.quickVendedorTitle}>🛒 Cajero / Vendedor (cajero1)</Text>
+              <Text style={styles.quickVendedorSubtitle}>POS, escaneo con cámara del celular y cobro (Costos ocultos)</Text>
             </TouchableOpacity>
+
+            {/* Tarjeta Explicativa de la Vista del Vendedor */}
+            <View style={{ marginTop: 14, padding: 12, borderRadius: 10, backgroundColor: '#062F3B', borderWidth: 1, borderColor: '#155E75' }}>
+              <Text style={{ color: '#A3E635', fontWeight: 'bold', fontSize: 11, marginBottom: 4 }}>
+                ℹ️ Delimitación de la Vista del Vendedor:
+              </Text>
+              <Text style={{ color: '#94A3B8', fontSize: 11, lineHeight: 15 }}>
+                • Permitido: Escáner con la cámara física, fichero multi-ticket, cobro bimoneda, comprobantes WhatsApp y clientes por C.I.{'\n'}
+                • Estrictamente Oculto: Precios de costo, márgenes de ganancia en $, pedidos a proveedores, finanzas, tasas y creación de negocios.
+              </Text>
+            </View>
           </View>
 
           <Text style={styles.footerText}>

@@ -36,6 +36,15 @@ export const apiRouter = Router();
 apiRouter.post('/auth/login', AuthController.login);
 
 // --- TASAS DE CAMBIO (Público / Monitor BCV, Paralelo, Euro, USDT) ---
+apiRouter.get('/exchange-rates/live', async (_req, res, next) => {
+  try {
+    const live = await ExchangeRateService.fetchLiveVenezuelanRates();
+    res.json(live);
+  } catch (err) {
+    next(err);
+  }
+});
+
 apiRouter.get('/exchange-rates/monitor', async (req, res, next) => {
   try {
     const tenantId = (req as any).tenantId || 'a0000000-0000-0000-0000-000000000001';
