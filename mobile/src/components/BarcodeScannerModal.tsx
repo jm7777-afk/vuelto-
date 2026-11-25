@@ -78,7 +78,6 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     }
   }, [visible]);
 
-  // TODO(device-verify): Expo camera scanning, audio beep, torch toggle and haptics require physical Android/iOS device validation.
   const handleBarcodeScanned = (result: BarcodeScanningResult) => {
     const rawData = result.data?.trim();
     if (!rawData) return;
@@ -538,3 +537,4 @@ const styles = StyleSheet.create({
     fontSize: 12,
   },
 });
+

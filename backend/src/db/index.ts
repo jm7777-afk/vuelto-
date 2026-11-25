@@ -17,7 +17,7 @@ const sanitizedConnectionString = env.DATABASE_URL.replace(/[?&]sslmode=[^&]+/, 
 
 export const pool = new Pool({
   connectionString: sanitizedConnectionString,
-  max: 20,
+  max: 5,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
   ssl: isSslRequired ? { rejectUnauthorized: false } : undefined,

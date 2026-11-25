@@ -9,10 +9,10 @@ export class UnauthorizedError extends Error {
 }
 
 /**
- * Middleware mandatorio de Aislamiento Multi-Tenant.
+ * Middleware mandatorio de Aislamiento Multi-Tenant (Hardening OWASP).
  * REGLA ESTRICTA DE SEGURIDAD:
- * El `tenant_id` se extrae EXCLUSIVAMENTE del token JWT verificado por el servidor.
- * NUNCA se extrae del body, query ni URL.
+ * El `tenant_id` se extrae EXCLUSIVAMENTE del token JWT verificado criptográficamente por el servidor.
+ * Se prohíbe y sanitiza explícitamente cualquier intento de inyección o spoofing desde el body, query o URL.
  */
 export const requireTenantAuth = (req: Request, res: Response, next: NextFunction): void => {
   const authHeader = req.headers.authorization;
@@ -27,11 +27,22 @@ export const requireTenantAuth = (req: Request, res: Response, next: NextFunctio
   const token = authHeader.split(' ')[1];
   try {
     const user = JwtService.verifyAccessToken(token);
-    // Inyecta en el contexto de la petición Express
+
+    // Sanitización proactiva contra spoofing de tenant
+    if (req.body && typeof req.body === 'object') {
+      delete req.body.tenantId;
+      delete req.body.tenant_id;
+    }
+    if (req.query && typeof req.query === 'object') {
+      delete (req.query as any).tenantId;
+      delete (req.query as any).tenant_id;
+    }
+
+    // Inyecta en el contexto de la petición Express desde el token verificado
     req.user = user;
     req.tenantId = user.tenantId;
     next();
-  } catch (error: any) {
+  } catch {
     res.status(401).json({
       code: 'INVALID_TOKEN',
       message: 'Token de acceso expirado o inválido.',

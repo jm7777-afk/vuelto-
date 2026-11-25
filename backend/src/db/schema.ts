@@ -63,6 +63,10 @@ export const users = pgTable(
     fullName: varchar('full_name', { length: 100 }).notNull(),
     phone: varchar('phone', { length: 20 }),
     isActive: boolean('is_active').default(true).notNull(),
+    failedLoginAttempts: integer('failed_login_attempts').default(0).notNull(),
+    lockedUntil: timestamp('locked_until', { withTimezone: true }),
+    twoFactorSecret: text('two_factor_secret'),
+    twoFactorEnabled: boolean('two_factor_enabled').default(false).notNull(),
     lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
@@ -71,6 +75,27 @@ export const users = pgTable(
     uniqueIndex('uq_tenant_username').on(table.tenantId, table.username),
     uniqueIndex('uq_tenant_user_email').on(table.tenantId, table.email),
     index('idx_users_tenant_role').on(table.tenantId, table.roleId),
+  ]
+);
+
+// 3b. Refresh Tokens (Sesiones activas y rotación con detección de reúso)
+export const refreshTokens = pgTable(
+  'refresh_tokens',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    tokenHash: varchar('token_hash', { length: 255 }).notNull(),
+    familyId: uuid('family_id').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('idx_refresh_tokens_hash').on(table.tokenHash),
+    index('idx_refresh_tokens_family').on(table.familyId),
+    index('idx_refresh_tokens_user').on(table.userId),
   ]
 );
 
@@ -508,10 +533,13 @@ export const auditLogs = pgTable(
     userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
     action: varchar('action', { length: 60 }).notNull(),
     entity: varchar('entity', { length: 50 }).notNull(),
+    entityType: varchar('entity_type', { length: 50 }),
     entityId: varchar('entity_id', { length: 64 }),
     payload: jsonb('payload'),
-    result: varchar('result', { length: 30 }).notNull(), // 'SUCCESS', 'FAILED', 'VALIDATION_ERROR', 'PRINTER_UNAVAILABLE'
-    channel: varchar('channel', { length: 30 }).notNull(), // 'POS_MOBILE', 'MOBILE_ADMIN', 'WEB_ADMIN', 'SYSTEM_JOB'
+    oldValues: jsonb('old_values'),
+    newValues: jsonb('new_values'),
+    result: varchar('result', { length: 30 }).default('SUCCESS').notNull(),
+    channel: varchar('channel', { length: 30 }).default('API').notNull(),
     ipAddress: varchar('ip_address', { length: 45 }),
     userAgent: text('user_agent'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),

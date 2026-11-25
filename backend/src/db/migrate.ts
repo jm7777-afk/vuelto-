@@ -1,10 +1,42 @@
 import { db, pool } from './index.js';
 import { roles, tenants, users } from './schema.js';
-import bcrypt from 'bcryptjs';
+import { PasswordService } from '../utils/password.js';
 
 export async function runMigrationAndSeed() {
   console.log('Iniciando verificación y seed de base de datos...');
   try {
+    // 0. DDL de Endurecimiento de Seguridad (Tablas y Columnas Fase 2)
+    const client = await pool.connect();
+    try {
+      await client.query(`
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_login_attempts INTEGER DEFAULT 0 NOT NULL;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMP WITH TIME ZONE;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS two_factor_secret TEXT;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS two_factor_enabled BOOLEAN DEFAULT false NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS refresh_tokens (
+          id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+          user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          token_hash VARCHAR(255) NOT NULL,
+          family_id UUID NOT NULL,
+          expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+          revoked_at TIMESTAMP WITH TIME ZONE,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash ON refresh_tokens(token_hash);
+        CREATE INDEX IF NOT EXISTS idx_refresh_tokens_family ON refresh_tokens(family_id);
+        CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id);
+
+        ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS entity_type VARCHAR(50);
+        ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS old_values JSONB;
+        ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS new_values JSONB;
+      `);
+      console.log('✓ Tablas y columnas de seguridad verificadas en PostgreSQL');
+    } finally {
+      client.release();
+    }
+
     // 1. Roles del Sistema
     const systemRoles = [
       { id: 'SUPER_ADMIN', name: 'Super Administrador', description: 'Control de plataforma multi-tenant' },
@@ -54,9 +86,8 @@ export async function runMigrationAndSeed() {
     const effectiveCashierPass = seedCashierPassword || 'dev_cashier_local_secret!';
 
     if (demoTenant) {
-      const passwordHash = await bcrypt.hash(effectiveAdminPass, 10);
-
-      // 3. Usuario Administrador de Prueba
+      // 3. Usuario Administrador (Hash Argon2id OWASP 2024)
+      const adminPasswordHash = await PasswordService.hash(effectiveAdminPass);
       await db
         .insert(users)
         .values({
@@ -64,14 +95,14 @@ export async function runMigrationAndSeed() {
           roleId: 'ADMIN',
           username: 'admin',
           email: 'admin@bodegacentral.ve',
-          passwordHash,
+          passwordHash: adminPasswordHash,
           fullName: 'Dueño Administrador',
           phone: '04141234567',
         })
         .onConflictDoNothing();
 
-      // 4. Usuario Cajero de Prueba
-      const cashierPasswordHash = await bcrypt.hash(effectiveCashierPass, 10);
+      // 4. Usuario Cajero (Hash Argon2id OWASP 2024)
+      const cashierPasswordHash = await PasswordService.hash(effectiveCashierPass);
       await db
         .insert(users)
         .values({
@@ -85,8 +116,8 @@ export async function runMigrationAndSeed() {
         })
         .onConflictDoNothing();
 
-      // 5. Usuario Súper Administrador Maestro (Control Global Multi-Tenant)
-      const superAdminPasswordHash = await bcrypt.hash(effectiveSuperadminPass, 10);
+      // 5. Usuario Súper Administrador Maestro (Hash Argon2id OWASP 2024)
+      const superAdminPasswordHash = await PasswordService.hash(effectiveSuperadminPass);
       await db
         .insert(users)
         .values({
@@ -100,7 +131,7 @@ export async function runMigrationAndSeed() {
         })
         .onConflictDoNothing();
 
-      console.log(`✓ Tenant y usuarios iniciales verificados (${seedSuperadminUser}, admin, cajero1)`);
+      console.log(`✓ Tenant y usuarios iniciales verificados (${seedSuperadminUser}, admin, cajero1) con Argon2id`);
     }
 
     console.log('Migración y sembrado completados con éxito.');

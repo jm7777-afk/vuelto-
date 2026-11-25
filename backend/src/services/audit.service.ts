@@ -42,17 +42,21 @@ export class AuditService {
   }
 
   /**
-   * Consulta el registro de auditoría inmutable con paginación y filtros
+   * Consulta el registro de auditoría inmutable con paginación y filtros.
+   * Si tenantId es null o undefined (Súper Administrador), consulta transversalmente.
    */
   static async listLogs(
-    tenantId: string,
+    tenantId?: string | null,
     options: { page?: number; limit?: number; action?: string; channel?: string } = {}
   ) {
     const page = options.page || 1;
     const limit = options.limit || 50;
     const offset = (page - 1) * limit;
 
-    const conditions = [eq(auditLogs.tenantId, tenantId)];
+    const conditions: any[] = [];
+    if (tenantId) {
+      conditions.push(eq(auditLogs.tenantId, tenantId));
+    }
     if (options.action) {
       conditions.push(eq(auditLogs.action, options.action));
     }
@@ -60,13 +64,13 @@ export class AuditService {
       conditions.push(eq(auditLogs.channel, options.channel as any));
     }
 
-    const rows = await db
+    const query = db
       .select()
-      .from(auditLogs)
-      .where(and(...conditions))
-      .orderBy(sql`${auditLogs.createdAt} DESC`)
-      .limit(limit)
-      .offset(offset);
+      .from(auditLogs);
+
+    const rows = conditions.length > 0
+      ? await query.where(and(...conditions)).orderBy(sql`${auditLogs.createdAt} DESC`).limit(limit).offset(offset)
+      : await query.orderBy(sql`${auditLogs.createdAt} DESC`).limit(limit).offset(offset);
 
     return {
       page,
