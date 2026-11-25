@@ -18,6 +18,21 @@
         "BLUETOOTH_CONNECT",
         "BLUETOOTH_SCAN"
       ]
-    }
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "ve.vuelto.pos",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Escanear códigos de barras para buscar o agregar productos a la venta e inventario."
+      }
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Escanear códigos de barras para buscar o agregar productos a la venta e inventario."
+        }
+      ]
+    ]
   }
 }

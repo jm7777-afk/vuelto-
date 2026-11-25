@@ -1,20 +1,61 @@
 import { Request, Response, NextFunction } from 'express';
+import { z } from 'zod';
 import { ProductService } from '../services/product.service.js';
+
+const barcodeParamSchema = z
+  .string()
+  .trim()
+  .min(3)
+  .max(64)
+  .regex(/^([0-9]{8,14}|[a-zA-Z0-9\-_]{3,32})$/);
 
 export class ProductController {
   static async findByBarcode(req: Request, res: Response, next: NextFunction) {
     try {
-      const barcode = String(req.params.barcode);
+      const barcodeRaw = String(req.params.barcode || '').trim();
+      const parseResult = barcodeParamSchema.safeParse(barcodeRaw);
+
+      if (!parseResult.success) {
+        res.status(400).json({
+          error: 'INVALID_BARCODE',
+          message: 'El código de barras contiene caracteres o longitud no válidos.',
+          barcode: barcodeRaw,
+        });
+        return;
+      }
+
+      const barcode = parseResult.data;
       const product = await ProductService.findByBarcode(req.tenantId!, barcode);
+
       if (!product) {
         res.status(404).json({
-          code: 'PRODUCT_NOT_FOUND',
+          error: 'PRODUCT_NOT_FOUND',
           message: 'Código de barras no encontrado en el inventario',
           barcode,
         });
         return;
       }
-      res.json(product);
+
+      res.json({
+        id: product.productId,
+        name: product.name,
+        barcode: product.barcode,
+        price: parseFloat(product.salePriceUsd),
+        taxRate: parseFloat(product.taxRate),
+        stock: parseFloat(product.currentStock || '0'),
+        unit: product.unitOfMeasure || 'UNIDAD',
+        isBulk: Boolean(product.isScaleBarcode || product.unitOfMeasure === 'KG' || product.unitOfMeasure === 'GRAMO'),
+        productId: product.productId,
+        sku: product.sku,
+        description: product.description,
+        costPriceUsd: product.costPriceUsd,
+        salePriceUsd: product.salePriceUsd,
+        currentStock: product.currentStock,
+        isVenezuelanProduct: product.isVenezuelanProduct,
+        isScaleBarcode: product.isScaleBarcode,
+        embeddedWeightKg: product.embeddedWeightKg,
+        calculatedLinePriceUsd: product.calculatedLinePriceUsd,
+      });
     } catch (err) {
       next(err);
     }

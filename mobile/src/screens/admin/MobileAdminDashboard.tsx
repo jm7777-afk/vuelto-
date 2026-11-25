@@ -11,8 +11,24 @@ import {
   StatusBar,
   Linking,
   Image,
+  Modal,
 } from 'react-native';
 import { useAuthStore } from '../../stores/auth.store';
+import { BarcodeScannerModal } from '../../components/BarcodeScannerModal';
+import { MobileScaleBarcodeUtils } from '../../utils/scale-barcode';
+
+export interface TenantEntry {
+  id: string;
+  slug: string;
+  businessName: string;
+  tradeName: string;
+  documentType: 'J' | 'V' | 'G';
+  documentNumber: string;
+  phone: string;
+  email: string;
+  isActive: boolean;
+  isSpecialTaxpayer: boolean;
+}
 
 export const MobileAdminDashboard: React.FC = () => {
   const { user, toggleMode, logout } = useAuthStore();
@@ -20,6 +36,27 @@ export const MobileAdminDashboard: React.FC = () => {
   const [activeSection, setActiveSection] = useState<'STOCK' | 'ORDERS' | 'DEBTS' | 'SUPPLIERS' | 'SALES' | 'RATES' | 'USERS' | 'TENANTS'>('STOCK');
 
   const isSuperAdmin = user?.roleId === 'SUPER_ADMIN';
+
+  // Escáner de inventario y formulario de producto
+  const [showAdminScanner, setShowAdminScanner] = useState(false);
+  const [scannerMode, setScannerMode] = useState<'ADJUST_STOCK' | 'NEW_PRODUCT_BARCODE'>('ADJUST_STOCK');
+
+  // Modal de Nuevo Producto en Inventario
+  const [showNewProductModal, setShowNewProductModal] = useState(false);
+  const [newProdName, setNewProdName] = useState('');
+  const [newProdBarcode, setNewProdBarcode] = useState('');
+  const [newProdUnit, setNewProdUnit] = useState('unidad');
+  const [newProdCategory, setNewProdCategory] = useState('Alimentos');
+  const [newProdCost, setNewProdCost] = useState('1.00');
+  const [newProdSale, setNewProdSale] = useState('1.40');
+  const [newProdStock, setNewProdStock] = useState('20');
+  const [newProdMinStock, setNewProdMinStock] = useState('5');
+  const [newProdSupplier, setNewProdSupplier] = useState('');
+
+  // Modal de Ajuste Rápido de Stock tras escaneo
+  const [scannedProductForAdjustment, setScannedProductForAdjustment] = useState<any | null>(null);
+  const [showQuickAdjustModal, setShowQuickAdjustModal] = useState(false);
+  const [quickStockAmount, setQuickStockAmount] = useState('0');
 
   // Catálogo de Productos con Costos, Precios y Margen en Dólares
   const [adminProducts, setAdminProducts] = useState([
@@ -74,13 +111,13 @@ export const MobileAdminDashboard: React.FC = () => {
   ]);
 
   // Directorio de Comercios / Tenants para el Súper Administrador
-  const [tenantsList, setTenantsList] = useState([
+  const [tenantsList, setTenantsList] = useState<TenantEntry[]>([
     {
       id: 'tenant-demo',
       slug: 'bodega-central',
       businessName: 'Inversiones Bodega Central C.A.',
       tradeName: 'Bodega Central',
-      documentType: 'J' as const,
+      documentType: 'J',
       documentNumber: '123456789',
       phone: '04141234567',
       email: 'contacto@bodegacentral.ve',
@@ -92,7 +129,7 @@ export const MobileAdminDashboard: React.FC = () => {
       slug: 'farmacia-vida',
       businessName: 'Farmacia Vida y Salud C.A.',
       tradeName: 'Farmacia Vida',
-      documentType: 'J' as const,
+      documentType: 'J',
       documentNumber: '298765432',
       phone: '04128889900',
       email: 'info@farmaciavida.ve',
@@ -162,6 +199,120 @@ export const MobileAdminDashboard: React.FC = () => {
     { id: 's-2', name: 'Pepsico Alimentos Venezuela', rif: 'J-300854128', phone: '04160001122', creditDays: 21 },
     { id: 's-3', name: 'Distribuidora Lácteos Los Andes', rif: 'G-200055441', phone: '04129876543', creditDays: 7 },
   ]);
+
+  // TODO(device-verify): Expo camera scanning, audio beep, torch toggle and haptics require physical Android/iOS device validation.
+  const handleAdminScanned = (scannedCode: string, _format: string) => {
+    const clean = scannedCode.trim();
+    if (!clean) return;
+
+    if (scannerMode === 'NEW_PRODUCT_BARCODE') {
+      const duplicate = adminProducts.find(
+        (p) => p.barcode === clean || p.barcode.toLowerCase() === clean.toLowerCase()
+      );
+      if (duplicate) {
+        Alert.alert(
+          '⚠️ Código Duplicado',
+          `El código ${clean} ya está asignado a "${duplicate.name}". Por favor escanee o asigne un código único.`
+        );
+        setShowAdminScanner(false);
+        return;
+      }
+      setNewProdBarcode(clean);
+      setShowAdminScanner(false);
+      Alert.alert('✅ Código Asignado', `Código de barras: ${clean}`);
+      return;
+    }
+
+    // Modo Ajuste Rápido de Stock
+    const scaleInfo = MobileScaleBarcodeUtils.parseScaleBarcode(clean);
+    const lookupCode = scaleInfo.isScaleBarcode && scaleInfo.sku ? scaleInfo.sku : clean;
+
+    const found = adminProducts.find(
+      (p) => p.barcode === lookupCode || p.barcode === clean || p.id.includes(lookupCode)
+    );
+
+    if (found) {
+      setShowAdminScanner(false);
+      setScannedProductForAdjustment(found);
+      setQuickStockAmount(String(found.stock));
+      setShowQuickAdjustModal(true);
+    } else {
+      Alert.alert(
+        'Producto No Encontrado',
+        `El código ${clean} no está registrado en el inventario.`
+      );
+    }
+  };
+
+  const handleApplyQuickStockChange = (delta: number) => {
+    const current = parseInt(quickStockAmount, 10) || 0;
+    const updated = Math.max(0, current + delta);
+    setQuickStockAmount(String(updated));
+  };
+
+  const handleSaveQuickStockAdjustment = () => {
+    if (!scannedProductForAdjustment) return;
+    const newStockVal = parseInt(quickStockAmount, 10);
+    if (isNaN(newStockVal) || newStockVal < 0) {
+      Alert.alert('Valor Inválido', 'Ingrese una cantidad válida.');
+      return;
+    }
+    setAdminProducts((prev) =>
+      prev.map((p) =>
+        p.id === scannedProductForAdjustment.id ? { ...p, stock: newStockVal } : p
+      )
+    );
+    setShowQuickAdjustModal(false);
+    Alert.alert(
+      'Stock Actualizado',
+      `El stock de "${scannedProductForAdjustment.name}" ahora es de ${newStockVal} unidades (Kardex auditado).`
+    );
+  };
+
+  const handleSaveNewAdminProduct = () => {
+    if (!newProdName.trim() || !newProdBarcode.trim()) {
+      Alert.alert('Datos Incompletos', 'Indique el nombre y código de barras.');
+      return;
+    }
+
+    const cleanBarcode = newProdBarcode.trim();
+    const duplicate = adminProducts.find(
+      (p) => p.barcode === cleanBarcode || p.barcode.toLowerCase() === cleanBarcode.toLowerCase()
+    );
+    if (duplicate) {
+      Alert.alert('⚠️ Código Duplicado', `El código ${cleanBarcode} ya pertenece a "${duplicate.name}".`);
+      return;
+    }
+
+    const cost = parseFloat(newProdCost) || 1.0;
+    const sale = parseFloat(newProdSale) || 1.4;
+    const stock = parseInt(newProdStock, 10) || 10;
+    const minStock = parseInt(newProdMinStock, 10) || 5;
+
+    const newProdItem = {
+      id: `p-${Date.now()}`,
+      name: newProdName.trim(),
+      barcode: cleanBarcode,
+      unit: newProdUnit,
+      category: newProdCategory,
+      costPriceUsd: cost,
+      salePriceUsd: sale,
+      stock,
+      minStock,
+      supplier: newProdSupplier.trim() || 'Proveedor Local',
+    };
+
+    setAdminProducts([newProdItem, ...adminProducts]);
+    setShowNewProductModal(false);
+    setNewProdName('');
+    setNewProdBarcode('');
+    setNewProdCost('1.00');
+    setNewProdSale('1.40');
+    setNewProdStock('20');
+    setNewProdMinStock('5');
+    setNewProdSupplier('');
+    Alert.alert('✅ Producto Creado', `"${newProdItem.name}" ha sido agregado al inventario.`);
+  };
 
   const handleAdjustStock = () => {
     if (!adjustProductId || !adjustQty || !adjustReason) {
@@ -388,6 +539,26 @@ export const MobileAdminDashboard: React.FC = () => {
                 <Text style={styles.kpiLabel}>Margen Promedio</Text>
                 <Text style={[styles.kpiValue, { color: '#10B981' }]}>+36.8%</Text>
               </View>
+            </View>
+
+            {/* Acciones Rápidas: Escáner para Ajustar Stock & Crear Producto */}
+            <View style={{ flexDirection: 'row', gap: 10, marginVertical: 10 }}>
+              <TouchableOpacity
+                style={[styles.primaryBtn, { flex: 1, backgroundColor: '#0284C7', marginTop: 0 }]}
+                onPress={() => {
+                  setScannerMode('ADJUST_STOCK');
+                  setShowAdminScanner(true);
+                }}
+              >
+                <Text style={styles.primaryBtnText}>📷 Escanear Stock</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.primaryBtn, { flex: 1, backgroundColor: '#10B981', marginTop: 0 }]}
+                onPress={() => setShowNewProductModal(true)}
+              >
+                <Text style={styles.primaryBtnText}>➕ Nuevo Producto</Text>
+              </TouchableOpacity>
             </View>
 
             {/* Fijar Margen Global de Ganancia Masivo (%) */}
@@ -1104,7 +1275,210 @@ export const MobileAdminDashboard: React.FC = () => {
           </View>
         </View>
       </Modal>
-      </ScrollView>
+
+      {/* ESCÁNER DE CÁMARA (ADMIN: AJUSTAR STOCK O VINCULAR CÓDIGO) */}
+      <BarcodeScannerModal
+        visible={showAdminScanner}
+        onClose={() => setShowAdminScanner(false)}
+        onScanned={handleAdminScanned}
+        continuous={false}
+        title={scannerMode === 'ADJUST_STOCK' ? '📷 Escanear para Ajustar Stock' : '📷 Escanear Código de Barras'}
+      />
+
+      {/* MODAL: AJUSTE RÁPIDO DE STOCK TRAS ESCANEO */}
+      <Modal visible={showQuickAdjustModal} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={[styles.modalTitle, { color: '#38BDF8' }]}>📦 Ajustar Stock de Producto</Text>
+            {scannedProductForAdjustment && (
+              <View style={{ marginBottom: 16 }}>
+                <Text style={{ color: '#F8FAFC', fontSize: 16, fontWeight: 'bold' }}>
+                  {scannedProductForAdjustment.name}
+                </Text>
+                <Text style={{ color: '#94A3B8', fontSize: 12 }}>
+                  Código: {scannedProductForAdjustment.barcode} • Costo: ${scannedProductForAdjustment.costPriceUsd.toFixed(2)} • Venta: ${scannedProductForAdjustment.salePriceUsd.toFixed(2)}
+                </Text>
+                <Text style={{ color: '#10B981', fontSize: 13, marginTop: 4 }}>
+                  Stock actual en sistema: {scannedProductForAdjustment.stock} unids
+                </Text>
+              </View>
+            )}
+
+            <Text style={styles.fieldLabel}>Nuevo Conteo Físico:</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginVertical: 8 }}>
+              <TouchableOpacity
+                style={[styles.primaryBtn, { flex: 1, backgroundColor: '#EF4444', marginTop: 0 }]}
+                onPress={() => handleApplyQuickStockChange(-1)}
+              >
+                <Text style={styles.primaryBtnText}>- 1</Text>
+              </TouchableOpacity>
+
+              <TextInput
+                style={[styles.input, { flex: 2, marginBottom: 0, textAlign: 'center', fontSize: 18, fontWeight: 'bold' }]}
+                keyboardType="numeric"
+                value={quickStockAmount}
+                onChangeText={setQuickStockAmount}
+              />
+
+              <TouchableOpacity
+                style={[styles.primaryBtn, { flex: 1, backgroundColor: '#10B981', marginTop: 0 }]}
+                onPress={() => handleApplyQuickStockChange(1)}
+              >
+                <Text style={styles.primaryBtnText}>+ 1</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={{ flexDirection: 'row', gap: 8, marginVertical: 8 }}>
+              <TouchableOpacity
+                style={[styles.primaryBtn, { flex: 1, backgroundColor: '#334155', marginTop: 0 }]}
+                onPress={() => handleApplyQuickStockChange(5)}
+              >
+                <Text style={styles.primaryBtnText}>+ 5 unids</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.primaryBtn, { flex: 1, backgroundColor: '#334155', marginTop: 0 }]}
+                onPress={() => handleApplyQuickStockChange(10)}
+              >
+                <Text style={styles.primaryBtnText}>+ 10 unids</Text>
+              </TouchableOpacity>
+            </View>
+
+            <TouchableOpacity style={styles.primaryBtn} onPress={handleSaveQuickStockAdjustment}>
+              <Text style={styles.primaryBtnText}>✓ Confirmar Ajuste en Kardex</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={styles.cancelModalBtn} onPress={() => setShowQuickAdjustModal(false)}>
+              <Text style={styles.cancelModalBtnText}>Cancelar</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* MODAL: REGISTRAR NUEVO PRODUCTO EN INVENTARIO CON BOTÓN DE CÁMARA */}
+      <Modal visible={showNewProductModal} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { maxHeight: '90%' }]}>
+            <Text style={[styles.modalTitle, { color: '#10B981' }]}>➕ Nuevo Producto en Inventario</Text>
+            <Text style={{ color: '#94A3B8', fontSize: 11, marginBottom: 12 }}>
+              Registre un producto con costos, márgenes y código escaneado con la cámara:
+            </Text>
+
+            <ScrollView style={{ maxHeight: 380 }}>
+              <Text style={styles.fieldLabel}>Código de Barras (*):</Text>
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                <TextInput
+                  style={[styles.input, { flex: 1, backgroundColor: '#0F172A', color: '#38BDF8' }]}
+                  placeholder="Escanee o escriba código"
+                  placeholderTextColor="#64748B"
+                  value={newProdBarcode}
+                  onChangeText={setNewProdBarcode}
+                />
+                <TouchableOpacity
+                  style={{
+                    backgroundColor: '#0284C7',
+                    paddingHorizontal: 14,
+                    borderRadius: 8,
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    marginBottom: 10,
+                  }}
+                  onPress={() => {
+                    setScannerMode('NEW_PRODUCT_BARCODE');
+                    setShowAdminScanner(true);
+                  }}
+                >
+                  <Text style={{ fontSize: 18 }}>📷</Text>
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.fieldLabel}>Nombre del Producto (*):</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="ej. Pasta Primor 1kg"
+                placeholderTextColor="#64748B"
+                value={newProdName}
+                onChangeText={setNewProdName}
+              />
+
+              <View style={{ flexDirection: 'row', gap: 10 }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.fieldLabel}>Costo Mayor ($):</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="1.00"
+                    placeholderTextColor="#64748B"
+                    keyboardType="numeric"
+                    value={newProdCost}
+                    onChangeText={setNewProdCost}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.fieldLabel}>Precio Venta ($):</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="1.40"
+                    placeholderTextColor="#64748B"
+                    keyboardType="numeric"
+                    value={newProdSale}
+                    onChangeText={setNewProdSale}
+                  />
+                </View>
+              </View>
+
+              <View style={{ flexDirection: 'row', gap: 10 }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.fieldLabel}>Stock Inicial:</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="20"
+                    placeholderTextColor="#64748B"
+                    keyboardType="numeric"
+                    value={newProdStock}
+                    onChangeText={setNewProdStock}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.fieldLabel}>Stock Mínimo:</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="5"
+                    placeholderTextColor="#64748B"
+                    keyboardType="numeric"
+                    value={newProdMinStock}
+                    onChangeText={setNewProdMinStock}
+                  />
+                </View>
+              </View>
+
+              <Text style={styles.fieldLabel}>Categoría:</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="Alimentos, Bebidas, Charcutería..."
+                placeholderTextColor="#64748B"
+                value={newProdCategory}
+                onChangeText={setNewProdCategory}
+              />
+
+              <Text style={styles.fieldLabel}>Proveedor:</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="ej. Empresas Polar C.A."
+                placeholderTextColor="#64748B"
+                value={newProdSupplier}
+                onChangeText={setNewProdSupplier}
+              />
+            </ScrollView>
+
+            <TouchableOpacity style={styles.primaryBtn} onPress={handleSaveNewAdminProduct}>
+              <Text style={styles.primaryBtnText}>✓ Guardar Producto en Catálogo</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={styles.cancelModalBtn} onPress={() => setShowNewProductModal(false)}>
+              <Text style={styles.cancelModalBtnText}>Cancelar</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 };

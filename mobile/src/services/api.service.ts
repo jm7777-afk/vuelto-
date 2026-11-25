@@ -63,10 +63,35 @@ export class MobileApiService {
    * Búsqueda por Escáner de Código de Barras
    */
   static async findByBarcode(token: string, barcode: string) {
-    const res = await fetch(`${API_BASE_URL}/products/barcode/${encodeURIComponent(barcode)}`, {
+    const res = await fetch(`${API_BASE_URL}/products/by-barcode/${encodeURIComponent(barcode)}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      if (res.status === 404) return null;
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || 'Error en consulta de código de barras');
+    }
+    return res.json();
+  }
+
+  /**
+   * Crear Producto Nuevo desde el Escáner o Admin
+   */
+  static async createProduct(token: string, productData: any) {
+    const res = await fetch(`${API_BASE_URL}/products`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(productData),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || 'Error registrando el producto');
+    }
+
     return res.json();
   }
 

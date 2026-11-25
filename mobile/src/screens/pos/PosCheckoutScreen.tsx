@@ -14,11 +14,13 @@ import {
   Image,
   Vibration,
 } from 'react-native';
-import { CameraView, useCameraPermissions } from 'expo-camera';
 import { useCartStore, CartLine } from '../../stores/cart.store';
 import { useAuthStore } from '../../stores/auth.store';
 import { NativeShareService } from '../../services/share.service';
 import { MobileApiService } from '../../services/api.service';
+import { BarcodeScannerModal } from '../../components/BarcodeScannerModal';
+import { ProductCacheService } from '../../services/product-cache.service';
+import { MobileScaleBarcodeUtils } from '../../utils/scale-barcode';
 
 // Clientes registrados en el sistema para consulta por C.I.
 interface CustomerEntry {
@@ -116,74 +118,276 @@ export const PosCheckoutScreen: React.FC = () => {
   const [catalogProducts, setCatalogProducts] = useState(DEFAULT_PRODUCTS);
   const [quickBarcodeInput, setQuickBarcodeInput] = useState('');
 
-  // Escáner Físico con Cámara del Celular (expo-camera)
+  // Escáner Físico con Cámara del Celular (expo-camera & BarcodeScannerModal)
   const [showCameraScanner, setShowCameraScanner] = useState(false);
-  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
-  const [torchEnabled, setTorchEnabled] = useState(false);
-  const [isScanPaused, setIsScanPaused] = useState(false);
-  const [lastScannedCode, setLastScannedCode] = useState<string | null>(null);
   const [scanFeedbackMsg, setScanFeedbackMsg] = useState<string | null>(null);
 
-  const handleOpenPhysicalCamera = async () => {
-    if (!cameraPermission?.granted) {
-      const res = await requestCameraPermission();
-      if (!res.granted) {
-        Alert.alert(
-          'Permiso Requerido',
-          'La app necesita permiso para usar la cámara del teléfono y escanear códigos de barra físicos.'
-        );
-        return;
-      }
-    }
-    setTorchEnabled(false);
-    setIsScanPaused(false);
-    setScanFeedbackMsg(null);
+  // Modal de Creación Rápida de Producto (si el escaneo da 404)
+  const [showCreateProductModal, setShowCreateProductModal] = useState(false);
+  const [newProductBarcode, setNewProductBarcode] = useState('');
+  const [newProductName, setNewProductName] = useState('');
+  const [newProductPrice, setNewProductPrice] = useState('1.00');
+  const [newProductStock, setNewProductStock] = useState('10');
+  const [newProductUnit, setNewProductUnit] = useState('unidad');
+  const [isSavingProduct, setIsSavingProduct] = useState(false);
+
+  const handleOpenPhysicalCamera = () => {
     setShowCameraScanner(true);
   };
 
-  const handleBarcodeScanned = (barcode: string) => {
-    if (isScanPaused || !barcode) return;
-    setIsScanPaused(true);
-    setLastScannedCode(barcode);
-    try {
-      Vibration.vibrate(80);
-    } catch {}
+  // TODO(device-verify): Expo camera scanning, audio beep, torch toggle and haptics require physical Android/iOS device validation.
+  const handleScannerBarcodeResult = async (scannedCode: string, _format: string) => {
+    const clean = scannedCode.trim();
+    if (!clean) return;
 
-    const clean = barcode.trim();
-    const exact = catalogProducts.find((p) => p.barcode === clean || p.barcode.toLowerCase() === clean.toLowerCase());
+    const tenantId = user?.tenantId || 'tenant_default';
+    const token = useAuthStore.getState().accessToken || 'system_token';
 
-    if (exact) {
-      addProduct({
-        id: exact.id,
-        name: exact.name,
-        barcode: exact.barcode,
-        salePriceUsd: exact.salePriceUsd,
-        taxRate: exact.taxRate,
-        isExempt: exact.isExempt,
-        unitOfMeasure: (exact as any).unitOfMeasure,
-      });
-      setScanFeedbackMsg(`✅ ${exact.name} añadido ($${exact.salePriceUsd.toFixed(2)} USD)`);
-    } else {
-      const partial = catalogProducts.find((p) => p.barcode.includes(clean) || p.name.toLowerCase().includes(clean.toLowerCase()));
-      if (partial) {
+    // 1. Revisar si es código de balanza (prefijo 20, 21 o 22)
+    const scaleInfo = MobileScaleBarcodeUtils.parseScaleBarcode(clean);
+    if (scaleInfo.isScaleBarcode && scaleInfo.sku) {
+      let foundScaleProd = catalogProducts.find(
+        (p) => p.barcode === scaleInfo.sku || p.barcode === clean || p.id.includes(scaleInfo.sku!)
+      );
+
+      if (!foundScaleProd) {
+        const cached = ProductCacheService.findByBarcode(tenantId, scaleInfo.sku);
+        if (cached) {
+          foundScaleProd = {
+            id: cached.id,
+            name: cached.name,
+            barcode: cached.barcode,
+            salePriceUsd: cached.price,
+            taxRate: cached.taxRate,
+            isExempt: cached.taxRate === 0,
+            stock: cached.stock,
+            unitOfMeasure: cached.unit,
+            category: 'Balanza',
+          };
+        }
+      }
+
+      if (!foundScaleProd) {
+        try {
+          const apiProd = await MobileApiService.findByBarcode(token, scaleInfo.sku);
+          if (apiProd && apiProd.id) {
+            foundScaleProd = {
+              id: apiProd.id,
+              name: apiProd.name,
+              barcode: apiProd.barcode || scaleInfo.sku,
+              salePriceUsd: parseFloat(apiProd.price) || 1.0,
+              taxRate: parseFloat(apiProd.taxRate) || 0,
+              isExempt: (apiProd.taxRate === 0),
+              stock: apiProd.stock || 50,
+              unitOfMeasure: apiProd.unit || 'kg',
+              category: 'Balanza',
+            };
+            ProductCacheService.upsertProduct(tenantId, {
+              id: apiProd.id,
+              name: apiProd.name,
+              barcode: apiProd.barcode || scaleInfo.sku,
+              price: parseFloat(apiProd.price) || 1.0,
+              taxRate: parseFloat(apiProd.taxRate) || 0,
+              stock: apiProd.stock || 50,
+              unit: apiProd.unit || 'kg',
+              isBulk: true,
+            });
+          }
+        } catch {
+          // Fallback offline
+        }
+      }
+
+      if (foundScaleProd) {
         addProduct({
-          id: partial.id,
-          name: partial.name,
-          barcode: partial.barcode,
-          salePriceUsd: partial.salePriceUsd,
-          taxRate: partial.taxRate,
-          isExempt: partial.isExempt,
-          unitOfMeasure: (partial as any).unitOfMeasure,
+          id: foundScaleProd.id,
+          name: foundScaleProd.name,
+          barcode: clean,
+          salePriceUsd: foundScaleProd.salePriceUsd,
+          taxRate: foundScaleProd.taxRate,
+          isExempt: foundScaleProd.isExempt,
+          unitOfMeasure: (foundScaleProd as any).unitOfMeasure || 'kg',
         });
-        setScanFeedbackMsg(`🔍 ${partial.name} añadido ($${partial.salePriceUsd.toFixed(2)} USD)`);
-      } else {
-        setScanFeedbackMsg(`⚠️ Código no registrado: ${clean}`);
+        if (scaleInfo.weightKg && scaleInfo.weightKg > 0) {
+          updateQuantity(foundScaleProd.id, scaleInfo.weightKg);
+        }
+        setScanFeedbackMsg(`⚖️ Balanza: ${foundScaleProd.name} (${scaleInfo.weightKg} kg)`);
+        try { Vibration.vibrate(80); } catch {}
+        return;
       }
     }
 
-    setTimeout(() => {
-      setIsScanPaused(false);
-    }, 1400);
+    // 2. Producto estándar: Buscar en Caché Local
+    let target = catalogProducts.find(
+      (p) => p.barcode === clean || p.barcode.toLowerCase() === clean.toLowerCase()
+    );
+
+    if (!target) {
+      const cached = ProductCacheService.findByBarcode(tenantId, clean);
+      if (cached) {
+        target = {
+          id: cached.id,
+          name: cached.name,
+          barcode: cached.barcode,
+          salePriceUsd: cached.price,
+          taxRate: cached.taxRate,
+          isExempt: cached.taxRate === 0,
+          stock: cached.stock,
+          unitOfMeasure: cached.unit,
+          category: 'Alimentos',
+        };
+      }
+    }
+
+    if (target) {
+      addProduct({
+        id: target.id,
+        name: target.name,
+        barcode: target.barcode,
+        salePriceUsd: target.salePriceUsd,
+        taxRate: target.taxRate,
+        isExempt: target.isExempt,
+        unitOfMeasure: (target as any).unitOfMeasure || 'unidad',
+      });
+      setScanFeedbackMsg(`✅ ${target.name} agregado ($${target.salePriceUsd.toFixed(2)})`);
+      try { Vibration.vibrate(80); } catch {}
+      return;
+    }
+
+    // 3. Si no está en caché local -> Consultar API
+    try {
+      const liveProd = await MobileApiService.findByBarcode(token, clean);
+      if (liveProd && liveProd.id) {
+        const mapped = {
+          id: liveProd.id,
+          name: liveProd.name,
+          barcode: liveProd.barcode || clean,
+          salePriceUsd: parseFloat(liveProd.price) || 1.0,
+          taxRate: parseFloat(liveProd.taxRate) || 0,
+          isExempt: liveProd.taxRate === 0,
+          stock: liveProd.stock || 50,
+          unitOfMeasure: liveProd.unit || 'unidad',
+          category: 'Alimentos',
+        };
+        setCatalogProducts((prev) => [...prev, mapped]);
+        ProductCacheService.upsertProduct(tenantId, {
+          id: liveProd.id,
+          name: liveProd.name,
+          barcode: liveProd.barcode || clean,
+          price: parseFloat(liveProd.price) || 1.0,
+          taxRate: parseFloat(liveProd.taxRate) || 0,
+          stock: liveProd.stock || 50,
+          unit: liveProd.unit || 'unidad',
+          isBulk: liveProd.isBulk || false,
+        });
+        addProduct({
+          id: mapped.id,
+          name: mapped.name,
+          barcode: mapped.barcode,
+          salePriceUsd: mapped.salePriceUsd,
+          taxRate: mapped.taxRate,
+          isExempt: mapped.isExempt,
+          unitOfMeasure: mapped.unitOfMeasure,
+        });
+        setScanFeedbackMsg(`🌐 ${mapped.name} cargado vía API ($${mapped.salePriceUsd.toFixed(2)})`);
+        try { Vibration.vibrate(80); } catch {}
+        return;
+      }
+    } catch {
+      setScanFeedbackMsg('⚠️ Modo offline: buscando solo en caché local');
+    }
+
+    // 4. Si no se encontró (404) -> Pausar escáner y Alert con opciones
+    setShowCameraScanner(false);
+    Alert.alert(
+      '⚠️ Producto No Encontrado',
+      `El código "${clean}" no está registrado en el inventario de ${user?.businessName || 'la tienda'}.`,
+      [
+        {
+          text: 'Continuar Escaneando',
+          style: 'cancel',
+          onPress: () => setShowCameraScanner(true),
+        },
+        {
+          text: 'Crear Producto Nuevo',
+          style: 'default',
+          onPress: () => {
+            setNewProductBarcode(clean);
+            setNewProductName('');
+            setNewProductPrice('1.00');
+            setNewProductStock('10');
+            setNewProductUnit('unidad');
+            setShowCreateProductModal(true);
+          },
+        },
+      ]
+    );
+  };
+
+  const handleSaveQuickProduct = async () => {
+    if (!newProductName.trim() || !newProductBarcode.trim()) {
+      Alert.alert('Datos Incompletos', 'Indique el nombre y código de barras.');
+      return;
+    }
+
+    setIsSavingProduct(true);
+    const tenantId = user?.tenantId || 'tenant_default';
+    const token = useAuthStore.getState().accessToken || 'system_token';
+    const priceNum = parseFloat(newProductPrice) || 1.0;
+    const stockNum = parseInt(newProductStock, 10) || 10;
+
+    const prodId = `prod_${Date.now()}`;
+    const newProd = {
+      id: prodId,
+      name: newProductName.trim(),
+      barcode: newProductBarcode.trim(),
+      salePriceUsd: priceNum,
+      taxRate: 0,
+      isExempt: true,
+      stock: stockNum,
+      unitOfMeasure: newProductUnit,
+      category: 'General',
+    };
+
+    try {
+      await MobileApiService.createProduct(token, {
+        name: newProd.name,
+        barcode: newProd.barcode,
+        salePriceUsd: newProd.salePriceUsd,
+        costPriceUsd: newProd.salePriceUsd * 0.7,
+        stock: newProd.stock,
+        unitOfMeasure: newProd.unitOfMeasure,
+        category: 'General',
+      });
+    } catch {
+      // Guardado local si el servidor no responde
+    }
+
+    setCatalogProducts((prev) => [...prev, newProd]);
+    ProductCacheService.upsertProduct(tenantId, {
+      id: prodId,
+      name: newProd.name,
+      barcode: newProd.barcode,
+      price: priceNum,
+      taxRate: 0,
+      stock: stockNum,
+      unit: newProductUnit,
+      isBulk: false,
+    });
+
+    addProduct({
+      id: newProd.id,
+      name: newProd.name,
+      barcode: newProd.barcode,
+      salePriceUsd: newProd.salePriceUsd,
+      taxRate: 0,
+      isExempt: true,
+      unitOfMeasure: newProd.unitOfMeasure,
+    });
+
+    setIsSavingProduct(false);
+    setShowCreateProductModal(false);
+    Alert.alert('✅ Producto Creado', `"${newProd.name}" se registró y se añadió al carrito.`);
   };
 
   // Formulario de Cliente Rápido con Búsqueda por C.I.
@@ -1023,119 +1227,112 @@ export const PosCheckoutScreen: React.FC = () => {
       </Modal>
 
       {/* MODAL: ESCÁNER CON CÁMARA FÍSICA DEL TELÉFONO (EXPO-CAMERA) */}
-      <Modal
+      <BarcodeScannerModal
         visible={showCameraScanner}
-        animationType="slide"
-        onRequestClose={() => setShowCameraScanner(false)}
-      >
-        <SafeAreaView style={styles.cameraModalContainer}>
-          <StatusBar barStyle="light-content" backgroundColor="#000000" />
+        onClose={() => setShowCameraScanner(false)}
+        onScanned={handleScannerBarcodeResult}
+        continuous={true}
+        title="Escáner POS Vuelto"
+      />
 
-          {/* Cabecera del Escáner */}
-          <View style={styles.cameraHeader}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.cameraHeaderTitle}>📷 Escáner de Código de Barras</Text>
-              <Text style={styles.cameraHeaderSubtitle}>Apunta la cámara del celular al código EAN-13, UPC o QR</Text>
-            </View>
-            <TouchableOpacity
-              style={styles.cameraCloseBtn}
-              onPress={() => setShowCameraScanner(false)}
-            >
-              <Text style={styles.cameraCloseBtnText}>✕ Cerrar</Text>
-            </TouchableOpacity>
-          </View>
+      {/* MINI-MODAL: CREACIÓN RÁPIDA DE PRODUCTO NO ENCONTRADO (404) */}
+      <Modal visible={showCreateProductModal} animationType="slide" transparent>
+        <View style={styles.quickProductOverlay}>
+          <View style={styles.quickProductCard}>
+            <Text style={styles.quickProductTitle}>📦 Crear Producto Nuevo</Text>
+            <Text style={styles.quickProductSubtitle}>
+              El código escaneado no existía. Regístrelo para agregarlo de inmediato:
+            </Text>
 
-          {/* Visor de Cámara con Retícula */}
-          <View style={styles.cameraViewWrapper}>
-            <CameraView
-              style={StyleSheet.absoluteFillObject}
-              facing="back"
-              enableTorch={torchEnabled}
-              barcodeScannerSettings={{
-                barcodeTypes: ['ean13', 'ean8', 'upc_a', 'upc_e', 'qr', 'code128', 'code39'],
-              }}
-              onBarcodeScanned={(result) => {
-                if (result.data) handleBarcodeScanned(result.data);
-              }}
+            <Text style={styles.fieldLabel}>Código de Barras:</Text>
+            <TextInput
+              style={[styles.input, { backgroundColor: '#1E293B', color: '#38BDF8' }]}
+              value={newProductBarcode}
+              onChangeText={setNewProductBarcode}
             />
 
-            {/* Guía Visual y Retícula Láser */}
-            <View style={styles.viewfinderOverlay}>
-              <View style={styles.viewfinderBox}>
-                <View style={[styles.cornerBracket, styles.topLeftBracket]} />
-                <View style={[styles.cornerBracket, styles.topRightBracket]} />
-                <View style={[styles.cornerBracket, styles.bottomLeftBracket]} />
-                <View style={[styles.cornerBracket, styles.bottomRightBracket]} />
-                <View style={styles.laserLine} />
+            <Text style={styles.fieldLabel}>Nombre del Producto (*):</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="ej. Queso Paisa 500g"
+              placeholderTextColor="#64748B"
+              value={newProductName}
+              onChangeText={setNewProductName}
+            />
+
+            <View style={{ flexDirection: 'row', gap: 10 }}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.fieldLabel}>Precio Venta ($):</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="1.00"
+                  placeholderTextColor="#64748B"
+                  keyboardType="numeric"
+                  value={newProductPrice}
+                  onChangeText={setNewProductPrice}
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.fieldLabel}>Stock Inicial:</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="10"
+                  placeholderTextColor="#64748B"
+                  keyboardType="numeric"
+                  value={newProductStock}
+                  onChangeText={setNewProductStock}
+                />
               </View>
             </View>
 
-            {/* Notificación Flotante de Escaneo Exitoso o Error */}
-            {scanFeedbackMsg && (
-              <View style={styles.scanFeedbackToast}>
-                <Text style={styles.scanFeedbackToastText}>{scanFeedbackMsg}</Text>
-              </View>
-            )}
-          </View>
+            <Text style={styles.fieldLabel}>Unidad de Medida:</Text>
+            <View style={{ flexDirection: 'row', gap: 6, marginVertical: 8, flexWrap: 'wrap' }}>
+              {['unidad', 'kg', 'paquete', 'L', 'botella'].map((u) => (
+                <TouchableOpacity
+                  key={u}
+                  style={[
+                    styles.unitChip,
+                    newProductUnit === u && styles.unitChipActive,
+                  ]}
+                  onPress={() => setNewProductUnit(u)}
+                >
+                  <Text style={[styles.unitChipText, newProductUnit === u && styles.unitChipTextActive]}>
+                    {u}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
 
-          {/* Controles del Escáner: Linterna, Resumen y Fallback */}
-          <View style={styles.cameraFooter}>
-            <View style={styles.cameraControlsRow}>
+            <View style={{ flexDirection: 'row', gap: 10, marginTop: 14 }}>
               <TouchableOpacity
-                style={[styles.torchToggleBtn, torchEnabled && styles.torchToggleBtnActive]}
-                onPress={() => setTorchEnabled(!torchEnabled)}
+                style={[styles.modalActionBtn, { backgroundColor: '#334155' }]}
+                onPress={() => setShowCreateProductModal(false)}
               >
-                <Text style={styles.torchToggleBtnText}>
-                  {torchEnabled ? '🔦 Linterna ENCENDIDA' : '💡 Encender Linterna'}
-                </Text>
+                <Text style={styles.modalActionBtnText}>Cancelar</Text>
               </TouchableOpacity>
 
-              <View style={styles.scannedCountBadge}>
-                <Text style={styles.scannedCountBadgeText}>
-                  En Carrito: {activeLines.length} unids (${getTotalUsd().toFixed(2)})
-                </Text>
-              </View>
-            </View>
-
-            {/* Entrada Manual de Fallback si el código está roto o borroso */}
-            <View style={styles.cameraManualRow}>
-              <TextInput
-                style={styles.cameraManualInput}
-                placeholder="¿Código dañado? Escribir número o nombre..."
-                placeholderTextColor="#64748B"
-                value={quickBarcodeInput}
-                onChangeText={setQuickBarcodeInput}
-                onSubmitEditing={() => {
-                  handleScanOrSearch();
-                  if (quickBarcodeInput.trim()) {
-                    setScanFeedbackMsg(`Búsqueda: ${quickBarcodeInput}`);
-                  }
-                }}
-              />
               <TouchableOpacity
-                style={styles.cameraManualBtn}
-                onPress={() => {
-                  handleScanOrSearch();
-                  if (quickBarcodeInput.trim()) {
-                    setScanFeedbackMsg(`Búsqueda: ${quickBarcodeInput}`);
-                  }
-                }}
+                style={[styles.modalActionBtn, { backgroundColor: '#00E599' }]}
+                onPress={handleSaveQuickProduct}
+                disabled={isSavingProduct}
               >
-                <Text style={styles.cameraManualBtnText}>Cargar</Text>
+                <Text style={[styles.modalActionBtnText, { color: '#002B1D', fontWeight: 'bold' }]}>
+                  {isSavingProduct ? 'Guardando...' : '✓ Guardar y Cargar'}
+                </Text>
               </TouchableOpacity>
             </View>
-
-            <TouchableOpacity
-              style={styles.cameraDoneBtn}
-              onPress={() => setShowCameraScanner(false)}
-            >
-              <Text style={styles.cameraDoneBtnText}>
-                ✓ Finalizar y Volver al Carrito ({activeLines.length} ítems)
-              </Text>
-            </TouchableOpacity>
           </View>
-        </SafeAreaView>
+        </View>
       </Modal>
+
+      {/* BOTÓN FLOTANTE FAB PARA ESCÁNER */}
+      <TouchableOpacity
+        style={styles.fabScannerBtn}
+        onPress={() => setShowCameraScanner(true)}
+        accessibilityLabel="Abrir escáner de cámara"
+      >
+        <Text style={styles.fabScannerText}>📷</Text>
+      </TouchableOpacity>
     </SafeAreaView>
   );
 };
@@ -1797,5 +1994,93 @@ const styles = StyleSheet.create({
     color: '#071F27',
     fontWeight: 'bold',
     fontSize: 14,
+  },
+  // Mini Modal de Creación Rápida
+  quickProductOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.85)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  quickProductCard: {
+    backgroundColor: '#0B3B49',
+    width: '100%',
+    maxWidth: 420,
+    borderRadius: 16,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: '#155E75',
+  },
+  quickProductTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#00E599',
+    marginBottom: 4,
+  },
+  quickProductSubtitle: {
+    fontSize: 12,
+    color: '#94A3B8',
+    marginBottom: 14,
+  },
+  fieldLabel: {
+    color: '#94A3B8',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 4,
+    marginTop: 6,
+  },
+  unitChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+    backgroundColor: '#062F3B',
+    borderWidth: 1,
+    borderColor: '#155E75',
+  },
+  unitChipActive: {
+    backgroundColor: '#00E599',
+    borderColor: '#00E599',
+  },
+  unitChipText: {
+    color: '#94A3B8',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  unitChipTextActive: {
+    color: '#002B1D',
+    fontWeight: 'bold',
+  },
+  modalActionBtn: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  modalActionBtnText: {
+    color: '#FFFFFF',
+    fontWeight: 'bold',
+    fontSize: 13,
+  },
+  // Botón Flotante FAB
+  fabScannerBtn: {
+    position: 'absolute',
+    bottom: 24,
+    right: 20,
+    width: 62,
+    height: 62,
+    borderRadius: 31,
+    backgroundColor: '#00E599',
+    justifyContent: 'center',
+    alignItems: 'center',
+    elevation: 8,
+    shadowColor: '#00E599',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.45,
+    shadowRadius: 8,
+    zIndex: 999,
+  },
+  fabScannerText: {
+    fontSize: 28,
   },
 });

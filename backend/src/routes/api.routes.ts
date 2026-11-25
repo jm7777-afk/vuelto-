@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireTenantAuth } from '../middlewares/tenant.middleware.js';
 import { requireRoles, requireAdmin, requireCashierOrAdmin } from '../middlewares/rbac.middleware.js';
 import { validateRequest } from '../middlewares/validate.middleware.js';
+import { barcodeLookupRateLimiter } from '../middlewares/rate-limit.middleware.js';
 import {
   quickCustomerSchema,
   createCustomerSchema,
@@ -75,7 +76,8 @@ apiRouter.use(requireTenantAuth);
 apiRouter.post('/payments/c2p/intent', PaymentController.createIntent);
 
 // --- PRODUCTOS Y ESCÁNER ---
-apiRouter.get('/products/barcode/:barcode', ProductController.findByBarcode);
+apiRouter.get('/products/by-barcode/:barcode', barcodeLookupRateLimiter, ProductController.findByBarcode);
+apiRouter.get('/products/barcode/:barcode', barcodeLookupRateLimiter, ProductController.findByBarcode);
 apiRouter.get('/products', ProductController.list);
 apiRouter.post('/products', requireAdmin, validateRequest({ body: createProductSchema }), ProductController.create);
 apiRouter.post('/products/apply-global-margin', requireAdmin, ProductController.applyGlobalMargin);
