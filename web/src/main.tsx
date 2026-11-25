@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ReactDOM from 'react-dom/client';
 import { initWebSentry } from './config/sentry';
-
-initWebSentry();
+import { ErrorBoundary } from './components/ErrorBoundary';
 import {
   TrendingUp,
   Package,
@@ -70,6 +69,8 @@ import type {
   PosCartLine,
   PosTicket,
 } from './types';
+
+initWebSentry();
 
 const DEFAULT_BCV_RATE = 919.82;
 
@@ -1173,10 +1174,70 @@ export const App: React.FC = () => {
   const totalOtherIncomeUsd = financialTransactionsList.filter((t) => t.type === 'INGRESO').reduce((acc, t) => acc + t.amountUsd, 0);
   const netProfitUsd = totalGrossSalesUsd + totalOtherIncomeUsd - totalExpensesUsd;
 
-  // Login handler con soporte completo para Súper Admin, Admin y Vendedor
-  const handleLogin = (roleToSet?: 'SUPER_ADMIN' | 'ADMIN' | 'VENDEDOR') => {
+  // Login handler con soporte para API real, JWT persistente y fallback de desarrollo
+  const handleLogin = async (roleToSet?: 'SUPER_ADMIN' | 'ADMIN' | 'VENDEDOR') => {
+    setLoginError('');
+    setLoginLoading(true);
+
     let userRole = roleToSet;
     let uName = usernameInput.trim();
+    const pass = passwordInput;
+
+    try {
+      if (uName && pass) {
+        const res = await fetch('/api/v1/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: uName, password: pass }),
+        });
+
+        if (res.ok) {
+          const authData = await res.json();
+          if (authData.accessToken) {
+            localStorage.setItem('vuelto_token', authData.accessToken);
+            if (authData.refreshToken) {
+              localStorage.setItem('vuelto_refresh_token', authData.refreshToken);
+            }
+          }
+
+          const roleFromBackend =
+            authData.user?.roleId === 'SUPERADMIN' || authData.user?.roleId === 'SUPER_ADMIN'
+              ? 'SUPER_ADMIN'
+              : authData.user?.roleId === 'VENDEDOR' || authData.user?.roleId === 'CASHIER'
+              ? 'VENDEDOR'
+              : 'ADMIN';
+
+          const loggedProfile: UserProfile = {
+            id: authData.user?.id || '00000000-0000-0000-0000-000000000001',
+            tenantId: authData.user?.tenantId || 'a0000000-0000-0000-0000-000000000001',
+            username: authData.user?.username || uName,
+            fullName: authData.user?.fullName || uName,
+            roleId: roleFromBackend,
+            businessName: authData.user?.businessName || (roleFromBackend === 'SUPER_ADMIN' ? 'Plataforma Global Vuelto SaaS' : 'Inversiones Bodega Central C.A.'),
+          };
+
+          setUser(loggedProfile);
+          setUserRoleMode(roleFromBackend);
+          localStorage.setItem('vuelto_user_session', JSON.stringify(loggedProfile));
+          setActiveTab(roleFromBackend === 'SUPER_ADMIN' ? 'SUPER_ADMIN' : roleFromBackend === 'VENDEDOR' ? 'POS' : 'METRICS');
+          setLoginLoading(false);
+          return;
+        } else {
+          const errData = await res.json().catch(() => ({}));
+          if (res.status === 423) {
+            setLoginError('Cuenta temporalmente bloqueada por 5 intentos fallidos. Espere 15 minutos.');
+            setLoginLoading(false);
+            return;
+          } else if (res.status === 400 || res.status === 401) {
+            setLoginError(errData.message || 'Usuario o contraseña incorrectos.');
+            setLoginLoading(false);
+            return;
+          }
+        }
+      }
+    } catch {
+      // Fallback si la API no está accesible directamente
+    }
 
     if (!userRole) {
       if (uName === 'superadmin') userRole = 'SUPER_ADMIN';
@@ -1196,7 +1257,7 @@ export const App: React.FC = () => {
           ? '8cb3bb66-6b60-4966-9bc6-e8220f122557'
           : '24a8eccf-b45e-4d5a-ac01-b44b77198c10',
       tenantId: 'a0000000-0000-0000-0000-000000000001',
-      username: uName,
+      username: uName || 'admin',
       fullName:
         userRole === 'SUPER_ADMIN'
           ? 'Súper Administrador Global'
@@ -1214,11 +1275,17 @@ export const App: React.FC = () => {
     setUserRoleMode(userRole);
     localStorage.setItem('vuelto_user_session', JSON.stringify(loggedProfile));
     setActiveTab(userRole === 'SUPER_ADMIN' ? 'SUPER_ADMIN' : userRole === 'VENDEDOR' ? 'POS' : 'METRICS');
+    setLoginLoading(false);
   };
 
   const handleLogout = () => {
     setUser(null);
     localStorage.removeItem('vuelto_user_session');
+    localStorage.removeItem('vuelto_token');
+    localStorage.removeItem('vuelto_refresh_token');
+    setUsernameInput('');
+    setPasswordInput('');
+    setLoginError('');
   };
 
   // Guardar Producto
@@ -2249,10 +2316,18 @@ export const App: React.FC = () => {
           </div>
 
           <form onSubmit={(e) => { e.preventDefault(); handleLogin(); }} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            {loginError && (
+              <div style={{ padding: '12px', borderRadius: '10px', backgroundColor: 'rgba(239, 68, 68, 0.15)', border: '1px solid #EF4444', color: '#FCA5A5', fontSize: '13px', textAlign: 'center', lineHeight: '1.4' }}>
+                {loginError}
+              </div>
+            )}
+
             <div>
               <label style={{ display: 'block', fontSize: '12px', color: '#CBD5E1', marginBottom: '6px', fontWeight: '600' }}>Usuario</label>
               <input
                 type="text"
+                autoComplete="username"
+                placeholder="Ej. superadmin, admin o cajero1"
                 value={usernameInput}
                 onChange={(e) => setUsernameInput(e.target.value)}
                 style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid #334155', backgroundColor: '#062F3B', color: '#FFFFFF', fontSize: '14px', outline: 'none' }}
@@ -2263,6 +2338,8 @@ export const App: React.FC = () => {
               <label style={{ display: 'block', fontSize: '12px', color: '#CBD5E1', marginBottom: '6px', fontWeight: '600' }}>Contraseña</label>
               <input
                 type="password"
+                autoComplete="current-password"
+                placeholder="••••••••"
                 value={passwordInput}
                 onChange={(e) => setPasswordInput(e.target.value)}
                 style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid #334155', backgroundColor: '#062F3B', color: '#FFFFFF', fontSize: '14px', outline: 'none' }}
@@ -2271,9 +2348,22 @@ export const App: React.FC = () => {
 
             <button
               type="submit"
-              style={{ width: '100%', padding: '14px', borderRadius: '8px', border: 'none', backgroundColor: '#0284C7', color: '#FFFFFF', fontWeight: 'bold', fontSize: '14px', cursor: 'pointer', marginTop: '6px' }}
+              disabled={loginLoading}
+              style={{
+                width: '100%',
+                padding: '14px',
+                borderRadius: '8px',
+                border: 'none',
+                backgroundColor: loginLoading ? '#0369A1' : '#0284C7',
+                color: '#FFFFFF',
+                fontWeight: 'bold',
+                fontSize: '14px',
+                cursor: loginLoading ? 'wait' : 'pointer',
+                marginTop: '6px',
+                transition: 'background-color 0.2s',
+              }}
             >
-              Iniciar Sesión
+              {loginLoading ? 'Iniciando sesión...' : 'Iniciar Sesión'}
             </button>
           </form>
 
@@ -6175,6 +6265,8 @@ export const App: React.FC = () => {
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <App />
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
   </React.StrictMode>
 );
