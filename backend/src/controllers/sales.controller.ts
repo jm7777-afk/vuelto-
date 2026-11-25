@@ -237,35 +237,37 @@ export class SalesController {
       const tenantId = req.tenantId!;
       const limit = parseInt(req.query.limit as string, 10) || 50;
 
-      const salesList = await db
-        .select({
-          id: sales.id,
-          invoiceSeries: sales.invoiceSeries,
-          invoiceNumber: sales.invoiceNumber,
-          invoiceFormattedNumber: sales.invoiceFormattedNumber,
-          rateValue: sales.rateValue,
-          taxableBase16Usd: sales.taxableBase16Usd,
-          taxableBase8Usd: sales.taxableBase8Usd,
-          exemptAmountUsd: sales.exemptAmountUsd,
-          taxAmount16Usd: sales.taxAmount16Usd,
-          taxAmount8Usd: sales.taxAmount8Usd,
-          igtfAmountUsd: sales.igtfAmountUsd,
-          totalAmountUsd: sales.totalAmountUsd,
-          totalAmountBs: sales.totalAmountBs,
-          status: sales.status,
-          fiscalStatus: sales.fiscalStatus,
-          createdAt: sales.createdAt,
-          customerId: sales.customerId,
-          userId: sales.userId,
-          customerName: customers.name,
-          customerDocType: customers.documentType,
-          customerDocNumber: customers.documentNumber,
-        })
-        .from(sales)
-        .leftJoin(customers, eq(sales.customerId, customers.id))
-        .where(eq(sales.tenantId, tenantId))
-        .orderBy(desc(sales.createdAt))
-        .limit(limit);
+      const salesList = await withTenant(tenantId, async (tx) => {
+        return tx
+          .select({
+            id: sales.id,
+            invoiceSeries: sales.invoiceSeries,
+            invoiceNumber: sales.invoiceNumber,
+            invoiceFormattedNumber: sales.invoiceFormattedNumber,
+            rateValue: sales.rateValue,
+            taxableBase16Usd: sales.taxableBase16Usd,
+            taxableBase8Usd: sales.taxableBase8Usd,
+            exemptAmountUsd: sales.exemptAmountUsd,
+            taxAmount16Usd: sales.taxAmount16Usd,
+            taxAmount8Usd: sales.taxAmount8Usd,
+            igtfAmountUsd: sales.igtfAmountUsd,
+            totalAmountUsd: sales.totalAmountUsd,
+            totalAmountBs: sales.totalAmountBs,
+            status: sales.status,
+            fiscalStatus: sales.fiscalStatus,
+            createdAt: sales.createdAt,
+            customerId: sales.customerId,
+            userId: sales.userId,
+            customerName: customers.name,
+            customerDocType: customers.documentType,
+            customerDocNumber: customers.documentNumber,
+          })
+          .from(sales)
+          .leftJoin(customers, eq(sales.customerId, customers.id))
+          .where(eq(sales.tenantId, tenantId))
+          .orderBy(desc(sales.createdAt))
+          .limit(limit);
+      });
 
       res.json(salesList);
     } catch (err) {
@@ -276,46 +278,54 @@ export class SalesController {
   static async getById(req: Request, res: Response, next: NextFunction) {
     try {
       const saleId = String(req.params.id);
-      const [sale] = await db
-        .select()
-        .from(sales)
-        .where(and(eq(sales.tenantId, req.tenantId!), eq(sales.id, saleId)))
-        .limit(1);
+      const tenantId = req.tenantId!;
 
-      if (!sale) {
+      const result = await withTenant(tenantId, async (tx) => {
+        const [sale] = await tx
+          .select()
+          .from(sales)
+          .where(and(eq(sales.tenantId, tenantId), eq(sales.id, saleId)))
+          .limit(1);
+
+        if (!sale) return null;
+
+        const lines = await tx
+          .select({
+            id: saleLines.id,
+            productId: saleLines.productId,
+            productName: products.name,
+            sku: products.sku,
+            quantity: saleLines.quantity,
+            unitPriceUsd: saleLines.unitPriceUsd,
+            subtotalUsd: saleLines.subtotalUsd,
+            taxRate: saleLines.taxRate,
+            taxAmountUsd: saleLines.taxAmountUsd,
+            totalUsd: saleLines.totalUsd,
+            totalBs: saleLines.totalBs,
+          })
+          .from(saleLines)
+          .innerJoin(products, eq(saleLines.productId, products.id))
+          .where(eq(saleLines.saleId, sale.id));
+
+        const [customer] = await tx
+          .select()
+          .from(customers)
+          .where(eq(customers.id, sale.customerId))
+          .limit(1);
+
+        return {
+          ...sale,
+          customer: customer || null,
+          lines,
+        };
+      });
+
+      if (!result) {
         res.status(404).json({ code: 'SALE_NOT_FOUND', message: 'Venta no encontrada' });
         return;
       }
 
-      const lines = await db
-        .select({
-          id: saleLines.id,
-          productId: saleLines.productId,
-          productName: products.name,
-          sku: products.sku,
-          quantity: saleLines.quantity,
-          unitPriceUsd: saleLines.unitPriceUsd,
-          subtotalUsd: saleLines.subtotalUsd,
-          taxRate: saleLines.taxRate,
-          taxAmountUsd: saleLines.taxAmountUsd,
-          totalUsd: saleLines.totalUsd,
-          totalBs: saleLines.totalBs,
-        })
-        .from(saleLines)
-        .innerJoin(products, eq(saleLines.productId, products.id))
-        .where(eq(saleLines.saleId, sale.id));
-
-      const [customer] = await db
-        .select()
-        .from(customers)
-        .where(eq(customers.id, sale.customerId))
-        .limit(1);
-
-      res.json({
-        ...sale,
-        customer,
-        lines,
-      });
+      res.json(result);
     } catch (err) {
       next(err);
     }

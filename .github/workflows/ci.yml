@@ -1,0 +1,103 @@
+name: CI / CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-typecheck:
+    name: Lint & Typecheck (Strict TypeScript)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: |
+            backend/package.json
+            web/package.json
+            mobile/package.json
+
+      - name: Install Dependencies
+        run: |
+          npm --prefix backend ci
+          npm --prefix web ci
+          npm --prefix mobile ci --legacy-peer-deps
+
+      - name: Typecheck Backend
+        run: npm --prefix backend run build
+
+      - name: Typecheck Web Admin
+        run: npx --prefix web tsc -p web/tsconfig.json --noEmit
+
+      - name: Typecheck Mobile POS
+        run: npx --prefix mobile tsc -p mobile/tsconfig.json --noEmit
+
+  test-backend:
+    name: Backend Test Suite & Multi-Tenant Isolation
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgrespassword
+          POSTGRES_DB: vuelto_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Backend Dependencies
+        run: npm --prefix backend ci
+
+      - name: Run Database Migrations & Seeds
+        env:
+          DATABASE_URL: postgres://postgres:postgrespassword@localhost:5432/vuelto_test
+          NODE_ENV: test
+        run: npm --prefix backend run db:migrate
+
+      - name: Run Vitest Suite (RLS & Security Hardened)
+        env:
+          DATABASE_URL: postgres://postgres:postgrespassword@localhost:5432/vuelto_test
+          NODE_ENV: test
+          JWT_SECRET: test-super-secret-jwt-key-2026-min-32-chars!
+          JWT_REFRESH_SECRET: test-super-secret-refresh-key-2026-min-32-chars!
+          ENCRYPTION_KEY: test-256-bit-aes-key-for-totp-secrets-32ch!
+        run: npm --prefix backend test
+
+  build-web:
+    name: Build Web Admin SPA
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Web Dependencies
+        run: npm --prefix web ci
+
+      - name: Build Web Production Assets
+        run: npm --prefix web run build

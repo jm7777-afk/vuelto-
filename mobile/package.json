@@ -8,6 +8,7 @@
     "ios": "expo run:ios"
   },
   "dependencies": {
+    "@sentry/react-native": "^8.36.0",
     "expo": "~52.0.0",
     "expo-asset": "~11.0.5",
     "expo-camera": "^16.0.18",

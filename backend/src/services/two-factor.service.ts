@@ -19,7 +19,7 @@ export class TwoFactorService {
    */
   static encryptSecret(plainSecret: string): string {
     const iv = crypto.randomBytes(12);
-    const cipher = crypto.createCipheriv(this.algorithm, this.getKey(), iv);
+    const cipher = crypto.createCipheriv(this.algorithm, this.getKey(), iv) as crypto.CipherGCM;
     let encrypted = cipher.update(plainSecret, 'utf8', 'hex');
     encrypted += cipher.final('hex');
     const authTag = cipher.getAuthTag().toString('hex');
@@ -39,7 +39,7 @@ export class TwoFactorService {
       this.algorithm,
       this.getKey(),
       Buffer.from(ivHex, 'hex')
-    );
+    ) as crypto.DecipherGCM;
     decipher.setAuthTag(Buffer.from(authTagHex, 'hex'));
     let decrypted = decipher.update(encryptedHex, 'hex', 'utf8');
     decrypted += decipher.final('utf8');

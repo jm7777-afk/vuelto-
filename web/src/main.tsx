@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ReactDOM from 'react-dom/client';
+import { initWebSentry } from './config/sentry';
+
+initWebSentry();
 import {
   TrendingUp,
   Package,

@@ -6,9 +6,15 @@ import path from 'path';
 import fs from 'fs';
 import { env } from './config/env.js';
 import { apiRouter } from './routes/api.routes.js';
+import { healthRouter } from './routes/health.routes.js';
 import { errorHandler } from './middlewares/error.middleware.js';
 import { globalRateLimiter } from './middlewares/rate-limit.middleware.js';
-import { pool } from './db/index.js';
+import { correlationAndLoggingMiddleware } from './middlewares/logging.middleware.js';
+import { MetricsService } from './services/metrics.service.js';
+import { initBackendSentry } from './config/sentry.js';
+
+// Inicializar Sentry si DSN está provisto
+initBackendSentry();
 
 export const createApp = () => {
   const app = express();
@@ -16,7 +22,10 @@ export const createApp = () => {
   // 1. Trust proxy: Configurado para reverse proxy de Render / Cloudflare
   app.set('trust proxy', 1);
 
-  // 2. Helmet con configuración de Content Security Policy (CSP), HSTS y headers de seguridad
+  // 2. Correlation ID y logging estructurado de observabilidad (Pino + Métricas)
+  app.use(correlationAndLoggingMiddleware);
+
+  // 3. Helmet con configuración de Content Security Policy (CSP), HSTS y headers de seguridad
   app.use(
     helmet({
       contentSecurityPolicy: {
@@ -32,7 +41,7 @@ export const createApp = () => {
     })
   );
 
-  // 3. CORS con allowlist configurable por env ALLOWED_ORIGINS
+  // 4. CORS con allowlist configurable por env ALLOWED_ORIGINS
   const allowedOriginsList = env.ALLOWED_ORIGINS.split(',').map((o) => o.trim());
   app.use(
     cors({
@@ -50,17 +59,18 @@ export const createApp = () => {
       },
       credentials: true,
       methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-tenant-id'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-tenant-id', 'X-Request-Id'],
+      exposedHeaders: ['X-Request-Id'],
     })
   );
 
-  // 4. Rate Limiter Global (300 req / 15 min por IP)
+  // 5. Rate Limiter Global (300 req / 15 min por IP)
   app.use('/api', globalRateLimiter);
 
-  // 5. Compresión gzip
+  // 6. Compresión gzip
   app.use(compression());
 
-  // 6. Parser JSON estricto con límite máximo de 1MB y captura de rawBody para firmas HMAC
+  // 7. Parser JSON estricto con límite máximo de 1MB y captura de rawBody para firmas HMAC
   app.use(
     express.json({
       limit: '1mb',
@@ -70,36 +80,33 @@ export const createApp = () => {
     })
   );
 
-  // Healthcheck con validación en vivo de Base de Datos
-  app.get('/health', async (_req, res) => {
-    try {
-      const client = await pool.connect();
-      await client.query('SELECT 1');
-      client.release();
+  // 8. Endpoints de Diagnóstico y Salud (Liveness / Readiness / Deep)
+  app.use('/health', healthRouter);
 
-      res.json({
-        status: 'ok',
-        service: 'vuelto-api',
-        database: 'connected',
-        timestamp: new Date().toISOString(),
-        uptime: process.uptime(),
-      });
-    } catch (err: any) {
-      res.status(503).json({
-        status: 'degraded',
-        service: 'vuelto-api',
-        database: 'disconnected',
-        error: err.message,
-        timestamp: new Date().toISOString(),
-        uptime: process.uptime(),
-      });
+  // 9. Endpoint de Métricas Prometheus (/metrics)
+  app.get('/metrics', async (req, res, next) => {
+    try {
+      const token = req.query.token || req.headers['x-metrics-token'] || req.headers.authorization?.replace('Bearer ', '');
+      const configuredToken = process.env.METRICS_TOKEN || 'vuelto-metrics-token-2026';
+
+      // En producción exigir token de métricas; en dev/test permitir acceso
+      if (env.NODE_ENV === 'production' && token !== configuredToken) {
+        res.status(403).json({ error: 'FORBIDDEN', message: 'Token de métricas inválido o ausente' });
+        return;
+      }
+
+      res.setHeader('Content-Type', MetricsService.getContentType());
+      const metricsData = await MetricsService.getMetrics();
+      res.send(metricsData);
+    } catch (err) {
+      next(err);
     }
   });
 
-  // Rutas de API v1
+  // 10. Rutas de Dominio API v1
   app.use('/api/v1', apiRouter);
 
-  // Servir frontend web de administración (SPA)
+  // 11. Servir frontend web de administración (SPA)
   const publicDir = fs.existsSync(path.resolve(__dirname, '../public'))
     ? path.resolve(__dirname, '../public')
     : path.resolve(process.cwd(), 'public');
@@ -107,14 +114,14 @@ export const createApp = () => {
   if (fs.existsSync(publicDir)) {
     app.use(express.static(publicDir));
     app.use((req, res, next) => {
-      if (req.method === 'GET' && !req.path.startsWith('/api') && !req.path.startsWith('/health')) {
+      if (req.method === 'GET' && !req.path.startsWith('/api') && !req.path.startsWith('/health') && !req.path.startsWith('/metrics')) {
         return res.sendFile(path.join(publicDir, 'index.html'));
       }
       next();
     });
   }
 
-  // Manejador centralizado de errores
+  // 12. Manejador centralizado de errores
   app.use(errorHandler);
 
   return app;

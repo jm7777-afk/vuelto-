@@ -1,5 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { View, StyleSheet, Text, ActivityIndicator } from 'react-native';
+import { initMobileSentry } from './src/config/sentry';
+
+initMobileSentry();
 import { StatusBar } from 'expo-status-bar';
 import * as FileSystem from 'expo-file-system';
 import { MobileUserProfile, useAuthStore } from './src/stores/auth.store';
