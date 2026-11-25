@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import express, { Request, Response } from 'express';
 import { createApp } from '../src/app.js';
@@ -134,5 +134,148 @@ describe('Multi-Tenant Isolation & RBAC Security', () => {
       .set('Authorization', `Bearer ${tokenAdmin}`);
     expect(res.status).toBe(200);
     expect(res.body.authorized).toBe(true);
+  });
+
+  describe('3.3 Aislamiento Cross-Tenant en Base de Datos & API Endpoints', () => {
+    let dbTenantA: string;
+    let dbTenantB: string;
+    let tokenDbA: string;
+    let tokenDbB: string;
+    const barcodeA = `759${Math.floor(1000000000 + Math.random() * 9000000000)}`;
+
+    beforeAll(async () => {
+      const { db } = await import('../src/db/index.js');
+      const { tenants, products, productBarcodes, users } = await import('../src/db/schema.js');
+
+      // Crear dos tenants reales
+      const [tA] = await db
+        .insert(tenants)
+        .values({
+          slug: `tenant-a-${Date.now()}`,
+          businessName: 'Tienda Alpha C.A.',
+          tradeName: 'Tienda Alpha',
+          documentType: 'J',
+          documentNumber: `${Math.floor(100000000 + Math.random() * 900000000)}`,
+          fiscalAddress: 'Caracas',
+          phone: '04141112233',
+          email: `alpha_${Date.now()}@vuelto.app`,
+        })
+        .returning();
+      dbTenantA = tA.id;
+
+      const [tB] = await db
+        .insert(tenants)
+        .values({
+          slug: `tenant-b-${Date.now()}`,
+          businessName: 'Tienda Beta C.A.',
+          tradeName: 'Tienda Beta',
+          documentType: 'J',
+          documentNumber: `${Math.floor(100000000 + Math.random() * 900000000)}`,
+          fiscalAddress: 'Valencia',
+          phone: '04144445566',
+          email: `beta_${Date.now()}@vuelto.app`,
+        })
+        .returning();
+      dbTenantB = tB.id;
+
+      tokenDbA = JwtService.generateTokenPair({
+        id: 'user-db-a',
+        tenantId: dbTenantA,
+        roleId: 'ADMIN',
+        username: 'admin_alpha',
+        fullName: 'Admin Alpha',
+      }).accessToken;
+
+      tokenDbB = JwtService.generateTokenPair({
+        id: 'user-db-b',
+        tenantId: dbTenantB,
+        roleId: 'ADMIN',
+        username: 'admin_beta',
+        fullName: 'Admin Beta',
+      }).accessToken;
+
+      // Insertar producto exclusivo de Tenant A
+      const [prodA] = await db
+        .insert(products)
+        .values({
+          tenantId: dbTenantA,
+          name: 'Producto Secreto Tenant A',
+          salePriceUsd: 12.5,
+          costPriceUsd: 8.0,
+          taxRate: 16.0,
+        })
+        .returning();
+
+      await db.insert(productBarcodes).values({
+        tenantId: dbTenantA,
+        productId: prodA.id,
+        barcode: barcodeA,
+        barcodeType: 'EAN13',
+        isPrimary: true,
+      });
+    });
+
+    afterAll(async () => {
+      try {
+        const { db } = await import('../src/db/index.js');
+        const { tenants, products, productBarcodes } = await import('../src/db/schema.js');
+        const { eq } = await import('drizzle-orm');
+
+        await db.delete(productBarcodes).where(eq(productBarcodes.tenantId, dbTenantA));
+        await db.delete(products).where(eq(products.tenantId, dbTenantA));
+        await db.delete(tenants).where(eq(tenants.id, dbTenantA));
+        await db.delete(tenants).where(eq(tenants.id, dbTenantB));
+      } catch {}
+    });
+
+    it('Tenant B no puede ver productos de Tenant A en listado GET /products', async () => {
+      const res = await request(app)
+        .get('/api/v1/products')
+        .set('Authorization', `Bearer ${tokenDbB}`);
+
+      expect(res.status).toBe(200);
+      const names = (res.body.products || []).map((p: any) => p.name);
+      expect(names).not.toContain('Producto Secreto Tenant A');
+    });
+
+    it('Tenant B no puede consultar por código de barras el producto de Tenant A (404)', async () => {
+      const res = await request(app)
+        .get(`/api/v1/products/by-barcode/${barcodeA}`)
+        .set('Authorization', `Bearer ${tokenDbB}`);
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('PRODUCT_NOT_FOUND');
+    });
+
+    it('Intento de inyección cross-tenant en creación: tenant_id malicioso es ignorado o sanitizado', async () => {
+      const res = await request(app)
+        .post('/api/v1/products')
+        .set('Authorization', `Bearer ${tokenDbB}`)
+        .send({
+          name: 'Producto de Tenant B con inyeccion',
+          salePriceUsd: 5.0,
+          tenantId: dbTenantA, // Intento de inyectar en Tenant A
+          tenant_id: dbTenantA,
+        });
+
+      // Zod .strict() rechaza campos no permitidos (400) o se crea en Tenant B sin leak
+      if (res.status === 200 || res.status === 201) {
+        const createdProduct = res.body.product || res.body;
+        expect(createdProduct.tenantId).toBe(dbTenantB);
+      } else {
+        expect(res.status).toBe(400);
+      }
+    });
+
+    it('Aislamiento de auditoría: Tenant B no ve registros de Tenant A en GET /api/v1/audit', async () => {
+      const res = await request(app)
+        .get('/api/v1/audit')
+        .set('Authorization', `Bearer ${tokenDbB}`);
+
+      expect(res.status).toBe(200);
+      for (const log of res.body.logs || []) {
+        expect(log.tenantId).toBe(dbTenantB);
+      }
+    });
   });
 });

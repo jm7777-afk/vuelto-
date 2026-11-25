@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { requireTenantAuth } from '../middlewares/tenant.middleware.js';
 import { requireRoles, requireAdmin, requireCashierOrAdmin } from '../middlewares/rbac.middleware.js';
 import { validateRequest } from '../middlewares/validate.middleware.js';
-import { barcodeLookupRateLimiter } from '../middlewares/rate-limit.middleware.js';
+import { barcodeLookupRateLimiter, authRateLimiter } from '../middlewares/rate-limit.middleware.js';
 import {
   quickCustomerSchema,
   createCustomerSchema,
@@ -34,7 +34,8 @@ import { FiscalReportService } from '../services/fiscal-report.service.js';
 export const apiRouter = Router();
 
 // --- AUTENTICACIÓN PÚBLICA ---
-apiRouter.post('/auth/login', AuthController.login);
+apiRouter.post('/auth/login', authRateLimiter, AuthController.login);
+apiRouter.post('/auth/refresh', AuthController.refresh);
 
 // --- TASAS DE CAMBIO (Público / Monitor BCV, Paralelo, Euro, USDT) ---
 apiRouter.get('/exchange-rates/live', async (_req, res, next) => {
@@ -216,6 +217,9 @@ apiRouter.get('/exchange-rates/active', requireCashierOrAdmin, ConfigController.
 apiRouter.post('/exchange-rates/select-active', requireAdmin, ConfigController.selectActiveRate);
 
 // --- AUDITORÍA INMUTABLE Y RESPALDOS (BACKUPS) ---
+apiRouter.post('/auth/2fa/generate', AuthController.generate2FA);
+apiRouter.post('/auth/2fa/enable', AuthController.enable2FA);
+apiRouter.get('/audit', requireAdmin, AuditController.listLogs);
 apiRouter.get('/audit/logs', requireAdmin, AuditController.listLogs);
 apiRouter.get('/admin/backup', requireAdmin, AuditController.downloadBackup);
 

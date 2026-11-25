@@ -31,8 +31,64 @@ export async function runMigrationAndSeed() {
         ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS entity_type VARCHAR(50);
         ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS old_values JSONB;
         ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS new_values JSONB;
+        ALTER TABLE audit_logs DROP CONSTRAINT IF EXISTS audit_logs_user_id_fkey;
       `);
       console.log('✓ Tablas y columnas de seguridad verificadas en PostgreSQL');
+
+      // 0b. Habilitación de Row-Level Security (RLS) en todas las tablas multi-tenant
+      const rlsTables = [
+        'users',
+        'categories',
+        'warehouses',
+        'products',
+        'product_barcodes',
+        'inventory_movements',
+        'product_stock',
+        'customers',
+        'suppliers',
+        'customer_contacts',
+        'contact_interactions',
+        'exchange_rate_snapshots',
+        'invoice_sequences',
+        'sales',
+        'sale_lines',
+        'payments',
+        'change_vouchers',
+        'idempotency_keys',
+        'audit_logs',
+        'tenant_configurations',
+        'purchase_orders',
+        'receivable_payments',
+        'financial_transactions',
+      ];
+
+      for (const table of rlsTables) {
+        try {
+          await client.query(`
+            ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY;
+            ALTER TABLE ${table} FORCE ROW LEVEL SECURITY;
+            DROP POLICY IF EXISTS tenant_isolation ON ${table};
+            CREATE POLICY tenant_isolation ON ${table}
+              AS PERMISSIVE
+              FOR ALL
+              USING (
+                current_setting('app.is_super_admin', true) = 'true'
+                OR current_setting('app.current_tenant_id', true) IS NULL
+                OR current_setting('app.current_tenant_id', true) = ''
+                OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::uuid
+              )
+              WITH CHECK (
+                current_setting('app.is_super_admin', true) = 'true'
+                OR current_setting('app.current_tenant_id', true) IS NULL
+                OR current_setting('app.current_tenant_id', true) = ''
+                OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::uuid
+              );
+          `);
+        } catch (tableErr: any) {
+          console.warn(`Aviso en configuración RLS para ${table}:`, tableErr.message);
+        }
+      }
+      console.log('✓ Políticas Row-Level Security (RLS) aplicadas a tablas multi-tenant');
     } finally {
       client.release();
     }

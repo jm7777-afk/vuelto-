@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { SalesService } from '../services/sales.service.js';
 import { ReceiptService } from '../services/receipt.service.js';
 import { AuditService } from '../services/audit.service.js';
-import { db } from '../db/index.js';
+import { withTenant } from '../db/tenantDb.js';
 import { sales, saleLines, customers, tenants, products } from '../db/schema.js';
 import { eq, and, desc } from 'drizzle-orm';
 
@@ -88,32 +88,43 @@ export class SalesController {
       const tenantId = req.tenantId!;
       const saleId = String(req.params.id);
 
-      // Obtener venta con tenant, cliente y líneas
-      const [sale] = await db
-        .select()
-        .from(sales)
-        .where(and(eq(sales.tenantId, tenantId), eq(sales.id, saleId)));
+      // Obtener venta con tenant, cliente y líneas dentro del sandbox RLS
+      const { sale, tenant, customer, lines } = await withTenant(tenantId, async (tx) => {
+        const [saleRecord] = await tx
+          .select()
+          .from(sales)
+          .where(and(eq(sales.tenantId, tenantId), eq(sales.id, saleId)));
+
+        if (!saleRecord) return { sale: null, tenant: null, customer: null, lines: [] };
+
+        const [tenantRecord] = await tx.select().from(tenants).where(eq(tenants.id, tenantId));
+        const [customerRecord] = await tx.select().from(customers).where(eq(customers.id, saleRecord.customerId));
+
+        const saleLinesRecord = await tx
+          .select({
+            name: products.name,
+            quantity: saleLines.quantity,
+            unitPriceUsd: saleLines.unitPriceUsd,
+            subtotalUsd: saleLines.subtotalUsd,
+            taxRate: saleLines.taxRate,
+            isExempt: saleLines.isExempt,
+          })
+          .from(saleLines)
+          .innerJoin(products, eq(saleLines.productId, products.id))
+          .where(eq(saleLines.saleId, saleRecord.id));
+
+        return {
+          sale: saleRecord,
+          tenant: tenantRecord,
+          customer: customerRecord,
+          lines: saleLinesRecord,
+        };
+      });
 
       if (!sale) {
         res.status(404).json({ code: 'SALE_NOT_FOUND', message: 'Venta no encontrada' });
         return;
       }
-
-      const [tenant] = await db.select().from(tenants).where(eq(tenants.id, tenantId));
-      const [customer] = await db.select().from(customers).where(eq(customers.id, sale.customerId));
-      
-      const lines = await db
-        .select({
-          name: products.name,
-          quantity: saleLines.quantity,
-          unitPriceUsd: saleLines.unitPriceUsd,
-          subtotalUsd: saleLines.subtotalUsd,
-          taxRate: saleLines.taxRate,
-          isExempt: saleLines.isExempt,
-        })
-        .from(saleLines)
-        .innerJoin(products, eq(saleLines.productId, products.id))
-        .where(eq(saleLines.saleId, sale.id));
 
       const pdfBuffer = await ReceiptService.generatePdf({
         tenant: tenant as any,
@@ -160,31 +171,42 @@ export class SalesController {
       const saleId = String(req.params.id);
       const paperWidth = (req.body.paper_width === 80 ? 80 : 58) as 58 | 80;
 
-      const [sale] = await db
-        .select()
-        .from(sales)
-        .where(and(eq(sales.tenantId, tenantId), eq(sales.id, saleId)));
+      const { sale, tenant, customer, lines } = await withTenant(tenantId, async (tx) => {
+        const [saleRecord] = await tx
+          .select()
+          .from(sales)
+          .where(and(eq(sales.tenantId, tenantId), eq(sales.id, saleId)));
+
+        if (!saleRecord) return { sale: null, tenant: null, customer: null, lines: [] };
+
+        const [tenantRecord] = await tx.select().from(tenants).where(eq(tenants.id, tenantId));
+        const [customerRecord] = await tx.select().from(customers).where(eq(customers.id, saleRecord.customerId));
+
+        const saleLinesRecord = await tx
+          .select({
+            name: products.name,
+            quantity: saleLines.quantity,
+            unitPriceUsd: saleLines.unitPriceUsd,
+            subtotalUsd: saleLines.subtotalUsd,
+            taxRate: saleLines.taxRate,
+            isExempt: saleLines.isExempt,
+          })
+          .from(saleLines)
+          .innerJoin(products, eq(saleLines.productId, products.id))
+          .where(eq(saleLines.saleId, saleRecord.id));
+
+        return {
+          sale: saleRecord,
+          tenant: tenantRecord,
+          customer: customerRecord,
+          lines: saleLinesRecord,
+        };
+      });
 
       if (!sale) {
         res.status(404).json({ code: 'SALE_NOT_FOUND', message: 'Venta no encontrada' });
         return;
       }
-
-      const [tenant] = await db.select().from(tenants).where(eq(tenants.id, tenantId));
-      const [customer] = await db.select().from(customers).where(eq(customers.id, sale.customerId));
-      
-      const lines = await db
-        .select({
-          name: products.name,
-          quantity: saleLines.quantity,
-          unitPriceUsd: saleLines.unitPriceUsd,
-          subtotalUsd: saleLines.subtotalUsd,
-          taxRate: saleLines.taxRate,
-          isExempt: saleLines.isExempt,
-        })
-        .from(saleLines)
-        .innerJoin(products, eq(saleLines.productId, products.id))
-        .where(eq(saleLines.saleId, sale.id));
 
       const escposBuffer = ReceiptService.generateEscPos({
         tenant: tenant as any,

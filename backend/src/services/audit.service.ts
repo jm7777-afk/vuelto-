@@ -15,16 +15,23 @@ export interface CreateAuditEntry {
   userAgent?: string | null;
 }
 
+const isValidUuid = (id?: string | null): boolean =>
+  typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+
 export class AuditService {
   /**
    * Registra una acción de auditoría inmutable en PostgreSQL.
    * La tabla rechaza cualquier comando UPDATE o DELETE mediante triggers de BD.
    */
   static async log(entry: CreateAuditEntry): Promise<void> {
+    if (!isValidUuid(entry.tenantId)) {
+      return;
+    }
+    const safeUserId = isValidUuid(entry.userId) ? entry.userId : null;
     try {
       await db.insert(auditLogs).values({
         tenantId: entry.tenantId,
-        userId: entry.userId || null,
+        userId: safeUserId,
         action: entry.action,
         entity: entry.entity,
         entityId: entry.entityId || null,
@@ -34,7 +41,24 @@ export class AuditService {
         ipAddress: entry.ipAddress || null,
         userAgent: entry.userAgent || null,
       });
-    } catch (error) {
+    } catch (error: any) {
+      if (error?.code === '23503' && entry.userId) {
+        try {
+          await db.insert(auditLogs).values({
+            tenantId: entry.tenantId,
+            userId: null,
+            action: entry.action,
+            entity: entry.entity,
+            entityId: entry.entityId || null,
+            payload: entry.payload ? entry.payload : null,
+            result: entry.result,
+            channel: entry.channel,
+            ipAddress: entry.ipAddress || null,
+            userAgent: entry.userAgent || null,
+          });
+          return;
+        } catch {}
+      }
       // El log de auditoría nunca debe quebrar la operación de negocio si la BD está saturada,
       // pero debe registrarse en la salida de error estructurada.
       console.error('Error registrando auditoría en DB:', error);

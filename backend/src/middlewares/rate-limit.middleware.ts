@@ -1,4 +1,37 @@
+import rateLimit from 'express-rate-limit';
 import { Request, Response, NextFunction } from 'express';
+
+/**
+ * Rate Limiter Global:
+ * 300 peticiones / 15 minutos por IP
+ */
+export const globalRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutos
+  limit: 300,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  validate: { xForwardedForHeader: false, default: false },
+  message: {
+    error: 'TOO_MANY_REQUESTS',
+    message: 'Demasiadas solicitudes desde esta IP, intente de nuevo en 15 minutos.',
+  },
+});
+
+/**
+ * Rate Limiter Estricto para Login:
+ * 5 intentos / 1 minuto por IP
+ */
+export const authRateLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minuto
+  limit: 5,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  validate: { xForwardedForHeader: false, default: false },
+  message: {
+    error: 'TOO_MANY_REQUESTS',
+    message: 'Demasiadas solicitudes de autenticación desde esta IP. Intente de nuevo en un minuto.',
+  },
+});
 
 interface RateLimitEntry {
   count: number;
@@ -8,7 +41,7 @@ interface RateLimitEntry {
 const barcodeLimitStore = new Map<string, RateLimitEntry>();
 
 // Limpiar periódicamente entradas expiradas cada 5 minutos
-setInterval(() => {
+const cleanupInterval = setInterval(() => {
   const now = Date.now();
   for (const [key, entry] of barcodeLimitStore.entries()) {
     if (now > entry.resetAt) {
@@ -16,6 +49,7 @@ setInterval(() => {
     }
   }
 }, 5 * 60 * 1000);
+cleanupInterval.unref?.();
 
 /**
  * Rate Limiter específico para consultas de código de barras:
@@ -45,4 +79,3 @@ export function barcodeLookupRateLimiter(req: Request, res: Response, next: Next
   current.count += 1;
   next();
 }
-
