@@ -4,10 +4,13 @@
   "private": true,
   "description": "Vuelto - Plataforma SaaS multi-tenant de facturación e inventario para comercios en Venezuela",
   "scripts": {
+    "build": "npm run build:web && npm run build:backend",
     "build:backend": "npm --prefix backend run build",
     "build:web": "npm --prefix web run build",
+    "start": "npm --prefix backend start",
     "start:backend": "npm --prefix backend start",
     "dev:backend": "npm --prefix backend run dev",
+    "test": "npm --prefix backend test",
     "test:backend": "npm --prefix backend test"
   },
   "keywords": [
