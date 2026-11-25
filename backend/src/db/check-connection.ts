@@ -73,6 +73,8 @@ async function checkDatabaseConnection() {
       if (parseInt(tenantsCount.rows[0].count, 10) > 0) {
         const demoTenant = await client.query('SELECT business_name, document_type, document_number FROM tenants LIMIT 1');
         console.log(`   🏪 Comercio Activo: ${demoTenant.rows[0].business_name} (RIF: ${demoTenant.rows[0].document_type}-${demoTenant.rows[0].document_number})`);
+      } else {
+        console.log('   🧹 Plataforma limpia: 0 comercios registrados (Solo Súper Administrador activo).');
       }
     }
 

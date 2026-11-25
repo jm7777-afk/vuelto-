@@ -1,10 +1,11 @@
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { db } from '../db/index.js';
-import { refreshTokens, users, auditLogs } from '../db/schema.js';
+import { refreshTokens, users, tenants } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
 import { env } from '../config/env.js';
 import { AuthUser } from '../types/express.js';
+import { AuditService } from './audit.service.js';
 
 export interface SessionTokenPair {
   accessToken: string;
@@ -45,6 +46,7 @@ export class AuthSessionService {
     const refreshPayload = {
       sub: user.id,
       tenantId: user.tenantId,
+      roleId: user.roleId,
       familyId,
       tokenId,
       tokenType: 'refresh',
@@ -112,8 +114,8 @@ export class AuthSessionService {
         .where(eq(refreshTokens.familyId, tokenRecord.familyId));
 
       // Registrar incidente de seguridad en audit_logs
-      await db.insert(auditLogs).values({
-        tenantId: decoded.tenantId,
+      await AuditService.log({
+        tenantId: decoded.tenantId || null,
         userId: tokenRecord.userId,
         action: 'REFRESH_TOKEN_THEFT_DETECTED',
         entity: 'refresh_tokens',
@@ -149,6 +151,18 @@ export class AuthSessionService {
       throw new Error('USER_INACTIVE_OR_NOT_FOUND');
     }
 
+    // Verificar que el tenant no esté suspendido
+    if (userRecord.tenantId) {
+      const [tenantRow] = await db
+        .select({ isActive: tenants.isActive })
+        .from(tenants)
+        .where(eq(tenants.id, userRecord.tenantId))
+        .limit(1);
+      if (!tenantRow || !tenantRow.isActive) {
+        throw new Error('TENANT_SUSPENDED');
+      }
+    }
+
     // 1. Revocar el token actual usado
     await db
       .update(refreshTokens)
@@ -172,6 +186,7 @@ export class AuthSessionService {
       {
         sub: userRecord.id,
         tenantId: userRecord.tenantId,
+        roleId: userRecord.roleId,
         familyId: tokenRecord.familyId, // Misma familia
         tokenId: crypto.randomUUID(),
         tokenType: 'refresh',

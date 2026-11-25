@@ -16,7 +16,18 @@ export class UnauthorizedError extends Error {
  */
 export const requireTenantAuth = (req: Request, res: Response, next: NextFunction): void => {
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+  const queryToken = typeof req.query.token === 'string' && req.path.includes('/monitoring/stream')
+    ? req.query.token
+    : undefined;
+
+  let token: string | undefined;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    token = authHeader.split(' ')[1];
+  } else if (queryToken) {
+    token = queryToken;
+  }
+
+  if (!token) {
     res.status(401).json({
       code: 'UNAUTHORIZED',
       message: 'Token de autorización ausente o inválido.',
@@ -24,7 +35,6 @@ export const requireTenantAuth = (req: Request, res: Response, next: NextFunctio
     return;
   }
 
-  const token = authHeader.split(' ')[1];
   try {
     const user = JwtService.verifyAccessToken(token);
 
@@ -40,7 +50,7 @@ export const requireTenantAuth = (req: Request, res: Response, next: NextFunctio
 
     // Inyecta en el contexto de la petición Express desde el token verificado
     req.user = user;
-    req.tenantId = user.tenantId;
+    req.tenantId = user.tenantId ?? undefined;
     next();
   } catch {
     res.status(401).json({

@@ -86,6 +86,12 @@ export async function ensureSchema() {
       ALTER TABLE tenant_configurations ADD COLUMN IF NOT EXISTS default_profit_margin NUMERIC(5, 2) NOT NULL DEFAULT 30.00;
       ALTER TABLE tenant_configurations ADD COLUMN IF NOT EXISTS require_admin_for_overdue_debt BOOLEAN NOT NULL DEFAULT true;
 
+      -- Permitir SUPER_ADMIN global y auditoría de plataforma sin tenant asociado
+      ALTER TABLE users ALTER COLUMN tenant_id DROP NOT NULL;
+      ALTER TABLE audit_logs ALTER COLUMN tenant_id DROP NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_platform_username ON users (username) WHERE tenant_id IS NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_platform_user_email ON users (email) WHERE tenant_id IS NULL;
+
       -- Roles mandatorios del sistema
       INSERT INTO roles (id, name, description) VALUES
         ('SUPER_ADMIN', 'Super Administrador Global', 'Control de plataforma multi-tenant y creación de negocios'),

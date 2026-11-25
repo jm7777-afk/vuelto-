@@ -40,26 +40,28 @@ export class JwtService {
 
   static verifyAccessToken(token: string): AuthUser {
     const decoded = jwt.verify(token, this.accessSecret) as any;
-    if (!decoded.tenantId || !decoded.sub) {
+    const isSuperAdmin = decoded.roleId === 'SUPER_ADMIN';
+    if (!decoded.sub || (!isSuperAdmin && !decoded.tenantId)) {
       throw new Error('Token JWT no contiene información de tenant requerida');
     }
     return {
       id: decoded.sub,
-      tenantId: decoded.tenantId,
+      tenantId: decoded.tenantId ?? null,
       roleId: decoded.roleId,
       username: decoded.username,
       fullName: decoded.fullName,
     };
   }
 
-  static verifyRefreshToken(token: string): { userId: string; tenantId: string } {
+  static verifyRefreshToken(token: string): { userId: string; tenantId: string | null } {
     const decoded = jwt.verify(token, this.refreshSecret) as any;
-    if (decoded.tokenType !== 'refresh' || !decoded.tenantId) {
+    const isSuperAdmin = decoded.roleId === 'SUPER_ADMIN';
+    if (decoded.tokenType !== 'refresh' || !decoded.sub || (!isSuperAdmin && !decoded.tenantId)) {
       throw new Error('Refresh token inválido');
     }
     return {
       userId: decoded.sub,
-      tenantId: decoded.tenantId,
+      tenantId: decoded.tenantId ?? null,
     };
   }
 }

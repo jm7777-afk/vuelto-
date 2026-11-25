@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { randomUUID } from 'crypto';
 import { logger } from '../utils/logger.js';
 import { httpRequestDurationSeconds, httpRequestsTotal } from '../services/metrics.service.js';
+import { MonitoringService } from '../services/monitoring.service.js';
 
 export function correlationAndLoggingMiddleware(req: Request, res: Response, next: NextFunction) {
   // 1. Correlation ID: tomar x-request-id del cliente o generar UUID v4/v7
@@ -21,6 +22,7 @@ export function correlationAndLoggingMiddleware(req: Request, res: Response, nex
 
     const tenantId = (req as any).tenantId || (req as any).user?.tenantId || 'anonymous';
     const userId = (req as any).user?.id || null;
+    const username = (req as any).user?.username || undefined;
     const path = req.baseUrl ? `${req.baseUrl}${req.path}` : req.path;
     const normalizedPath = path.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, ':id');
 
@@ -38,6 +40,7 @@ export function correlationAndLoggingMiddleware(req: Request, res: Response, nex
     });
 
     // Logging estructurado con Pino
+    const roundedMs = Math.round(durationMs * 100) / 100;
     const logData = {
       timestamp: new Date().toISOString(),
       reqId,
@@ -46,7 +49,7 @@ export function correlationAndLoggingMiddleware(req: Request, res: Response, nex
       method: req.method,
       path,
       statusCode: res.statusCode,
-      durationMs: Math.round(durationMs * 100) / 100,
+      durationMs: roundedMs,
     };
 
     if (res.statusCode >= 500) {
@@ -55,6 +58,24 @@ export function correlationAndLoggingMiddleware(req: Request, res: Response, nex
       logger.warn(logData, 'HTTP Request Client Warning');
     } else {
       logger.info(logData, 'HTTP Request Completed');
+    }
+
+    // Evitar ruido recursivo al consultar el stream SSE o polling del propio monitor
+    if (!path.includes('/super-admin/monitoring/stream') && !path.includes('/super-admin/monitoring/logs')) {
+      MonitoringService.recordEvent({
+        level: res.statusCode >= 500 ? 'ERROR' : res.statusCode >= 400 ? 'WARN' : 'INFO',
+        category: 'HTTP',
+        message: `${req.method} ${path} -> ${res.statusCode} (${roundedMs}ms)`,
+        method: req.method,
+        path,
+        statusCode: res.statusCode,
+        durationMs: roundedMs,
+        reqId,
+        tenantId: tenantId !== 'anonymous' ? tenantId : null,
+        userId,
+        username,
+        ipAddress: req.ip || null,
+      });
     }
   });
 

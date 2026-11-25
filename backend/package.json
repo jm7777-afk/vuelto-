@@ -13,6 +13,7 @@
     "db:push": "drizzle-kit push",
     "db:migrate": "tsx src/db/migrate.ts",
     "db:seed": "tsx src/db/migrate.ts",
+    "db:clean": "tsx src/db/reset-clean.ts",
     "db:check": "tsx src/db/check-connection.ts"
   },
   "dependencies": {

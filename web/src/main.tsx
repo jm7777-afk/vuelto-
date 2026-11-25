@@ -54,10 +54,11 @@ import {
 } from 'lucide-react';
 
 import { ensureValidEan13 } from './utils/ean';
+import { SuperAdminConsole } from './components/SuperAdminConsole';
+import { apiFetch, getAccessToken, setSessionTokens, clearSessionStorage } from './services/api';
 import type {
   UserProfile,
   ProductItem,
-  TenantItem,
   SupplierItem,
   PurchaseOrderItem,
   KardexMovementItem,
@@ -66,13 +67,14 @@ import type {
   FinancialTransactionItem,
   SaleRecord,
   CashierStatus,
+  PosCustomerItem,
   PosCartLine,
   PosTicket,
 } from './types';
 
 initWebSentry();
 
-const DEFAULT_BCV_RATE = 919.82;
+const DEFAULT_BCV_RATE = 0;
 
 // COMPONENTE: SPLASH SCREEN (ANIMACIÓN VUELTO 60 FPS)
 const VueltoSplashScreen: React.FC<{ onFinish: () => void }> = ({ onFinish }) => {
@@ -302,9 +304,11 @@ export const App: React.FC = () => {
   const [showSplash, setShowSplash] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
 
-  // Sesión y Auth Persistente
+  // Sesión y Auth Persistente (validada contra /api/v1/auth/me)
   const [user, setUser] = useState<UserProfile | null>(() => {
     try {
+      const token = getAccessToken();
+      if (!token) return null;
       const stored = localStorage.getItem('vuelto_user_session');
       return stored ? JSON.parse(stored) : null;
     } catch {
@@ -314,18 +318,31 @@ export const App: React.FC = () => {
 
   const [usernameInput, setUsernameInput] = useState('');
   const [passwordInput, setPasswordInput] = useState('');
+  const [twoFactorInput, setTwoFactorInput] = useState('');
+  const [requiresTwoFactor, setRequiresTwoFactor] = useState(false);
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState('');
 
-  // Roles y Responsive (Conmutador de Rol para Súper Admin, Admin y Vendedor)
-  const [userRoleMode, setUserRoleMode] = useState<'SUPER_ADMIN' | 'ADMIN' | 'VENDEDOR'>('ADMIN');
-  const isSuperAdmin = userRoleMode === 'SUPER_ADMIN';
+  // Modal de Cambio de Contraseña para usuarios de tienda
+  const [isStorePwdModalOpen, setIsStorePwdModalOpen] = useState(false);
+  const [storeCurPwd, setStoreCurPwd] = useState('');
+  const [storeNewPwd, setStoreNewPwd] = useState('');
+  const [storeConfPwd, setStoreConfPwd] = useState('');
+  const [storePwdMsg, setStorePwdMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+
+  // Roles y Responsive (derivado estrictamente del rol autenticado)
+  const userRoleMode: 'SUPER_ADMIN' | 'ADMIN' | 'VENDEDOR' =
+    user?.roleId === 'SUPER_ADMIN'
+      ? 'SUPER_ADMIN'
+      : user?.roleId === 'VENDEDOR'
+      ? 'VENDEDOR'
+      : 'ADMIN';
   const isVendedor = userRoleMode === 'VENDEDOR';
   const isAdmin = !isVendedor;
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  // Navegación Activa
-  type TabType = 'POS' | 'METRICS' | 'INVENTORY' | 'SUPPLIERS' | 'ORDERS' | 'RECEIVABLES' | 'SALES' | 'EXPENSES' | 'RATES' | 'CASHIERS' | 'AUDIT' | 'SUPER_ADMIN';
+  // Navegación Activa de Tienda
+  type TabType = 'POS' | 'METRICS' | 'INVENTORY' | 'SUPPLIERS' | 'ORDERS' | 'RECEIVABLES' | 'SALES' | 'EXPENSES' | 'RATES' | 'CASHIERS' | 'AUDIT';
   const [activeTab, setActiveTab] = useState<TabType>('POS');
 
   useEffect(() => {
@@ -336,8 +353,9 @@ export const App: React.FC = () => {
 
   // Tasa de Cambio y Selección de Cobro del Administrador (Integración DolarApi Oficial en Vivo)
   const [bcvRate, setBcvRate] = useState(DEFAULT_BCV_RATE);
+  const [activeExchangeRateId, setActiveExchangeRateId] = useState<string>('');
   const [activeRateSource, setActiveRateSource] = useState<'BCV' | 'PARALELO' | 'EURO' | 'CUSTOM'>('BCV');
-  const [customRateInput, setCustomRateInput] = useState('950.00');
+  const [customRateInput, setCustomRateInput] = useState('0.00');
   const [ratesData, setRatesData] = useState<any>(null);
   const [isSyncingRates, setIsSyncingRates] = useState(false);
 
@@ -351,65 +369,40 @@ export const App: React.FC = () => {
 
   // Cálculo de la Tasa Activa con la que el Negocio Cobra sus Productos
   const activeRate = activeRateSource === 'PARALELO'
-    ? +(bcvRate * 1.138)
+    ? +(ratesData?.monitor?.rate || bcvRate * 1.138)
     : activeRateSource === 'EURO'
-    ? +(bcvRate * 1.055)
+    ? +(ratesData?.euro?.rate || bcvRate * 1.055)
     : activeRateSource === 'CUSTOM'
     ? +(parseFloat(customRateInput) || bcvRate)
     : bcvRate;
 
-  // Estado del Carrito y Terminal POS (Interfaces importadas desde ./types)
-  const [posCustomerList, setPosCustomerList] = useState([
-    { id: 'c0', name: 'Consumidor Final', documentType: 'V', documentNumber: '00000000', phone: '', balanceDue: 0, isSpecialMoraCustomer: false },
-    { id: 'c1', name: 'Automercado Miranda C.A.', documentType: 'J', documentNumber: '401234567', phone: '+584121112233', balanceDue: 145.50, isSpecialMoraCustomer: true },
-    { id: 'c2', name: 'Distribuidora Los Próceres', documentType: 'J', documentNumber: '309876543', phone: '+584149998877', balanceDue: 280.00, isSpecialMoraCustomer: true },
-    { id: 'c3', name: 'María Corina Machado', documentType: 'V', documentNumber: '14523988', phone: '+584145556677', balanceDue: 0, isSpecialMoraCustomer: false },
-  ]);
+  // Estado del Carrito y Terminal POS (100% desde PostgreSQL)
+  const defaultEmptyCustomer: PosCustomerItem = {
+    id: '',
+    name: 'Consumidor Final',
+    documentType: 'V',
+    documentNumber: '00000000',
+    phone: '',
+    balanceDue: 0,
+    isSpecialMoraCustomer: false,
+  };
+  const [posCustomerList, setPosCustomerList] = useState<PosCustomerItem[]>([]);
 
-  // Lista de Tickets en Paralelo (Fichero Superior)
+  // Lista de Tickets en Paralelo (Fichero Superior - sin productos ficticios)
   const [posTickets, setPosTickets] = useState<PosTicket[]>([
     {
       id: 'ticket-1',
       ticketNumber: 1,
       label: 'Venta #1',
-      customer: {
-        id: 'c0',
-        name: 'Consumidor Final',
-        documentType: 'V',
-        documentNumber: '00000000',
-        phone: '',
-        balanceDue: 0,
-        isSpecialMoraCustomer: false,
-      },
-      cartLines: [
-        {
-          productId: 'p1',
-          name: 'Harina PAN Blanca 1kg',
-          barcode: '7591001001019',
-          priceUsd: 1.25,
-          qty: 2,
-          unitOfMeasure: 'paquete',
-          isExempt: true,
-          taxRate: 0,
-        },
-        {
-          productId: 'p2',
-          name: 'Arroz Primor Grano Entero 1kg',
-          barcode: '7591003003035',
-          priceUsd: 1.50,
-          qty: 1,
-          unitOfMeasure: 'kg',
-          isExempt: true,
-          taxRate: 0,
-        },
-      ],
+      customer: defaultEmptyCustomer,
+      cartLines: [],
       paymentMethod: 'CASH_USD',
-      cashAmountUsd: '10.00',
+      cashAmountUsd: '0.00',
       pagoMovilBank: '0102 - Banco de Venezuela',
-      pagoMovilPhone: '04141234567',
-      pagoMovilRef: '489201',
+      pagoMovilPhone: '',
+      pagoMovilRef: '',
       adminApproved: false,
-      createdAt: '12:00 PM',
+      createdAt: new Date().toLocaleTimeString('es-VE', { hour: '2-digit', minute: '2-digit' }),
     },
   ]);
   const [activeTicketId, setActiveTicketId] = useState('ticket-1');
@@ -623,124 +616,13 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [activeTab, isCheckoutWizardOpen, checkoutStep, cartLines, isDebtorDetailModalOpen, completedSaleModal]);
 
-  // Auditoría y Backups
-  const [auditLogsList, setAuditLogsList] = useState<any[]>([
-    {
-      id: 'aud-1',
-      action: 'SALE_CONFIRMED',
-      entity: 'sale',
-      entityId: 'FACT-A-00000042',
-      payload: { invoice: 'A-00000042', totalUsd: '4.50', totalBs: '236.25', payment: 'PAGO_MOVIL' },
-      result: 'SUCCESS',
-      channel: 'POS_MOBILE',
-      createdAt: 'Hace 5 minutos',
-      user: 'cajero1',
-    },
-    {
-      id: 'aud-2',
-      action: 'UPDATE_ACTIVE_RATE',
-      entity: 'TENANT_CONFIGURATION',
-      payload: { activeRateSource: 'BCV', rate: 52.50 },
-      result: 'SUCCESS',
-      channel: 'WEB_ADMIN',
-      createdAt: 'Hace 30 minutos',
-      user: 'admin',
-    },
-    {
-      id: 'aud-3',
-      action: 'APPLY_GLOBAL_PROFIT_MARGIN',
-      entity: 'product',
-      payload: { marginPercentage: 30, updatedCount: 4 },
-      result: 'SUCCESS',
-      channel: 'WEB_ADMIN',
-      createdAt: 'Hoy 10:15 AM',
-      user: 'admin',
-    },
-    {
-      id: 'aud-4',
-      action: 'INVENTORY_MOVEMENT',
-      entity: 'inventory_movement',
-      payload: { productId: 'p1', type: 'IN', qty: 50, reason: 'Recepción orden OC-2026-0001' },
-      result: 'SUCCESS',
-      channel: 'WEB_ADMIN',
-      createdAt: 'Ayer 16:20 PM',
-      user: 'admin',
-    },
-  ]);
+  // Auditoría y Backups (100% desde PostgreSQL)
+  const [auditLogsList, setAuditLogsList] = useState<any[]>([]);
   const [isBackupDownloading, setIsBackupDownloading] = useState(false);
 
-  // 1. INVENTARIO & STOCK
+  // 1. INVENTARIO & STOCK (100% desde PostgreSQL)
   const [searchTerm, setSearchTerm] = useState('');
-  const [inventoryList, setInventoryList] = useState<ProductItem[]>([
-    {
-      id: 'p1',
-      name: 'Harina PAN Blanca 1kg',
-      barcode: '7591001001019',
-      sku: 'HAR-001',
-      category: 'Alimentos',
-      unitOfMeasure: 'paquete',
-      supplier: 'Empresas Polar C.A.',
-      supplierPhone: '+584141234567',
-      costPriceUsd: 0.95,
-      salePriceUsd: 1.25,
-      taxRate: 0,
-      stock: 145,
-      minStockAlert: 20,
-      lastPurchaseDate: '2026-11-20',
-      inflationDeltaPercent: 3.2,
-    },
-    {
-      id: 'p2',
-      name: 'Arroz Primor Grano Entero 1kg',
-      barcode: '7591003003035',
-      sku: 'ARR-002',
-      category: 'Alimentos',
-      unitOfMeasure: 'kg',
-      supplier: 'Alimentos Polar',
-      supplierPhone: '+584141234567',
-      costPriceUsd: 1.10,
-      salePriceUsd: 1.50,
-      taxRate: 0,
-      stock: 82,
-      minStockAlert: 15,
-      lastPurchaseDate: '2026-11-19',
-      inflationDeltaPercent: 1.8,
-    },
-    {
-      id: 'p3',
-      name: 'Aceite de Maíz Mazeite 1L',
-      barcode: '7591004004048',
-      sku: 'ACE-003',
-      category: 'Alimentos',
-      unitOfMeasure: 'L',
-      supplier: 'Alimentos Polar',
-      supplierPhone: '+584141234567',
-      costPriceUsd: 2.80,
-      salePriceUsd: 3.80,
-      taxRate: 16,
-      stock: 4, // Alerta
-      minStockAlert: 10,
-      lastPurchaseDate: '2026-11-15',
-      inflationDeltaPercent: 4.5,
-    },
-    {
-      id: 'p4',
-      name: 'Refresco Pepsi Cola 1.5L',
-      barcode: '7591002002026',
-      sku: 'REF-005',
-      category: 'Bebidas',
-      unitOfMeasure: 'botella',
-      supplier: 'Pepsico Venezuela',
-      supplierPhone: '+584160001122',
-      costPriceUsd: 1.20,
-      salePriceUsd: 1.90,
-      taxRate: 16,
-      stock: 35,
-      minStockAlert: 15,
-      lastPurchaseDate: '2026-11-21',
-      inflationDeltaPercent: 2.0,
-    },
-  ]);
+  const [inventoryList, setInventoryList] = useState<ProductItem[]>([]);
 
   // Modal Nuevo Producto con Unidad de Medida según Categoría
   const CATEGORY_UOM_MAP: Record<string, string[]> = {
@@ -758,11 +640,11 @@ export const App: React.FC = () => {
   const [newProdCategory, setNewProdCategory] = useState('Alimentos');
   const [newProdUom, setNewProdUom] = useState('paquete');
   const [newProdBarcode, setNewProdBarcode] = useState('');
-  const [newProdSupplier, setNewProdSupplier] = useState('Empresas Polar C.A.');
-  const [newProdSupplierPhone, setNewProdSupplierPhone] = useState('+584141234567');
+  const [newProdSupplier, setNewProdSupplier] = useState('');
+  const [newProdSupplierPhone, setNewProdSupplierPhone] = useState('');
   const [newProdCostUsd, setNewProdCostUsd] = useState('');
   const [newProdSaleUsd, setNewProdSaleUsd] = useState('');
-  const [newProdStock, setNewProdStock] = useState('10');
+  const [newProdStock, setNewProdStock] = useState('0');
   const [newProdMinStock, setNewProdMinStock] = useState('5');
   const [cameraActive, setCameraActive] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -771,79 +653,14 @@ export const App: React.FC = () => {
   const [isStockAdjustModalOpen, setIsStockAdjustModalOpen] = useState(false);
   const [selectedStockProduct, setSelectedStockProduct] = useState<ProductItem | null>(null);
   const [adjustMovementType, setAdjustMovementType] = useState<'IN' | 'OUT' | 'ADJUSTMENT'>('ADJUSTMENT');
-  const [adjustQty, setAdjustQty] = useState('10');
+  const [adjustQty, setAdjustQty] = useState('0');
   const [adjustReason, setAdjustReason] = useState('Conteo físico de inventario');
 
-  // Historial de Kardex
-  const [kardexHistory, setKardexHistory] = useState<KardexMovementItem[]>([
-    {
-      id: 'k-1',
-      productName: 'Harina PAN Blanca 1kg',
-      movementType: 'SALE',
-      quantity: 4,
-      unitCostUsd: 0.95,
-      reason: 'Venta mostrador FACT-A-00000042',
-      createdAt: 'Hoy 11:45 AM',
-      user: 'cajero1',
-    },
-    {
-      id: 'k-2',
-      productName: 'Aceite de Maíz Mazeite 1L',
-      movementType: 'IN',
-      quantity: 20,
-      unitCostUsd: 2.80,
-      reason: 'Recepción orden de compra OC-2026-001',
-      createdAt: 'Ayer 15:30 PM',
-      user: 'admin',
-    },
-    {
-      id: 'k-3',
-      productName: 'Arroz Primor Grano Entero 1kg',
-      movementType: 'ADJUSTMENT',
-      quantity: 82,
-      unitCostUsd: 1.10,
-      reason: 'Ajuste por inventario físico mensual',
-      createdAt: '22 Nov 09:00 AM',
-      user: 'admin',
-    },
-  ]);
+  // Historial de Kardex (100% desde PostgreSQL)
+  const [kardexHistory, setKardexHistory] = useState<KardexMovementItem[]>([]);
 
-  // 2. PROVEEDORES (CRUD)
-  const [suppliersList, setSuppliersList] = useState<SupplierItem[]>([
-    {
-      id: 'sup-1',
-      name: 'Empresas Polar C.A.',
-      documentType: 'J',
-      documentNumber: '000413129',
-      phone: '+584141234567',
-      email: 'pedidos@polar.com.ve',
-      address: 'Los Cortijos, Caracas',
-      creditDays: 15,
-      isActive: true,
-    },
-    {
-      id: 'sup-2',
-      name: 'Pepsico Alimentos Venezuela S.R.L.',
-      documentType: 'J',
-      documentNumber: '300854128',
-      phone: '+584160001122',
-      email: 'contacto@pepsico.ve',
-      address: 'Zona Industrial La Yaguara, Caracas',
-      creditDays: 21,
-      isActive: true,
-    },
-    {
-      id: 'sup-3',
-      name: 'Distribuidora Lácteos Los Andes C.A.',
-      documentType: 'G',
-      documentNumber: '200055441',
-      phone: '+584129876543',
-      email: 'ventas@lacteoslosandes.ve',
-      address: 'Av. Andrés Bello, Caracas',
-      creditDays: 7,
-      isActive: true,
-    },
-  ]);
+  // 2. PROVEEDORES (CRUD - 100% desde PostgreSQL)
+  const [suppliersList, setSuppliersList] = useState<SupplierItem[]>([]);
 
   const [isSupplierModalOpen, setIsSupplierModalOpen] = useState(false);
   const [editingSupplier, setEditingSupplier] = useState<SupplierItem | null>(null);
@@ -854,76 +671,22 @@ export const App: React.FC = () => {
   const [supEmail, setSupEmail] = useState('');
   const [supAddress, setSupAddress] = useState('');
 
-  // 3. PEDIDOS A PROVEEDORES (PURCHASE ORDERS)
-  const [purchaseOrdersList, setPurchaseOrdersList] = useState<PurchaseOrderItem[]>([
-    {
-      id: 'po-1',
-      orderNumber: 'OC-2026-0001',
-      supplierId: 'sup-1',
-      supplierName: 'Empresas Polar C.A.',
-      supplierPhone: '+584141234567',
-      status: 'SENT_WHATSAPP',
-      expectedDeliveryDate: '2026-11-26',
-      totalEstimatedUsd: 114.00,
-      notes: 'Despacho prioritario de harina y aceite',
-      createdAt: '2026-11-24 10:15 AM',
-      lines: [
-        { productName: 'Harina PAN Blanca 1kg', qty: 60, unitCostUsd: 0.95, subtotalUsd: 57.00 },
-        { productName: 'Aceite de Maíz Mazeite 1L', qty: 20, unitCostUsd: 2.85, subtotalUsd: 57.00 },
-      ],
-    },
-  ]);
+  // 3. PEDIDOS A PROVEEDORES (PURCHASE ORDERS - 100% desde PostgreSQL)
+  const [purchaseOrdersList, setPurchaseOrdersList] = useState<PurchaseOrderItem[]>([]);
 
   const [isOrderModalOpen, setIsOrderModalOpen] = useState(false);
-  const [orderSupplierId, setOrderSupplierId] = useState('sup-1');
-  const [orderProductId, setOrderProductId] = useState('p3');
-  const [orderQty, setOrderQty] = useState('20');
-  const [orderCostUsd, setOrderCostUsd] = useState('2.80');
-  const [orderNotes, setOrderNotes] = useState('Reposición urgente por stock crítico');
+  const [orderSupplierId, setOrderSupplierId] = useState('');
+  const [orderProductId, setOrderProductId] = useState('');
+  const [orderQty, setOrderQty] = useState('10');
+  const [orderCostUsd, setOrderCostUsd] = useState('0');
+  const [orderNotes, setOrderNotes] = useState('');
 
-  // 4. COBRANZAS Y MORA
-  const [surchargeRate, setSurchargeRate] = useState(5.0); // 5% de mora configurable por admin
+  // 4. COBRANZAS Y MORA (100% desde PostgreSQL)
+  const [surchargeRate, setSurchargeRate] = useState(5.0);
   const [graceDays, setGraceDays] = useState(3);
   const [autoApplyMora, setAutoApplyMora] = useState(true);
 
-  const [customerDebts, setCustomerDebts] = useState<CustomerDebt[]>([
-    {
-      id: 'c1',
-      name: 'Inversiones Los Chaguaramos C.A.',
-      document: 'J-309876541',
-      phone: '+584149876543',
-      balanceDueUsd: 125.00,
-      dueDate: '2026-11-20',
-      isOverdue: true,
-      lateDays: 4,
-      surchargeUsd: 6.25,
-      waived: false,
-    },
-    {
-      id: 'c2',
-      name: 'María Valentina Rodríguez',
-      document: 'V-18765432',
-      phone: '+584121234567',
-      balanceDueUsd: 45.50,
-      dueDate: '2026-11-22',
-      isOverdue: true,
-      lateDays: 2,
-      surchargeUsd: 2.28,
-      waived: false,
-    },
-    {
-      id: 'c3',
-      name: 'Panadería La Espiga Dorada',
-      document: 'J-401122334',
-      phone: '+584165554321',
-      balanceDueUsd: 310.00,
-      dueDate: '2026-11-28',
-      isOverdue: false,
-      lateDays: 0,
-      surchargeUsd: 0.00,
-      waived: false,
-    },
-  ]);
+  const [customerDebts, setCustomerDebts] = useState<CustomerDebt[]>([]);
 
   // Modal Registrar Abono de Cobranza
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
@@ -931,92 +694,16 @@ export const App: React.FC = () => {
   const [payAmountUsd, setPayAmountUsd] = useState('');
   const [payMethod, setPayMethod] = useState<'CASH_USD' | 'PAGO_MOVIL' | 'TRANSFER' | 'DEBIT_CARD'>('CASH_USD');
   const [payRef, setPayRef] = useState('');
-  const [payNotes, setPayNotes] = useState('Abono parcial de cuenta');
+  const [payNotes, setPayNotes] = useState('Abono de cuenta');
 
-  const [paymentHistoryList, setPaymentHistoryList] = useState<ReceivablePaymentRecord[]>([
-    {
-      id: 'rec-1',
-      customerName: 'Inversiones Los Chaguaramos C.A.',
-      customerDoc: 'J-309876541',
-      amountUsd: 50.00,
-      amountBs: 2625.00,
-      paymentMethod: 'PAGO_MOVIL',
-      referenceNumber: 'PM-981245',
-      createdAt: 'Hoy 10:30 AM',
-      notes: 'Abono factura previa',
-    },
-  ]);
+  const [paymentHistoryList, setPaymentHistoryList] = useState<ReceivablePaymentRecord[]>([]);
 
-  // 5. VENTAS & FACTURAS FISCALES
+  // 5. VENTAS & FACTURAS FISCALES (100% desde PostgreSQL)
   const [selectedSale, setSelectedSale] = useState<SaleRecord | null>(null);
-  const [salesHistory, setSalesHistory] = useState<SaleRecord[]>([
-    {
-      id: 's-101',
-      invoiceFormattedNumber: 'FACT-A-00000042',
-      createdAt: '2026-11-24 11:45 AM',
-      customerName: 'María Rodríguez',
-      customerDoc: 'V-15987654',
-      cashierName: 'Carlos Mendoza (cajero1)',
-      totalUsd: 18.88,
-      totalBs: 991.20,
-      rateValue: 52.50,
-      status: 'COMPLETADA',
-      items: [
-        { name: 'Harina PAN Blanca 1kg', qty: 4, priceUsd: 1.25, subtotalUsd: 5.00, taxRate: 0 },
-        { name: 'Aceite de Maíz Mazeite 1L', qty: 2, priceUsd: 3.80, subtotalUsd: 7.60, taxRate: 16 },
-        { name: 'Refresco Pepsi Cola 1.5L', qty: 2, priceUsd: 1.90, subtotalUsd: 3.80, taxRate: 16 },
-      ],
-      taxes: {
-        base16: 11.40,
-        base8: 0.00,
-        exempt: 5.00,
-        tax16: 1.82,
-        tax8: 0.00,
-        igtf3: 0.26,
-      },
-    },
-    {
-      id: 's-100',
-      invoiceFormattedNumber: 'FACT-A-00000041',
-      createdAt: '2026-11-24 11:20 AM',
-      customerName: 'Juan Silva',
-      customerDoc: 'V-12345678',
-      cashierName: 'Carlos Mendoza (cajero1)',
-      totalUsd: 4.50,
-      totalBs: 236.25,
-      rateValue: 52.50,
-      status: 'COMPLETADA',
-      items: [
-        { name: 'Arroz Primor Grano Entero 1kg', qty: 2, priceUsd: 1.50, subtotalUsd: 3.00, taxRate: 0 },
-        { name: 'Harina PAN Blanca 1kg', qty: 1, priceUsd: 1.25, subtotalUsd: 1.25, taxRate: 0 },
-      ],
-      taxes: { base16: 0, base8: 0, exempt: 4.25, tax16: 0, tax8: 0, igtf3: 0.05 },
-    },
-  ]);
+  const [salesHistory, setSalesHistory] = useState<SaleRecord[]>([]);
 
-  // 6. FINANZAS Y GASTOS OPERATIVOS (OPEX / COGS)
-  const [financialTransactionsList, setFinancialTransactionsList] = useState<FinancialTransactionItem[]>([
-    {
-      id: 'tx-1',
-      type: 'EGRESO',
-      category: 'NOMINA',
-      description: 'Pago de quincena personal de caja y almacén',
-      amountUsd: 120.00,
-      amountBs: 6300.00,
-      referenceNumber: 'NOM-2411',
-      createdAt: 'Hoy 09:00 AM',
-    },
-    {
-      id: 'tx-2',
-      type: 'EGRESO',
-      category: 'SERVICIOS',
-      description: 'Pago de energía eléctrica y telecomunicaciones',
-      amountUsd: 45.00,
-      amountBs: 2362.50,
-      referenceNumber: 'CORP-8812',
-      createdAt: 'Ayer 14:00 PM',
-    },
-  ]);
+  // 6. FINANZAS Y GASTOS OPERATIVOS (OPEX / COGS - 100% desde PostgreSQL)
+  const [financialTransactionsList, setFinancialTransactionsList] = useState<FinancialTransactionItem[]>([]);
 
   const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false);
   const [expType, setExpType] = useState<'EGRESO' | 'INGRESO'>('EGRESO');
@@ -1025,54 +712,32 @@ export const App: React.FC = () => {
   const [expAmountUsd, setExpAmountUsd] = useState('');
   const [expRef, setExpRef] = useState('');
 
-  // 7. VENDEDORES EN VIVO
-  const [cashiersList, setCashiersList] = useState<CashierStatus[]>([
-    {
-      id: 'usr-1',
-      name: 'Carlos Mendoza',
-      username: 'cajero1',
-      status: 'ONLINE',
-      openCartsCount: 2,
-      salesTodayCount: 28,
-      salesTodayUsd: 485.60,
-      salesTodayBs: 25494.00,
-      lastAction: 'Escaneo de EAN-13 7591001001019 (Harina PAN)',
-      lastActionTime: 'Hace 2 minutos',
-    },
-    {
-      id: 'usr-2',
-      name: 'Ana Gómez',
-      username: 'cajero2',
-      status: 'ONLINE',
-      openCartsCount: 1,
-      salesTodayCount: 19,
-      salesTodayUsd: 312.40,
-      salesTodayBs: 16401.00,
-      lastAction: 'Cobro de factura en USD efectivo e IGTF',
-      lastActionTime: 'Hace 6 minutos',
-    },
-  ]);
+  // 7. VENDEDORES EN VIVO (100% desde PostgreSQL)
+  const [cashiersList, setCashiersList] = useState<CashierStatus[]>([]);
 
   // Sincronización en vivo de tasas venezolanas (Multi-fuente resiliente)
   const fetchLiveRates = async () => {
     setIsSyncingRates(true);
     try {
-      // 1. Intentar endpoint backend con caché en memoria y reintentos concurrentes
       const res = await fetch('/api/v1/exchange-rates/live');
       if (res.ok) {
         const data = await res.json();
-        if (data && data.bcv?.rate) {
-          setRatesData(data);
-          setBcvRate(data.bcv.rate);
+        const bcvVal = typeof data?.bcv === 'number' ? data.bcv : data?.bcv?.rate;
+        if (bcvVal && bcvVal > 0) {
+          setRatesData({
+            bcv: { title: 'Banco Central de Venezuela (Oficial)', rate: bcvVal, lastUpdated: data.updatedAt },
+            monitor: { title: 'Promedio Paralelo / Monitor', rate: data.paralelo || bcvVal * 1.138, lastUpdated: data.updatedAt },
+            euro: { title: 'Euro BCV Oficial', rate: data.euro || bcvVal * 1.055, lastUpdated: data.updatedAt },
+          });
+          setBcvRate(bcvVal);
           setIsSyncingRates(false);
           return;
         }
       }
     } catch {
-      // Backend inaccesible o CORS en dev
+      // Fallback directo en el navegador
     }
 
-    // 2. Fallback directo en el navegador a DolarApi Oficial
     try {
       const [resOficial, resParalelo, resEuro] = await Promise.allSettled([
         fetch('https://ve.dolarapi.com/v1/dolares/oficial'),
@@ -1080,10 +745,10 @@ export const App: React.FC = () => {
         fetch('https://ve.dolarapi.com/v1/euros/oficial')
       ]);
 
-      let bcvPromedio = 919.82;
+      let bcvPromedio = 0;
       let bcvFecha = new Date().toISOString();
-      let paraleloPromedio = 1112.00;
-      let euroPromedio = 1011.00;
+      let paraleloPromedio = 0;
+      let euroPromedio = 0;
 
       if (resOficial.status === 'fulfilled' && resOficial.value.ok) {
         const d = await resOficial.value.json();
@@ -1103,34 +768,16 @@ export const App: React.FC = () => {
         if (d.promedio) euroPromedio = d.promedio;
       }
 
-      const clientRates = {
-        bcv: {
-          title: 'Banco Central de Venezuela (Oficial)',
-          rate: bcvPromedio,
-          lastUpdated: bcvFecha,
-        },
-        monitor: {
-          title: 'Promedio Paralelo / Monitor',
-          rate: paraleloPromedio,
-          lastUpdated: bcvFecha,
-        },
-        euro: {
-          title: 'Euro BCV Oficial',
-          rate: euroPromedio,
-          lastUpdated: bcvFecha,
-        },
-        usdt: {
-          title: 'Cripto Binance P2P / USDT',
-          rate: paraleloPromedio * 1.015,
-          lastUpdated: bcvFecha,
-        },
-      };
-
-      setRatesData(clientRates);
-      setBcvRate(bcvPromedio);
-    } catch (e) {
-      console.warn('Fallback a tasa base BCV 919.82:', e);
-      setBcvRate(919.82);
+      if (bcvPromedio > 0) {
+        setRatesData({
+          bcv: { title: 'Banco Central de Venezuela (Oficial)', rate: bcvPromedio, lastUpdated: bcvFecha },
+          monitor: { title: 'Promedio Paralelo / Monitor', rate: paraleloPromedio || bcvPromedio * 1.138, lastUpdated: bcvFecha },
+          euro: { title: 'Euro BCV Oficial', rate: euroPromedio || bcvPromedio * 1.055, lastUpdated: bcvFecha },
+        });
+        setBcvRate(bcvPromedio);
+      }
+    } catch {
+      // Silencioso si no hay conexión externa
     } finally {
       setIsSyncingRates(false);
     }
@@ -1174,122 +821,421 @@ export const App: React.FC = () => {
   const totalOtherIncomeUsd = financialTransactionsList.filter((t) => t.type === 'INGRESO').reduce((acc, t) => acc + t.amountUsd, 0);
   const netProfitUsd = totalGrossSalesUsd + totalOtherIncomeUsd - totalExpensesUsd;
 
-  // Login handler con soporte para API real, JWT persistente y fallback de desarrollo
-  const handleLogin = async (roleToSet?: 'SUPER_ADMIN' | 'ADMIN' | 'VENDEDOR') => {
-    setLoginError('');
-    setLoginLoading(true);
-
-    let userRole = roleToSet;
-    let uName = usernameInput.trim();
-    const pass = passwordInput;
-
+  // Cargar datos reales de tienda desde PostgreSQL cuando un usuario de comercio está autenticado
+  const loadStoreData = async (currentUser: UserProfile | null) => {
+    if (!currentUser || currentUser.roleId === 'SUPER_ADMIN') return;
     try {
-      if (uName && pass) {
-        const res = await fetch('/api/v1/auth/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: uName, password: pass }),
-        });
+      const [prodRes, custRes, salesRes, cfgRes, rateRes] = await Promise.all([
+        apiFetch('/api/v1/products', {}, handleLogout),
+        apiFetch('/api/v1/customers', {}, handleLogout),
+        apiFetch('/api/v1/sales', {}, handleLogout),
+        apiFetch('/api/v1/config', {}, handleLogout),
+        apiFetch('/api/v1/exchange-rates/active', {}, handleLogout),
+      ]);
 
-        if (res.ok) {
-          const authData = await res.json();
-          if (authData.accessToken) {
-            localStorage.setItem('vuelto_token', authData.accessToken);
-            if (authData.refreshToken) {
-              localStorage.setItem('vuelto_refresh_token', authData.refreshToken);
-            }
+      if (prodRes.ok) {
+        const prods = await prodRes.json();
+        if (Array.isArray(prods)) {
+          setInventoryList(
+            prods.map((p: any) => ({
+              id: p.id,
+              name: p.name,
+              barcode: p.barcode || '',
+              sku: p.sku || '',
+              category: p.categoryName || 'General',
+              unitOfMeasure: p.unitOfMeasure || 'UNIDAD',
+              supplier: p.supplierName || 'Sin asignar',
+              supplierPhone: p.supplierPhone || '',
+              costPriceUsd: parseFloat(p.costPriceUsd || '0'),
+              salePriceUsd: parseFloat(p.salePriceUsd || '0'),
+              taxRate: p.isExempt ? 0 : parseFloat(p.taxRate || '16'),
+              stock: parseFloat(p.stock || '0'),
+              minStockAlert: parseFloat(p.minStockAlert || '5'),
+              lastPurchaseDate: p.createdAt ? new Date(p.createdAt).toISOString().slice(0, 10) : '',
+              inflationDeltaPercent: 0,
+            }))
+          );
+        }
+      }
+
+      if (custRes.ok) {
+        const custs = await custRes.json();
+        if (Array.isArray(custs)) {
+          const mappedCusts: PosCustomerItem[] = custs.map((c: any) => ({
+            id: c.id,
+            name: c.name,
+            documentType: c.documentType,
+            documentNumber: c.documentNumber,
+            phone: c.phone || '',
+            balanceDue: parseFloat(c.balanceDue || '0'),
+            isSpecialMoraCustomer: Boolean(c.isSpecialMoraCustomer),
+          }));
+          setPosCustomerList(mappedCusts);
+          const cf = mappedCusts.find((c) => c.documentNumber === '00000000') || mappedCusts[0];
+          if (cf) {
+            setPosTickets((prev) =>
+              prev.map((t) => (!t.customer.id ? { ...t, customer: cf } : t))
+            );
           }
+        }
+      }
 
-          const roleFromBackend =
-            authData.user?.roleId === 'SUPERADMIN' || authData.user?.roleId === 'SUPER_ADMIN'
-              ? 'SUPER_ADMIN'
-              : authData.user?.roleId === 'VENDEDOR' || authData.user?.roleId === 'CASHIER'
-              ? 'VENDEDOR'
-              : 'ADMIN';
+      if (salesRes.ok) {
+        const sls = await salesRes.json();
+        if (Array.isArray(sls)) {
+          setSalesHistory(
+            sls.map((s: any) => ({
+              id: s.id,
+              invoiceFormattedNumber: s.invoiceFormattedNumber,
+              createdAt: new Date(s.createdAt).toLocaleString('es-VE'),
+              customerName: s.customerName || 'Cliente',
+              customerDoc: s.customerDocType ? `${s.customerDocType}-${s.customerDocNumber}` : 'N/A',
+              cashierName: s.userId || 'Cajero',
+              totalUsd: parseFloat(s.totalAmountUsd || '0'),
+              totalBs: parseFloat(s.totalAmountBs || '0'),
+              rateValue: parseFloat(s.rateValue || '0'),
+              status: s.status === 'ANNULLED_BY_NC' || s.status === 'CANCELLED' ? 'ANULADA' : 'COMPLETADA',
+              items: [],
+              taxes: {
+                base16: parseFloat(s.taxableBase16Usd || '0'),
+                base8: parseFloat(s.taxableBase8Usd || '0'),
+                exempt: parseFloat(s.exemptAmountUsd || '0'),
+                tax16: parseFloat(s.taxAmount16Usd || '0'),
+                tax8: parseFloat(s.taxAmount8Usd || '0'),
+                igtf3: parseFloat(s.igtfAmountUsd || '0'),
+              },
+            }))
+          );
+        }
+      }
 
-          const loggedProfile: UserProfile = {
-            id: authData.user?.id || '00000000-0000-0000-0000-000000000001',
-            tenantId: authData.user?.tenantId || 'a0000000-0000-0000-0000-000000000001',
-            username: authData.user?.username || uName,
-            fullName: authData.user?.fullName || uName,
-            roleId: roleFromBackend,
-            businessName: authData.user?.businessName || (roleFromBackend === 'SUPER_ADMIN' ? 'Plataforma Global Vuelto SaaS' : 'Inversiones Bodega Central C.A.'),
-          };
+      if (cfgRes.ok) {
+        const cfg = await cfgRes.json();
+        setEnableIva(Boolean(cfg.enableIva));
+        setEnableIgtf(Boolean(cfg.enableIgtf));
+        if (cfg.activeRateSource) setActiveRateSource(cfg.activeRateSource);
+        if (cfg.customRateValue) setCustomRateInput(String(cfg.customRateValue));
+        if (cfg.defaultProfitMargin) setGlobalMarginInput(String(cfg.defaultProfitMargin));
+        if (cfg.lateFeePercentage !== undefined) setSurchargeRate(cfg.lateFeePercentage);
+        if (cfg.lateFeeGraceDays !== undefined) setGraceDays(cfg.lateFeeGraceDays);
+        if (cfg.autoApplyLateFee !== undefined) setAutoApplyMora(Boolean(cfg.autoApplyLateFee));
+      }
 
-          setUser(loggedProfile);
-          setUserRoleMode(roleFromBackend);
-          localStorage.setItem('vuelto_user_session', JSON.stringify(loggedProfile));
-          setActiveTab(roleFromBackend === 'SUPER_ADMIN' ? 'SUPER_ADMIN' : roleFromBackend === 'VENDEDOR' ? 'POS' : 'METRICS');
-          setLoginLoading(false);
-          return;
-        } else {
-          const errData = await res.json().catch(() => ({}));
-          if (res.status === 423) {
-            setLoginError('Cuenta temporalmente bloqueada por 5 intentos fallidos. Espere 15 minutos.');
-            setLoginLoading(false);
-            return;
-          } else if (res.status === 400 || res.status === 401) {
-            setLoginError(errData.message || 'Usuario o contraseña incorrectos.');
-            setLoginLoading(false);
-            return;
+      if (rateRes.ok) {
+        const r = await rateRes.json();
+        if (r?.exchangeRateSnapshotId) setActiveExchangeRateId(r.exchangeRateSnapshotId);
+        if (r?.rateValue && bcvRate === 0) setBcvRate(r.rateValue);
+      }
+
+      if (currentUser.roleId === 'ADMIN') {
+        const [kardexRes, supRes, poRes, debtRes, payHistRes, finRes, cashRes, audRes] = await Promise.all([
+          apiFetch('/api/v1/inventory/kardex', {}, handleLogout),
+          apiFetch('/api/v1/suppliers', {}, handleLogout),
+          apiFetch('/api/v1/purchase-orders', {}, handleLogout),
+          apiFetch('/api/v1/receivables/debtors', {}, handleLogout),
+          apiFetch('/api/v1/receivables/history', {}, handleLogout),
+          apiFetch('/api/v1/finances/transactions', {}, handleLogout),
+          apiFetch('/api/v1/cashiers/live', {}, handleLogout),
+          apiFetch('/api/v1/audit/logs', {}, handleLogout),
+        ]);
+
+        if (kardexRes.ok) {
+          const kd = await kardexRes.json();
+          if (Array.isArray(kd)) {
+            setKardexHistory(
+              kd.map((k: any) => ({
+                id: k.id,
+                productName: k.productName,
+                movementType: k.movementType,
+                quantity: parseFloat(k.quantity || '0'),
+                unitCostUsd: parseFloat(k.unitCostUsd || '0'),
+                reason: k.reason,
+                createdAt: new Date(k.createdAt).toLocaleString('es-VE'),
+                user: 'sistema',
+              }))
+            );
+          }
+        }
+
+        if (supRes.ok) {
+          const sups = await supRes.json();
+          if (Array.isArray(sups)) {
+            setSuppliersList(
+              sups.map((s: any) => ({
+                id: s.id,
+                name: s.name,
+                documentType: s.documentType,
+                documentNumber: s.documentNumber,
+                phone: s.phone,
+                email: s.email || '',
+                address: s.address || '',
+                creditDays: 15,
+                isActive: Boolean(s.isActive),
+              }))
+            );
+          }
+        }
+
+        if (poRes.ok) {
+          const pos = await poRes.json();
+          if (Array.isArray(pos)) {
+            setPurchaseOrdersList(
+              pos.map((o: any) => ({
+                id: o.id,
+                orderNumber: o.orderNumber,
+                supplierId: o.supplierId,
+                supplierName: o.supplierName || '',
+                supplierPhone: o.supplierPhone || '',
+                status: o.status,
+                expectedDeliveryDate: o.expectedDeliveryDate ? new Date(o.expectedDeliveryDate).toISOString().slice(0, 10) : '',
+                totalEstimatedUsd: parseFloat(o.totalEstimatedUsd || '0'),
+                notes: o.notes || '',
+                createdAt: new Date(o.createdAt).toLocaleString('es-VE'),
+                lines: [],
+              }))
+            );
+          }
+        }
+
+        if (debtRes.ok) {
+          const debts = await debtRes.json();
+          if (Array.isArray(debts)) {
+            setCustomerDebts(
+              debts.map((d: any) => ({
+                id: d.id,
+                name: d.name,
+                document: `${d.documentType}-${d.documentNumber}`,
+                phone: d.phone || '',
+                balanceDueUsd: d.balanceDueUsd || 0,
+                dueDate: d.updatedAt ? new Date(d.updatedAt).toISOString().slice(0, 10) : '',
+                isOverdue: (d.balanceDueUsd || 0) > 0,
+                lateDays: 0,
+                surchargeUsd: d.surchargeUsd || 0,
+                waived: false,
+              }))
+            );
+          }
+        }
+
+        if (payHistRes.ok) {
+          const ph = await payHistRes.json();
+          if (Array.isArray(ph)) {
+            setPaymentHistoryList(
+              ph.map((p: any) => ({
+                id: p.id,
+                customerName: p.customerName,
+                customerDoc: p.customerDoc,
+                amountUsd: parseFloat(p.amountUsd || '0'),
+                amountBs: parseFloat(p.amountBs || '0'),
+                paymentMethod: p.paymentMethod,
+                referenceNumber: p.referenceNumber || '',
+                createdAt: new Date(p.createdAt).toLocaleString('es-VE'),
+                notes: p.notes || '',
+              }))
+            );
+          }
+        }
+
+        if (finRes.ok) {
+          const ftx = await finRes.json();
+          if (Array.isArray(ftx)) {
+            setFinancialTransactionsList(
+              ftx.map((t: any) => ({
+                id: t.id,
+                type: t.type,
+                category: t.category,
+                description: t.description,
+                amountUsd: parseFloat(t.amountUsd || '0'),
+                amountBs: parseFloat(t.amountBs || '0'),
+                referenceNumber: t.referenceNumber || '',
+                createdAt: new Date(t.transactionDate || t.createdAt).toLocaleString('es-VE'),
+              }))
+            );
+          }
+        }
+
+        if (cashRes.ok) {
+          const ch = await cashRes.json();
+          if (Array.isArray(ch)) setCashiersList(ch);
+        }
+
+        if (audRes.ok) {
+          const aud = await audRes.json();
+          if (Array.isArray(aud.logs)) {
+            setAuditLogsList(
+              aud.logs.map((l: any) => ({
+                ...l,
+                user: l.username || 'sistema',
+                createdAt: new Date(l.createdAt).toLocaleString('es-VE'),
+              }))
+            );
           }
         }
       }
     } catch {
-      // Fallback si la API no está accesible directamente
+      // Silencioso; apiFetch maneja 401
+    }
+  };
+
+  // Validar sesión existente contra /api/v1/auth/me al cargar la app
+  useEffect(() => {
+    const token = getAccessToken();
+    if (!token) {
+      if (user) {
+        clearSessionStorage();
+        setUser(null);
+      }
+      return;
     }
 
-    if (!userRole) {
-      if (uName === 'superadmin') userRole = 'SUPER_ADMIN';
-      else if (uName === 'cajero1') userRole = 'VENDEDOR';
-      else userRole = 'ADMIN';
-    } else {
-      if (userRole === 'SUPER_ADMIN') uName = 'superadmin';
-      else if (userRole === 'VENDEDOR') uName = 'cajero1';
-      else uName = 'admin';
+    apiFetch('/api/v1/auth/me')
+      .then(async (res) => {
+        if (!res.ok) {
+          clearSessionStorage();
+          setUser(null);
+          return;
+        }
+        const me = await res.json();
+        const roleFromBackend: UserProfile['roleId'] =
+          me.roleId === 'SUPER_ADMIN'
+            ? 'SUPER_ADMIN'
+            : me.roleId === 'VENDEDOR'
+            ? 'VENDEDOR'
+            : me.roleId === 'CONSULTA'
+            ? 'CONSULTA'
+            : 'ADMIN';
+        const verifiedProfile: UserProfile = {
+          id: me.id,
+          tenantId: me.tenantId ?? null,
+          username: me.username,
+          email: me.email,
+          fullName: me.fullName,
+          roleId: roleFromBackend,
+          businessName: me.businessName,
+          twoFactorEnabled: me.twoFactorEnabled,
+          lastLoginAt: me.lastLoginAt,
+        };
+        setUser(verifiedProfile);
+        localStorage.setItem('vuelto_user_session', JSON.stringify(verifiedProfile));
+        if (roleFromBackend !== 'SUPER_ADMIN') {
+          loadStoreData(verifiedProfile);
+        }
+      })
+      .catch(() => {
+        // Si no hay conexión al servidor, no permitir sesión falsa
+        clearSessionStorage();
+        setUser(null);
+      });
+  }, []);
+
+  // Login handler 100% conectado a PostgreSQL (sin fallback ficticio)
+  const handleLogin = async () => {
+    setLoginError('');
+    const uName = usernameInput.trim();
+    const pass = passwordInput;
+    if (!uName || !pass) {
+      setLoginError('Debe ingresar su usuario y contraseña.');
+      return;
     }
 
-    const loggedProfile: UserProfile = {
-      id:
-        userRole === 'SUPER_ADMIN'
-          ? '00000000-0000-0000-0000-000000000001'
-          : userRole === 'VENDEDOR'
-          ? '8cb3bb66-6b60-4966-9bc6-e8220f122557'
-          : '24a8eccf-b45e-4d5a-ac01-b44b77198c10',
-      tenantId: 'a0000000-0000-0000-0000-000000000001',
-      username: uName || 'admin',
-      fullName:
-        userRole === 'SUPER_ADMIN'
-          ? 'Súper Administrador Global'
-          : userRole === 'VENDEDOR'
-          ? 'Carlos Mendoza (Cajero)'
-          : 'Dueño Administrador',
-      roleId: userRole,
-      businessName:
-        userRole === 'SUPER_ADMIN'
-          ? 'Plataforma Global Vuelto SaaS'
-          : 'Inversiones Bodega Central C.A.',
-    };
+    setLoginLoading(true);
+    try {
+      const bodyPayload: any = { username: uName, password: pass };
+      if (requiresTwoFactor && twoFactorInput.trim()) {
+        bodyPayload.twoFactorCode = twoFactorInput.trim();
+      }
 
-    setUser(loggedProfile);
-    setUserRoleMode(userRole);
-    localStorage.setItem('vuelto_user_session', JSON.stringify(loggedProfile));
-    setActiveTab(userRole === 'SUPER_ADMIN' ? 'SUPER_ADMIN' : userRole === 'VENDEDOR' ? 'POS' : 'METRICS');
-    setLoginLoading(false);
+      const res = await fetch('/api/v1/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(bodyPayload),
+      });
+
+      const authData = await res.json().catch(() => ({}));
+
+      if (res.ok && authData.requiresTwoFactor) {
+        setRequiresTwoFactor(true);
+        setLoginLoading(false);
+        return;
+      }
+
+      if (!res.ok) {
+        setLoginError(authData.message || authData.error || 'Usuario o contraseña incorrectos.');
+        setLoginLoading(false);
+        return;
+      }
+
+      if (authData.tokens?.accessToken) {
+        setSessionTokens(authData.tokens.accessToken, authData.tokens.refreshToken);
+      } else if (authData.accessToken) {
+        setSessionTokens(authData.accessToken, authData.refreshToken);
+      }
+
+      const roleFromBackend: UserProfile['roleId'] =
+        authData.user?.roleId === 'SUPER_ADMIN'
+          ? 'SUPER_ADMIN'
+          : authData.user?.roleId === 'VENDEDOR'
+          ? 'VENDEDOR'
+          : authData.user?.roleId === 'CONSULTA'
+          ? 'CONSULTA'
+          : 'ADMIN';
+
+      const loggedProfile: UserProfile = {
+        id: authData.user.id,
+        tenantId: authData.user.tenantId ?? null,
+        username: authData.user.username,
+        email: authData.user.email,
+        fullName: authData.user.fullName,
+        roleId: roleFromBackend,
+        businessName: authData.user.businessName || 'Vuelto SaaS',
+        twoFactorEnabled: authData.user.twoFactorEnabled,
+      };
+
+      setUser(loggedProfile);
+      localStorage.setItem('vuelto_user_session', JSON.stringify(loggedProfile));
+      setRequiresTwoFactor(false);
+      setTwoFactorInput('');
+      setActiveTab(roleFromBackend === 'VENDEDOR' ? 'POS' : 'METRICS');
+      if (roleFromBackend !== 'SUPER_ADMIN') {
+        await loadStoreData(loggedProfile);
+      }
+    } catch {
+      setLoginError('No se pudo conectar con el servidor API. Verifica que el backend esté activo.');
+    } finally {
+      setLoginLoading(false);
+    }
   };
 
   const handleLogout = () => {
+    const token = getAccessToken();
+    if (token) {
+      fetch('/api/v1/auth/logout', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch(() => {});
+    }
     setUser(null);
-    localStorage.removeItem('vuelto_user_session');
-    localStorage.removeItem('vuelto_token');
-    localStorage.removeItem('vuelto_refresh_token');
+    clearSessionStorage();
+    setInventoryList([]);
+    setKardexHistory([]);
+    setSuppliersList([]);
+    setPurchaseOrdersList([]);
+    setCustomerDebts([]);
+    setPaymentHistoryList([]);
+    setSalesHistory([]);
+    setFinancialTransactionsList([]);
+    setPosCustomerList([]);
+    setAuditLogsList([]);
+    setCashiersList([]);
     setUsernameInput('');
     setPasswordInput('');
+    setTwoFactorInput('');
+    setRequiresTwoFactor(false);
     setLoginError('');
   };
 
-  // Guardar Producto
-  const handleSaveProduct = () => {
+  // Guardar Producto en PostgreSQL
+  const handleSaveProduct = async () => {
     if (!newProdName || !newProdSaleUsd) {
       alert('Por favor ingrese el nombre y precio de salida del producto.');
       return;
@@ -1297,196 +1243,211 @@ export const App: React.FC = () => {
 
     const saleNum = parseFloat(newProdSaleUsd);
     const costNum = parseFloat(newProdCostUsd) || 0;
-    const finalBarcode = newProdBarcode ? ensureValidEan13(newProdBarcode) : ensureValidEan13('7591005' + Math.floor(10000 + Math.random() * 90000));
+    const finalBarcode = newProdBarcode
+      ? ensureValidEan13(newProdBarcode)
+      : ensureValidEan13('7591005' + Math.floor(10000 + Math.random() * 90000));
 
-    const newItem: ProductItem = {
-      id: `p-${Date.now()}`,
-      name: newProdName,
-      barcode: finalBarcode,
-      sku: `PROD-${Math.floor(100 + Math.random() * 900)}`,
-      category: newProdCategory,
-      unitOfMeasure: newProdUom,
-      supplier: newProdSupplier,
-      supplierPhone: newProdSupplierPhone,
-      costPriceUsd: costNum,
-      salePriceUsd: saleNum,
-      taxRate: 16,
-      stock: parseInt(newProdStock, 10) || 10,
-      minStockAlert: parseInt(newProdMinStock, 10) || 5,
-      lastPurchaseDate: new Date().toISOString().split('T')[0],
-      inflationDeltaPercent: 2.5,
-    };
+    try {
+      const res = await apiFetch('/api/v1/products', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: newProdName.trim(),
+          unitOfMeasure: newProdUom,
+          costPriceUsd: costNum,
+          salePriceUsd: saleNum,
+          taxRate: 16,
+          isExempt: false,
+          minStockAlert: parseInt(newProdMinStock, 10) || 5,
+          initialStock: parseFloat(newProdStock) || 0,
+          barcodes: [{ barcode: finalBarcode, barcodeType: 'EAN13', isPrimary: true }],
+        }),
+      }, handleLogout);
 
-    setInventoryList([newItem, ...inventoryList]);
-    setIsAddModalOpen(false);
-    setCameraActive(false);
-    alert(`¡Producto "${newItem.name}" registrado en inventario con código GS1 ${newItem.barcode}!`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(data.message || 'Error guardando producto en base de datos.');
+        return;
+      }
+
+      setIsAddModalOpen(false);
+      setCameraActive(false);
+      setNewProdName('');
+      setNewProdBarcode('');
+      setNewProdCostUsd('');
+      setNewProdSaleUsd('');
+      await loadStoreData(user);
+      alert(`¡Producto "${data.name}" guardado en PostgreSQL con código ${finalBarcode}!`);
+    } catch {
+      alert('Error de conexión al guardar producto.');
+    }
   };
 
-  // Guardar Ajuste Físico de Stock (Kardex)
-  const handleSaveStockAdjustment = () => {
+  // Guardar Ajuste Físico de Stock (Kardex) en PostgreSQL
+  const handleSaveStockAdjustment = async () => {
     if (!selectedStockProduct) return;
     const qty = parseFloat(adjustQty);
     if (isNaN(qty)) return;
 
-    let newStock = selectedStockProduct.stock;
-    if (adjustMovementType === 'IN') newStock += qty;
-    else if (adjustMovementType === 'OUT') newStock = Math.max(0, newStock - qty);
-    else if (adjustMovementType === 'ADJUSTMENT') newStock = qty;
+    try {
+      const res = await apiFetch('/api/v1/inventory/adjust', {
+        method: 'POST',
+        body: JSON.stringify({
+          productId: selectedStockProduct.id,
+          movementType: adjustMovementType,
+          quantity: qty,
+          unitCostUsd: selectedStockProduct.costPriceUsd,
+          reason: adjustReason || 'Ajuste manual de inventario',
+        }),
+      }, handleLogout);
 
-    setInventoryList(
-      inventoryList.map((p) => (p.id === selectedStockProduct.id ? { ...p, stock: newStock } : p))
-    );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(data.message || 'No se pudo registrar el ajuste en Kardex.');
+        return;
+      }
 
-    const movement: KardexMovementItem = {
-      id: `k-${Date.now()}`,
-      productName: selectedStockProduct.name,
-      movementType: adjustMovementType,
-      quantity: qty,
-      unitCostUsd: selectedStockProduct.costPriceUsd,
-      reason: adjustReason,
-      createdAt: 'Ahora mismo',
-      user: user?.username || 'admin',
-    };
-
-    setKardexHistory([movement, ...kardexHistory]);
-    setIsStockAdjustModalOpen(false);
-    alert(`Ajuste registrado en Kardex. Nuevo stock de ${selectedStockProduct.name}: ${newStock} unidades.`);
+      setIsStockAdjustModalOpen(false);
+      await loadStoreData(user);
+      alert(`Ajuste registrado en Kardex. Nuevo stock de ${selectedStockProduct.name}: ${data.newStock} unidades.`);
+    } catch {
+      alert('Error de conexión al ajustar stock.');
+    }
   };
 
-  // Guardar Proveedor
-  const handleSaveSupplier = () => {
+  // Guardar Proveedor en PostgreSQL
+  const handleSaveSupplier = async () => {
     if (!supName || !supDocNumber || !supPhone) {
       alert('Nombre, RIF y Teléfono WhatsApp son obligatorios.');
       return;
     }
 
-    if (editingSupplier) {
-      setSuppliersList(
-        suppliersList.map((s) =>
-          s.id === editingSupplier.id
-            ? { ...s, name: supName, documentType: supDocType, documentNumber: supDocNumber, phone: supPhone, email: supEmail, address: supAddress }
-            : s
-        )
-      );
-      alert('Proveedor actualizado con éxito.');
-    } else {
-      const newSup: SupplierItem = {
-        id: `sup-${Date.now()}`,
-        name: supName,
-        documentType: supDocType,
-        documentNumber: supDocNumber,
-        phone: supPhone,
-        email: supEmail || 'contacto@proveedor.ve',
-        address: supAddress || 'Venezuela',
-        creditDays: 15,
-        isActive: true,
-      };
-      setSuppliersList([...suppliersList, newSup]);
-      alert(`Proveedor "${newSup.name}" registrado con éxito.`);
-    }
+    try {
+      const url = editingSupplier ? `/api/v1/suppliers/${editingSupplier.id}` : '/api/v1/suppliers';
+      const method = editingSupplier ? 'PUT' : 'POST';
+      const payload = editingSupplier
+        ? { name: supName, phone: supPhone, email: supEmail || undefined, address: supAddress || undefined }
+        : {
+            documentType: supDocType,
+            documentNumber: supDocNumber.replace(/[^0-9]/g, ''),
+            name: supName,
+            phone: supPhone,
+            email: supEmail || undefined,
+            address: supAddress || undefined,
+          };
 
-    setIsSupplierModalOpen(false);
-    setEditingSupplier(null);
+      const res = await apiFetch(url, { method, body: JSON.stringify(payload) }, handleLogout);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(data.message || 'Error guardando proveedor.');
+        return;
+      }
+
+      setIsSupplierModalOpen(false);
+      setEditingSupplier(null);
+      await loadStoreData(user);
+      alert(editingSupplier ? 'Proveedor actualizado en PostgreSQL.' : `Proveedor "${data.name}" registrado en PostgreSQL.`);
+    } catch {
+      alert('Error de conexión al guardar proveedor.');
+    }
   };
 
-  // Guardar Pedido a Proveedor
-  const handleSavePurchaseOrder = () => {
+  // Guardar Pedido a Proveedor en PostgreSQL
+  const handleSavePurchaseOrder = async () => {
     const sup = suppliersList.find((s) => s.id === orderSupplierId) || suppliersList[0];
     const prod = inventoryList.find((p) => p.id === orderProductId) || inventoryList[0];
+    if (!sup || !prod) {
+      alert('Debes tener al menos un proveedor y un producto registrado.');
+      return;
+    }
     const qty = parseFloat(orderQty) || 10;
     const cost = parseFloat(orderCostUsd) || prod.costPriceUsd;
-    const totalUsd = qty * cost;
 
-    const newOrder: PurchaseOrderItem = {
-      id: `po-${Date.now()}`,
-      orderNumber: `OC-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`,
-      supplierId: sup.id,
-      supplierName: sup.name,
-      supplierPhone: sup.phone,
-      status: 'DRAFT',
-      expectedDeliveryDate: new Date(Date.now() + 3 * 86400000).toISOString().split('T')[0],
-      totalEstimatedUsd: totalUsd,
-      notes: orderNotes,
-      createdAt: 'Ahora mismo',
-      lines: [{ productName: prod.name, qty, unitCostUsd: cost, subtotalUsd: totalUsd }],
-    };
+    try {
+      const res = await apiFetch('/api/v1/purchase-orders', {
+        method: 'POST',
+        body: JSON.stringify({
+          supplierId: sup.id,
+          expectedDeliveryDate: new Date(Date.now() + 3 * 86400000).toISOString(),
+          notes: orderNotes,
+          lines: [{ productId: prod.id, quantityOrdered: qty, unitCostUsd: cost }],
+        }),
+      }, handleLogout);
 
-    setPurchaseOrdersList([newOrder, ...purchaseOrdersList]);
-    setIsOrderModalOpen(false);
-    alert(`Orden de compra ${newOrder.orderNumber} creada para ${sup.name}.`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(data.message || 'Error creando orden de compra.');
+        return;
+      }
+
+      setIsOrderModalOpen(false);
+      await loadStoreData(user);
+      alert(`Orden de compra ${data.orderNumber} creada en PostgreSQL para ${sup.name}.`);
+    } catch {
+      alert('Error de conexión al crear orden de compra.');
+    }
   };
 
-  // Enviar Pedido por WhatsApp
-  const handleSendOrderWhatsApp = (order: PurchaseOrderItem) => {
-    const linesText = order.lines.map((l) => `- ${l.qty} unids x ${l.productName} ($${l.unitCostUsd.toFixed(2)}) = $${l.subtotalUsd.toFixed(2)}`).join('\n');
-    const msg = `*ORDEN DE COMPRA: ${order.orderNumber}*\nComercio: ${user?.businessName}\nProveedor: ${order.supplierName}\n\n*Productos Solicitados:*\n${linesText}\n\n*Total Estimado:* $${order.totalEstimatedUsd.toFixed(2)} USD (≈ ${(order.totalEstimatedUsd * bcvRate).toFixed(2)} Bs)\nNotas: ${order.notes}\n\nAgradecemos confirmación de despacho.`;
+  // Enviar Pedido por WhatsApp y actualizar estado en PostgreSQL
+  const handleSendOrderWhatsApp = async (order: PurchaseOrderItem) => {
+    const msg = `*ORDEN DE COMPRA: ${order.orderNumber}*\nComercio: ${user?.businessName}\nProveedor: ${order.supplierName}\n*Total Estimado:* $${order.totalEstimatedUsd.toFixed(2)} USD (≈ ${(order.totalEstimatedUsd * bcvRate).toFixed(2)} Bs)\nNotas: ${order.notes}\n\nAgradecemos confirmación de despacho.`;
     const cleanPhone = order.supplierPhone.replace(/\D/g, '');
     window.open(`https://wa.me/${cleanPhone}?text=${encodeURIComponent(msg)}`, '_blank');
 
-    setPurchaseOrdersList(
-      purchaseOrdersList.map((o) => (o.id === order.id ? { ...o, status: 'SENT_WHATSAPP' } : o))
-    );
+    await apiFetch(`/api/v1/purchase-orders/${order.id}/status`, {
+      method: 'PUT',
+      body: JSON.stringify({ status: 'SENT_WHATSAPP' }),
+    }, handleLogout).catch(() => {});
+    await loadStoreData(user);
   };
 
-  // Recibir Mercancía de Pedido
-  const handleReceiveOrder = (order: PurchaseOrderItem) => {
-    // Aumentar stock de productos
-    for (const line of order.lines) {
-      setInventoryList((prev) =>
-        prev.map((p) => (p.name === line.productName ? { ...p, stock: p.stock + line.qty } : p))
-      );
-      // Registrar en Kardex
-      setKardexHistory((prev) => [
-        {
-          id: `k-${Date.now()}-${Math.random()}`,
-          productName: line.productName,
-          movementType: 'IN',
-          quantity: line.qty,
-          unitCostUsd: line.unitCostUsd,
-          reason: `Recepción mercancía ${order.orderNumber}`,
-          createdAt: 'Ahora mismo',
-          user: user?.username || 'admin',
-        },
-        ...prev,
-      ]);
+  // Recibir Mercancía de Pedido en PostgreSQL
+  const handleReceiveOrder = async (order: PurchaseOrderItem) => {
+    try {
+      const res = await apiFetch(`/api/v1/purchase-orders/${order.id}/receive`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      }, handleLogout);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(data.message || 'Error recepcionando orden.');
+        return;
+      }
+      await loadStoreData(user);
+      alert(`¡Mercancía de ${order.orderNumber} recibida en PostgreSQL! Stock actualizado en Kardex.`);
+    } catch {
+      alert('Error de conexión al recibir mercancía.');
     }
-
-    setPurchaseOrdersList(
-      purchaseOrdersList.map((o) => (o.id === order.id ? { ...o, status: 'RECEIVED' } : o))
-    );
-    alert(`¡Mercancía de ${order.orderNumber} recibida exitosamente! Stock actualizado en Kardex.`);
   };
 
-  // Registrar Abono de Cobranza
-  const handleRegisterPayment = () => {
+  // Registrar Abono de Cobranza en PostgreSQL
+  const handleRegisterPayment = async () => {
     if (!selectedDebtor || !payAmountUsd) return;
     const amount = parseFloat(payAmountUsd);
     if (isNaN(amount) || amount <= 0) return;
 
-    const remainingDebt = Math.max(0, selectedDebtor.balanceDueUsd - amount);
-
-    setCustomerDebts(
-      customerDebts.map((c) =>
-        c.id === selectedDebtor.id ? { ...c, balanceDueUsd: remainingDebt, isOverdue: remainingDebt > 0 && c.isOverdue } : c
-      )
-    );
-
-    const rec: ReceivablePaymentRecord = {
-      id: `rec-${Date.now()}`,
-      customerName: selectedDebtor.name,
-      customerDoc: selectedDebtor.document,
-      amountUsd: amount,
-      amountBs: amount * bcvRate,
-      paymentMethod: payMethod,
-      referenceNumber: payRef || `REC-${Math.floor(1000 + Math.random() * 9000)}`,
-      createdAt: 'Ahora mismo',
-      notes: payNotes,
-    };
-
-    setPaymentHistoryList([rec, ...paymentHistoryList]);
-    setIsPaymentModalOpen(false);
-    alert(`Abono de $${amount.toFixed(2)} USD registrado para ${selectedDebtor.name}. Deuda restante: $${remainingDebt.toFixed(2)} USD.`);
+    try {
+      const res = await apiFetch('/api/v1/receivables/payment', {
+        method: 'POST',
+        body: JSON.stringify({
+          customerId: selectedDebtor.id,
+          paymentMethod: payMethod,
+          amountUsd: amount,
+          rateValue: bcvRate,
+          referenceNumber: payRef || undefined,
+          notes: payNotes,
+        }),
+      }, handleLogout);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(data.message || 'Error registrando abono.');
+        return;
+      }
+      setIsPaymentModalOpen(false);
+      await loadStoreData(user);
+      alert(`Abono de $${amount.toFixed(2)} USD registrado. Deuda restante: $${data.remainingDebtUsd} USD.`);
+    } catch {
+      alert('Error de conexión registrando abono.');
+    }
   };
 
   // Cobro WhatsApp con Desglose de Mora
@@ -1508,64 +1469,137 @@ export const App: React.FC = () => {
     alert('Mora condonada para este cliente por decisión administrativa.');
   };
 
-  // Guardar Gasto / Transacción Financiera
-  const handleSaveExpense = () => {
+  // Guardar Gasto / Transacción Financiera en PostgreSQL
+  const handleSaveExpense = async () => {
     const amount = parseFloat(expAmountUsd);
     if (!expDesc || isNaN(amount) || amount <= 0) {
       alert('Descripción y monto son obligatorios.');
       return;
     }
 
-    const tx: FinancialTransactionItem = {
-      id: `tx-${Date.now()}`,
-      type: expType,
-      category: expCategory,
-      description: expDesc,
-      amountUsd: amount,
-      amountBs: amount * bcvRate,
-      referenceNumber: expRef || `TX-${Math.floor(1000 + Math.random() * 9000)}`,
-      createdAt: 'Ahora mismo',
-    };
-
-    setFinancialTransactionsList([tx, ...financialTransactionsList]);
-    setIsExpenseModalOpen(false);
-    alert(`Transacción de ${expType} por $${amount.toFixed(2)} USD registrada.`);
+    try {
+      const res = await apiFetch('/api/v1/finances/transactions', {
+        method: 'POST',
+        body: JSON.stringify({
+          type: expType,
+          category: expCategory,
+          description: expDesc,
+          amountUsd: amount,
+          rateValue: bcvRate,
+          referenceNumber: expRef || undefined,
+        }),
+      }, handleLogout);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(data.message || 'Error registrando transacción financiera.');
+        return;
+      }
+      setIsExpenseModalOpen(false);
+      setExpDesc('');
+      setExpAmountUsd('');
+      setExpRef('');
+      await loadStoreData(user);
+      alert(`Transacción de ${expType} por $${amount.toFixed(2)} USD guardada en PostgreSQL.`);
+    } catch {
+      alert('Error de conexión registrando transacción.');
+    }
   };
 
-  // Anular Venta / Nota de Crédito
-  const handleCancelSale = (saleId: string) => {
+  // Anular Venta / Nota de Crédito en PostgreSQL
+  const handleCancelSale = async (saleId: string) => {
     if (!confirm('¿Seguro que deseas anular esta factura fiscal? Generará una Nota de Crédito SENIAT y devolverá el stock a Kardex.')) return;
 
-    const sale = salesHistory.find((s) => s.id === saleId);
-    if (!sale) return;
-
-    // Devolver stock
-    for (const item of sale.items) {
-      setInventoryList((prev) =>
-        prev.map((p) => (p.name === item.name ? { ...p, stock: p.stock + item.qty } : p))
-      );
-      setKardexHistory((prev) => [
-        {
-          id: `k-${Date.now()}-${Math.random()}`,
-          productName: item.name,
-          movementType: 'RETURN',
-          quantity: item.qty,
-          unitCostUsd: 0.95,
-          reason: `Anulación factura ${sale.invoiceFormattedNumber}`,
-          createdAt: 'Ahora mismo',
-          user: user?.username || 'admin',
-        },
-        ...prev,
-      ]);
+    try {
+      const res = await apiFetch(`/api/v1/sales/${saleId}/credit-note`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: 'Anulación administrativa desde Web Admin', returnInventory: true }),
+      }, handleLogout);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(data.message || 'No se pudo emitir la Nota de Crédito.');
+        return;
+      }
+      await loadStoreData(user);
+      if (selectedSale?.id === saleId) {
+        setSelectedSale({ ...selectedSale, status: 'ANULADA' });
+      }
+      alert(`Factura ANULADA con Nota de Crédito ${data.note?.noteNumber || ''}. Mercancía retornada a inventario.`);
+    } catch {
+      alert('Error de conexión anulando factura.');
     }
+  };
 
-    setSalesHistory(
-      salesHistory.map((s) => (s.id === saleId ? { ...s, status: 'ANULADA' } : s))
-    );
-    if (selectedSale?.id === saleId) {
-      setSelectedSale({ ...selectedSale, status: 'ANULADA' });
+  // Cargar líneas completas de una venta desde PostgreSQL
+  const handleInspectSale = async (sale: SaleRecord) => {
+    setSelectedSale(sale);
+    try {
+      const res = await apiFetch(`/api/v1/sales/${sale.id}`, {}, handleLogout);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data?.lines)) {
+        setSelectedSale({
+          ...sale,
+          items: data.lines.map((l: any) => ({
+            name: l.productName || 'Producto',
+            qty: parseFloat(l.quantity || '0'),
+            priceUsd: parseFloat(l.unitPriceUsd || '0'),
+            taxRate: parseFloat(l.taxRate || '0'),
+            subtotalUsd: parseFloat(l.totalUsd || l.subtotalUsd || '0'),
+          })),
+        });
+      }
+    } catch {
+      // Mantiene cabecera visible si falla lectura de detalle
     }
-    alert(`Factura ${sale.invoiceFormattedNumber} ANULADA. Mercancía retornada a inventario.`);
+  };
+
+  // Persistir fuente de tasa activa en PostgreSQL
+  const handleSelectRateSource = async (
+    nextSource: 'BCV' | 'PARALELO' | 'EURO' | 'CUSTOM',
+    customRateOverride?: number
+  ) => {
+    setActiveRateSource(nextSource);
+    const customNumeric =
+      customRateOverride !== undefined
+        ? customRateOverride
+        : parseFloat(customRateInput) || bcvRate || 0;
+    try {
+      await apiFetch('/api/v1/config', {
+        method: 'PUT',
+        body: JSON.stringify({
+          activeRateSource: nextSource,
+          customRateValue: customNumeric,
+        }),
+      }, handleLogout);
+      await apiFetch('/api/v1/exchange-rates/select-active', {
+        method: 'POST',
+        body: JSON.stringify({ source: nextSource }),
+      }, handleLogout);
+    } catch {
+      alert('No se pudo persistir la tasa seleccionada en el servidor.');
+    }
+  };
+
+  // Persistir régimen fiscal flexible (IVA / IGTF) en PostgreSQL
+  const handleToggleTaxRegime = async (field: 'enableIva' | 'enableIgtf', nextValue: boolean) => {
+    if (field === 'enableIva') setEnableIva(nextValue);
+    else setEnableIgtf(nextValue);
+
+    try {
+      const res = await apiFetch('/api/v1/config', {
+        method: 'PUT',
+        body: JSON.stringify({ [field]: nextValue }),
+      }, handleLogout);
+      if (!res.ok) {
+        if (field === 'enableIva') setEnableIva(!nextValue);
+        else setEnableIgtf(!nextValue);
+        alert('No se pudo actualizar la configuración fiscal en el servidor.');
+      }
+    } catch {
+      if (field === 'enableIva') setEnableIva(!nextValue);
+      else setEnableIgtf(!nextValue);
+      alert('Error de conexión actualizando configuración fiscal.');
+    }
   };
 
   // --- MANEJADORES DE PUNTO DE VENTA (POS) ---
@@ -1691,7 +1725,7 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleSaveQuickPosCustomer = (e: React.FormEvent) => {
+  const handleSaveQuickPosCustomer = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanDoc = posCiSearchInput.replace(/[^0-9]/g, '');
     if (!quickCustomerFirstName.trim()) {
@@ -1700,26 +1734,46 @@ export const App: React.FC = () => {
     }
 
     const fullName = `${quickCustomerFirstName.trim()} ${quickCustomerLastName.trim()}`.trim();
-    const newCust = {
-      id: `cust-${Date.now()}`,
-      name: fullName,
-      documentType: posCiDocType,
-      documentNumber: cleanDoc || String(Math.floor(10000000 + Math.random() * 90000000)),
-      phone: quickCustomerPhone.trim(),
-      balanceDue: 0,
-      isSpecialMoraCustomer: false,
-    };
+    try {
+      const res = await apiFetch('/api/v1/customers/quick', {
+        method: 'POST',
+        body: JSON.stringify({
+          documentType: posCiDocType,
+          documentNumber: cleanDoc || String(Math.floor(10000000 + Math.random() * 90000000)),
+          name: fullName,
+          phone: quickCustomerPhone.trim() || undefined,
+        }),
+      }, handleLogout);
 
-    setPosCustomerList((prev) => [newCust, ...prev]);
-    setPosSelectedCustomer(newCust);
-    setShowQuickCustomerForm(false);
-    setQuickCustomerFirstName('');
-    setQuickCustomerLastName('');
-    setQuickCustomerPhone('');
-    setPosCustomerFeedback({
-      type: 'success',
-      message: `✅ ¡Cliente ${newCust.documentType}-${newCust.documentNumber} ${newCust.name} guardado y asignado a la venta!`,
-    });
+      const created = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(created.message || 'No se pudo registrar el cliente en la base de datos.');
+        return;
+      }
+
+      const newCust: PosCustomerItem = {
+        id: created.id,
+        name: created.name,
+        documentType: created.documentType,
+        documentNumber: created.documentNumber,
+        phone: created.phone || '',
+        balanceDue: parseFloat(created.balanceDue || '0'),
+        isSpecialMoraCustomer: Boolean(created.isSpecialMoraCustomer),
+      };
+
+      setPosCustomerList((prev) => [newCust, ...prev]);
+      setPosSelectedCustomer(newCust);
+      setShowQuickCustomerForm(false);
+      setQuickCustomerFirstName('');
+      setQuickCustomerLastName('');
+      setQuickCustomerPhone('');
+      setPosCustomerFeedback({
+        type: 'success',
+        message: `✅ ¡Cliente ${newCust.documentType}-${newCust.documentNumber} ${newCust.name} guardado en BD y asignado a la venta!`,
+      });
+    } catch {
+      alert('Error de conexión al guardar cliente.');
+    }
   };
 
   // Cálculos de Totales POS
@@ -1749,143 +1803,122 @@ export const App: React.FC = () => {
       ? posCashVesNum - posTotalBs
       : 0;
 
-  // Confirmar Venta POS y Emitir Comprobante Digital
-  const handlePosConfirmSale = () => {
+  // Confirmar Venta POS y Emitir Comprobante Digital en PostgreSQL
+  const handlePosConfirmSale = async () => {
     if (cartLines.length === 0) {
       alert('El carrito está vacío. Agrega productos para facturar.');
       return;
     }
 
-    // Validación de mora y crédito
     const hasDebt = posSelectedCustomer.balanceDue > 0 || posSelectedCustomer.isSpecialMoraCustomer;
     if (posPaymentMethod === 'CREDIT_DEBT' && hasDebt && !posAdminApproved && !isAdmin) {
       alert(
-        `El cliente ${posSelectedCustomer.name} posee deuda previa ($${posSelectedCustomer.balanceDue.toFixed(2)} USD). Esta venta a crédito requiere aprobación y clave del Administrador.`
+        `El cliente ${posSelectedCustomer.name} posee deuda previa ($${posSelectedCustomer.balanceDue.toFixed(2)} USD). Esta venta a crédito requiere aprobación del Administrador.`
       );
       return;
     }
 
-    const nextInvoiceNum = `FACT-A-${String(Math.floor(100000 + Math.random() * 900000)).padStart(8, '0')}`;
-    const nowStr = new Date().toLocaleString('es-VE');
-
-    // Descontar inventario
-    for (const line of cartLines) {
-      setInventoryList((prev) =>
-        prev.map((p) => (p.id === line.productId ? { ...p, stock: Math.max(0, p.stock - line.qty) } : p))
-      );
-      setKardexHistory((prev) => [
-        {
-          id: `k-${Date.now()}-${Math.random()}`,
-          productName: line.name,
-          movementType: 'SALE',
-          quantity: line.qty,
-          unitCostUsd: 0.95,
-          reason: `Venta POS ${nextInvoiceNum}`,
-          createdAt: 'Ahora mismo',
-          user: user?.username || 'cajero1',
-        },
-        ...prev,
-      ]);
+    const targetCustomer = posSelectedCustomer.id ? posSelectedCustomer : posCustomerList[0];
+    if (!targetCustomer?.id) {
+      alert('Debe seleccionar o registrar un cliente válido antes de facturar.');
+      return;
     }
 
-    // Registrar en Historial de Ventas
-    const saleItem: SaleRecord = {
-      id: `s-${Date.now()}`,
-      invoiceFormattedNumber: nextInvoiceNum,
-      createdAt: nowStr,
-      customerName: posSelectedCustomer.name,
-      customerDoc: `${posSelectedCustomer.documentType}-${posSelectedCustomer.documentNumber}`,
-      cashierName: `${user?.fullName} (${user?.username})`,
-      totalUsd: posTotalUsd,
-      totalBs: posTotalBs,
-      rateValue: activeRate,
-      status: 'COMPLETADA',
-      items: cartLines.map((c) => ({
-        name: c.name,
-        qty: c.qty,
-        priceUsd: c.priceUsd,
-        subtotalUsd: c.priceUsd * c.qty,
-        taxRate: enableIva ? c.taxRate : 0,
-      })),
-      taxes: {
-        base16: enableIva ? posSubtotalUsd : 0,
-        base8: 0,
-        exempt: !enableIva ? posSubtotalUsd : 0,
-        tax16: posTax16Usd,
-        tax8: 0,
-        igtf3: posIgtfUsd,
-      },
-    };
-    setSalesHistory([saleItem, ...salesHistory]);
+    // Asegurar exchangeRateId real desde el backend
+    let rateIdToUse = activeExchangeRateId;
+    if (!rateIdToUse) {
+      try {
+        const rRes = await apiFetch('/api/v1/exchange-rates/active', {}, handleLogout);
+        if (rRes.ok) {
+          const rData = await rRes.json();
+          rateIdToUse = rData.exchangeRateSnapshotId || '';
+          if (rateIdToUse) setActiveExchangeRateId(rateIdToUse);
+        }
+      } catch {}
+    }
 
-    // Si el método de pago es Derivar a Administrador, registrar en Morosidad con lista detallada de lo llevado
-    if (posPaymentMethod === 'DERIVAR_ADMIN') {
-      const newDebtItem: CustomerDebt = {
-        id: `debt-${Date.now()}`,
-        name: posSelectedCustomer.name,
-        document: `${posSelectedCustomer.documentType}-${posSelectedCustomer.documentNumber}`,
-        phone: posSelectedCustomer.phone || '',
-        balanceDueUsd: posTotalUsd,
-        dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-        isOverdue: false,
-        lateDays: 0,
-        surchargeUsd: 0,
-        waived: false,
-        invoiceNumber: nextInvoiceNum,
+    if (!rateIdToUse) {
+      alert('No se pudo obtener la tasa de cambio activa de la base de datos.');
+      return;
+    }
+
+    const mappedMethod =
+      posPaymentMethod === 'CASH_VES'
+        ? 'CASH_BS'
+        : posPaymentMethod === 'DERIVAR_ADMIN'
+        ? 'CREDIT_DEBT'
+        : posPaymentMethod;
+    const isVes = posPaymentMethod === 'CASH_VES';
+
+    try {
+      const res = await apiFetch('/api/v1/sales', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': `pos-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` },
+        body: JSON.stringify({
+          customerId: targetCustomer.id,
+          exchangeRateId: rateIdToUse,
+          lines: cartLines.map((c) => ({
+            productId: c.productId,
+            quantity: c.qty,
+            unitPriceUsd: c.priceUsd,
+          })),
+          payments: [
+            {
+              paymentMethod: mappedMethod,
+              currency: isVes ? 'VES' : 'USD',
+              amount: +(isVes ? posTotalBs : posTotalUsd).toFixed(2),
+              ...(posPaymentMethod === 'PAGO_MOVIL' && posPagoMovilRef ? { referenceNumber: posPagoMovilRef } : {}),
+            },
+          ],
+          ...(posChangeUsd > 0
+            ? {
+                vueltoOption: {
+                  type: 'CASH',
+                  amountUsd: +posChangeUsd.toFixed(2),
+                },
+              }
+            : {}),
+        }),
+      }, handleLogout);
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(data.message || 'No se pudo procesar la venta en PostgreSQL.');
+        return;
+      }
+
+      const saleModalObj: any = {
+        id: data.id,
+        invoiceFormattedNumber: data.invoiceFormattedNumber,
+        createdAt: new Date().toLocaleString('es-VE'),
+        customerName: targetCustomer.name,
+        customerDoc: `${targetCustomer.documentType}-${targetCustomer.documentNumber}`,
+        customerPhone: targetCustomer.phone,
         cashierName: `${user?.fullName} (${user?.username})`,
-        itemsTaken: cartLines.map((c) => ({
+        totalUsd: parseFloat(data.totalAmountUsd || String(posTotalUsd)),
+        totalBs: parseFloat(data.totalAmountBs || String(posTotalBs)),
+        rateValue: parseFloat(data.rateValue || String(activeRate)),
+        status: 'COMPLETADA',
+        paymentMethod: posPaymentMethod === 'DERIVAR_ADMIN' ? 'DERIVADO A ADMINISTRADOR (MOROSIDAD)' : posPaymentMethod,
+        vueltoUsd: posChangeUsd,
+        vueltoBs: posChangeBs,
+        items: cartLines.map((c) => ({
           name: c.name,
           qty: c.qty,
           priceUsd: c.priceUsd,
-          subtotalUsd: +(c.priceUsd * c.qty).toFixed(2),
+          subtotalUsd: c.priceUsd * c.qty,
+          taxRate: enableIva ? c.taxRate : 0,
         })),
       };
-      setCustomerDebts((prev) => [newDebtItem, ...prev]);
-      setPosCustomerList((prev) =>
-        prev.map((c) =>
-          c.id === posSelectedCustomer.id
-            ? { ...c, balanceDue: +(c.balanceDue + posTotalUsd).toFixed(2), isSpecialMoraCustomer: true }
-            : c
-        )
-      );
+
+      setCompletedSaleModal(saleModalObj);
+      setCartLines([]);
+      setPosAdminApproved(false);
+      setPosAdminPinInput('');
+      await loadStoreData(user);
+    } catch {
+      alert('Error de red al confirmar la venta.');
     }
-
-    // Registrar en Auditoría
-    setAuditLogsList((prev) => [
-      {
-        id: `aud-${Date.now()}`,
-        action: 'SALE_CONFIRMED',
-        entity: 'sale',
-        entityId: nextInvoiceNum,
-        payload: {
-          invoice: nextInvoiceNum,
-          customer: posSelectedCustomer.name,
-          totalUsd: posTotalUsd.toFixed(2),
-          totalBs: posTotalBs.toFixed(2),
-          paymentMethod: posPaymentMethod,
-          activeRate,
-        },
-        result: 'SUCCESS',
-        channel: 'POS_WEB',
-        createdAt: 'Ahora mismo',
-        user: user?.username || 'cajero1',
-      },
-      ...prev,
-    ]);
-
-    // Preparar objeto para el modal de éxito con WhatsApp
-    setCompletedSaleModal({
-      ...saleItem,
-      customerPhone: posSelectedCustomer.phone,
-      paymentMethod: posPaymentMethod === 'DERIVAR_ADMIN' ? 'DERIVADO A ADMINISTRADOR (MOROSIDAD)' : posPaymentMethod,
-      vueltoUsd: posChangeUsd,
-      vueltoBs: posChangeBs,
-    });
-
-    // Limpiar carrito
-    setCartLines([]);
-    setPosAdminApproved(false);
-    setPosAdminPinInput('');
   };
 
   // Generador de enlace WhatsApp para Factura / Nota de Entrega Digital
@@ -1902,74 +1935,41 @@ export const App: React.FC = () => {
     return cleanPhone ? `https://wa.me/${cleanPhone}?text=${encodeURIComponent(msg)}` : `https://wa.me/?text=${encodeURIComponent(msg)}`;
   };
 
-  // Manejador de Margen Global Masivo
-  const handleApplyGlobalMargin = () => {
+  // Manejador de Margen Global Masivo en PostgreSQL
+  const handleApplyGlobalMargin = async () => {
     const margin = parseFloat(globalMarginInput);
     if (isNaN(margin) || margin <= 0) {
       alert('Por favor ingrese un porcentaje de margen válido (ej. 30%)');
       return;
     }
-    const factor = 1 + margin / 100;
-    const updated = inventoryList.map((p) => {
-      if (globalMarginCategory === 'ALL' || p.category === globalMarginCategory) {
-        if (p.costPriceUsd > 0) {
-          const newPrice = +(p.costPriceUsd * factor).toFixed(2);
-          return { ...p, salePriceUsd: newPrice };
-        }
+
+    try {
+      const res = await apiFetch('/api/v1/products/apply-global-margin', {
+        method: 'POST',
+        body: JSON.stringify({ marginPercentage: margin }),
+      }, handleLogout);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(data.message || 'No se pudo aplicar el margen global.');
+        return;
       }
-      return p;
-    });
-    setInventoryList(updated);
-
-    setAuditLogsList((prev) => [
-      {
-        id: `aud-${Date.now()}`,
-        action: 'APPLY_GLOBAL_PROFIT_MARGIN',
-        entity: 'product',
-        payload: { marginPercentage: margin, category: globalMarginCategory, count: updated.length },
-        result: 'SUCCESS',
-        channel: 'WEB_ADMIN',
-        createdAt: 'Ahora mismo',
-        user: user?.username || 'admin',
-      },
-      ...prev,
-    ]);
-
-    fetch('/api/v1/products/apply-global-margin', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ marginPercentage: margin, category: globalMarginCategory }),
-    }).catch(() => {});
-
-    alert(`✅ ¡Margen del ${margin}% aplicado masivamente a los productos seleccionados (${globalMarginCategory === 'ALL' ? 'Catálogo Completo' : globalMarginCategory})!`);
+      await loadStoreData(user);
+      alert(`✅ ¡Margen del ${margin}% aplicado en base de datos (${data.updatedCount || 0} productos actualizados)!`);
+    } catch {
+      alert('Error de conexión aplicando margen global.');
+    }
   };
 
-  // Descarga de Backup
-  const handleDownloadBackup = () => {
+  // Descarga de Backup real desde PostgreSQL
+  const handleDownloadBackup = async () => {
     setIsBackupDownloading(true);
-    const backupData = {
-      version: '1.2.0',
-      system: 'Vuelto SaaS Venezuela',
-      generatedAt: new Date().toISOString(),
-      tenant: { name: user?.businessName, rif: 'J-123456789' },
-      summary: {
-        totalProducts: inventoryList.length,
-        totalSuppliers: suppliersList.length,
-        totalSales: salesHistory.length,
-        totalCustomers: posCustomerList.length,
-      },
-      data: {
-        products: inventoryList,
-        suppliers: suppliersList,
-        purchaseOrders: purchaseOrdersList,
-        salesHistory: salesHistory,
-        receivables: customerDebts,
-        finances: financialTransactionsList,
-        auditLogs: auditLogsList,
-      },
-    };
-
-    setTimeout(() => {
+    try {
+      const res = await apiFetch('/api/v1/admin/backup', {}, handleLogout);
+      if (!res.ok) {
+        alert('Error generando copia de seguridad en el servidor.');
+        return;
+      }
+      const backupData = await res.json();
       const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -1978,312 +1978,42 @@ export const App: React.FC = () => {
       document.body.appendChild(a);
       a.click();
       window.URL.revokeObjectURL(url);
-      setIsBackupDownloading(false);
-      alert('✅ ¡Copia de seguridad (Backup JSON) exportada y descargada exitosamente!');
-    }, 600);
-  };
-
-  // --- MÓDULO SÚPER ADMINISTRADOR GLOBAL (CRUD DE NEGOCIOS / TENANTS) ---
-  const [tenantsList, setTenantsList] = useState<TenantItem[]>([
-    {
-      id: 't-1',
-      slug: 'automercado-miranda',
-      businessName: 'Automercado Miranda C.A.',
-      tradeName: 'Automercado Miranda',
-      documentType: 'J',
-      documentNumber: '401234567',
-      fiscalAddress: 'Av. Francisco de Miranda, Los Palos Grandes, Caracas',
-      phone: '+584121112233',
-      email: 'contacto@automercadomiranda.com',
-      isSpecialTaxpayer: true,
-      internalBarcodePrefix: '200',
-      isActive: true,
-      usersCount: 4,
-      productsCount: 340,
-      invoicesCount: 1250,
-      totalSalesUsd: 14250.0,
-      createdAt: '2026-01-15',
-    },
-    {
-      id: 't-2',
-      slug: 'los-proceres',
-      businessName: 'Distribuidora Los Próceres C.A.',
-      tradeName: 'Los Próceres',
-      documentType: 'J',
-      documentNumber: '309876543',
-      fiscalAddress: 'Paseo Los Ilustres, Caracas',
-      phone: '+584149998877',
-      email: 'ventas@losproceres.com',
-      isSpecialTaxpayer: false,
-      internalBarcodePrefix: '201',
-      isActive: true,
-      usersCount: 2,
-      productsCount: 185,
-      invoicesCount: 680,
-      totalSalesUsd: 8940.0,
-      createdAt: '2026-02-10',
-    },
-    {
-      id: 't-3',
-      slug: 'abasto-la-estrella',
-      businessName: 'Inversiones Abasto La Estrella',
-      tradeName: 'Abasto La Estrella',
-      documentType: 'V',
-      documentNumber: '14523988',
-      fiscalAddress: 'Calle Bolívar, Sector El Carmen, Barquisimeto',
-      phone: '+584145556677',
-      email: 'abastolaestrella@gmail.com',
-      isSpecialTaxpayer: false,
-      internalBarcodePrefix: '202',
-      isActive: true,
-      usersCount: 1,
-      productsCount: 92,
-      invoicesCount: 410,
-      totalSalesUsd: 3210.0,
-      createdAt: '2026-03-01',
-    },
-    {
-      id: 't-4',
-      slug: 'farmacia-san-rafael',
-      businessName: 'Farmacia San Rafael C.A.',
-      tradeName: 'Farmacia San Rafael',
-      documentType: 'J',
-      documentNumber: '501234888',
-      fiscalAddress: 'Av. Las Delicias, Maracay',
-      phone: '+584241234567',
-      email: 'sanrafael@farmacias.ve',
-      isSpecialTaxpayer: true,
-      internalBarcodePrefix: '203',
-      isActive: false, // Suspendido
-      usersCount: 1,
-      productsCount: 64,
-      invoicesCount: 120,
-      totalSalesUsd: 1100.0,
-      createdAt: '2026-03-12',
-    },
-  ]);
-
-  // CRUD DE SÚPER ADMINISTRADOR (NEGOCIOS / TENANTS)
-  const [isAddTenantModalOpen, setIsAddTenantModalOpen] = useState(false);
-  const [newTenantBusinessName, setNewTenantBusinessName] = useState('');
-  const [newTenantTradeName, setNewTenantTradeName] = useState('');
-  const [newTenantDocType, setNewTenantDocType] = useState<'J' | 'G' | 'V' | 'E'>('J');
-  const [newTenantDocNumber, setNewTenantDocNumber] = useState('');
-  const [newTenantAddress, setNewTenantAddress] = useState('');
-  const [newTenantPhone, setNewTenantPhone] = useState('');
-  const [newTenantEmail, setNewTenantEmail] = useState('');
-  const [newTenantSlug, setNewTenantSlug] = useState('');
-  const [newTenantIsSpecial, setNewTenantIsSpecial] = useState(false);
-  const [tenantSearchQuery, setTenantSearchQuery] = useState('');
-  const [tenantFilterStatus, setTenantFilterStatus] = useState<'ALL' | 'ACTIVE' | 'SUSPENDED' | 'SPECIAL'>('ALL');
-
-  // Estados para Edición, Detalle y Baja de Tenants
-  const [editingTenant, setEditingTenant] = useState<TenantItem | null>(null);
-  const [isEditTenantModalOpen, setIsEditTenantModalOpen] = useState(false);
-  const [deletingTenant, setDeletingTenant] = useState<TenantItem | null>(null);
-  const [isDeleteTenantModalOpen, setIsDeleteTenantModalOpen] = useState(false);
-  const [selectedTenantDetail, setSelectedTenantDetail] = useState<TenantItem | null>(null);
-  const [isViewTenantDetailModalOpen, setIsViewTenantDetailModalOpen] = useState(false);
-
-  const handleCreateTenant = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newTenantBusinessName.trim() || !newTenantDocNumber.trim()) {
-      alert('Razón Social y RIF son obligatorios.');
-      return;
-    }
-
-    const cleanDoc = newTenantDocNumber.replace(/[^0-9]/g, '');
-    const cleanSlug = (newTenantSlug || newTenantBusinessName).toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 30);
-
-    const generatedTempPassword = 'Tmp!' + Math.random().toString(36).slice(-8) + 'A1';
-    const payload = {
-      slug: cleanSlug,
-      businessName: newTenantBusinessName.trim(),
-      tradeName: newTenantTradeName.trim() || newTenantBusinessName.trim(),
-      documentType: newTenantDocType,
-      documentNumber: cleanDoc,
-      fiscalAddress: newTenantAddress.trim() || 'Venezuela',
-      phone: newTenantPhone.trim() || '+584120000000',
-      email: newTenantEmail.trim() || `${cleanSlug}@vuelto.ve`,
-      isSpecialTaxpayer: newTenantIsSpecial,
-      internalBarcodePrefix: '204',
-      adminFullName: `Admin ${newTenantBusinessName.trim()}`,
-      adminUsername: `admin_${cleanSlug.slice(0, 8)}`,
-      adminPassword: generatedTempPassword,
-    };
-
-    try {
-      const res = await fetch('/api/v1/tenants', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('vuelto_token') || ''}`,
-        },
-        body: JSON.stringify(payload),
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        const created = data.tenant;
-        const newT: TenantItem = {
-          id: created.id,
-          slug: created.slug,
-          businessName: created.businessName,
-          tradeName: created.tradeName || created.businessName,
-          documentType: created.documentType,
-          documentNumber: created.documentNumber,
-          fiscalAddress: created.fiscalAddress || 'Venezuela',
-          phone: created.phone || '',
-          email: created.email || '',
-          isSpecialTaxpayer: created.isSpecialTaxpayer,
-          internalBarcodePrefix: created.internalBarcodePrefix || '204',
-          isActive: created.isActive ?? true,
-          usersCount: 1,
-          productsCount: 0,
-          invoicesCount: 0,
-          totalSalesUsd: 0,
-          createdAt: new Date().toISOString().slice(0, 10),
-        };
-        setTenantsList((prev) => [newT, ...prev]);
-      } else {
-        const newT: TenantItem = {
-          id: `t-${Date.now()}`,
-          slug: cleanSlug,
-          businessName: payload.businessName,
-          tradeName: payload.tradeName,
-          documentType: payload.documentType,
-          documentNumber: payload.documentNumber,
-          fiscalAddress: payload.fiscalAddress,
-          phone: payload.phone,
-          email: payload.email,
-          isSpecialTaxpayer: payload.isSpecialTaxpayer,
-          internalBarcodePrefix: '204',
-          isActive: true,
-          usersCount: 1,
-          productsCount: 0,
-          invoicesCount: 0,
-          totalSalesUsd: 0,
-          createdAt: new Date().toISOString().slice(0, 10),
-        };
-        setTenantsList((prev) => [newT, ...prev]);
-      }
+      await loadStoreData(user);
+      alert('✅ ¡Copia de seguridad (Backup JSON) descargada desde PostgreSQL!');
     } catch {
-      const newT: TenantItem = {
-        id: `t-${Date.now()}`,
-        slug: cleanSlug,
-        businessName: payload.businessName,
-        tradeName: payload.tradeName,
-        documentType: payload.documentType,
-        documentNumber: payload.documentNumber,
-        fiscalAddress: payload.fiscalAddress,
-        phone: payload.phone,
-        email: payload.email,
-        isSpecialTaxpayer: payload.isSpecialTaxpayer,
-        internalBarcodePrefix: '204',
-        isActive: true,
-        usersCount: 1,
-        productsCount: 0,
-        invoicesCount: 0,
-        totalSalesUsd: 0,
-        createdAt: new Date().toISOString().slice(0, 10),
-      };
-      setTenantsList((prev) => [newT, ...prev]);
+      alert('Error de conexión descargando backup.');
+    } finally {
+      setIsBackupDownloading(false);
     }
-
-    setIsAddTenantModalOpen(false);
-    setNewTenantBusinessName('');
-    setNewTenantTradeName('');
-    setNewTenantDocNumber('');
-    setNewTenantAddress('');
-    setNewTenantPhone('');
-    setNewTenantEmail('');
-    setNewTenantSlug('');
-    alert(`¡Negocio "${payload.businessName}" creado exitosamente! Credenciales de acceso generadas: Usuario ${payload.adminUsername} | Clave Temporal: ${generatedTempPassword} (por favor cámbiela tras el primer acceso)`);
   };
 
-  // U: UPDATE TENANT
-  const handleUpdateTenant = async (e: React.FormEvent) => {
+  // Cambio de contraseña para usuarios de tienda
+  const handleStoreChangePassword = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingTenant) return;
-
+    setStorePwdMsg(null);
     try {
-      await fetch(`/api/v1/tenants/${editingTenant.id}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('vuelto_token') || ''}`,
-        },
+      const res = await apiFetch('/api/v1/auth/change-password', {
+        method: 'POST',
         body: JSON.stringify({
-          businessName: editingTenant.businessName,
-          tradeName: editingTenant.tradeName,
-          phone: editingTenant.phone,
-          email: editingTenant.email,
-          isSpecialTaxpayer: editingTenant.isSpecialTaxpayer,
+          currentPassword: storeCurPwd,
+          newPassword: storeNewPwd,
+          confirmPassword: storeConfPwd,
         }),
-      });
-    } catch {}
-
-    setTenantsList((prev) =>
-      prev.map((t) => (t.id === editingTenant.id ? { ...t, ...editingTenant } : t))
-    );
-    setIsEditTenantModalOpen(false);
-    setEditingTenant(null);
-    alert(`Comercio "${editingTenant.businessName}" actualizado correctamente.`);
-  };
-
-  // D: DELETE / SUSPEND TENANT
-  const handleDeleteTenant = async () => {
-    if (!deletingTenant) return;
-
-    try {
-      await fetch(`/api/v1/tenants/${deletingTenant.id}`, {
-        method: 'DELETE',
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem('vuelto_token') || ''}`,
-        },
-      });
-    } catch {}
-
-    setTenantsList((prev) =>
-      prev.map((t) => (t.id === deletingTenant.id ? { ...t, isActive: false } : t))
-    );
-    setIsDeleteTenantModalOpen(false);
-    setDeletingTenant(null);
-    alert(`El comercio ha sido dado de baja y sus accesos fueron suspendidos.`);
-  };
-
-  // TOGGLE ACTIVE STATUS
-  const handleToggleTenantActive = async (tenantId: string) => {
-    const current = tenantsList.find((t) => t.id === tenantId);
-    if (!current) return;
-    const updatedStatus = !current.isActive;
-
-    try {
-      await fetch(`/api/v1/tenants/${tenantId}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('vuelto_token') || ''}`,
-        },
-        body: JSON.stringify({ isActive: updatedStatus }),
-      });
-    } catch {}
-
-    setTenantsList((prev) =>
-      prev.map((t) => (t.id === tenantId ? { ...t, isActive: updatedStatus } : t))
-    );
-    alert(`Estado del comercio "${current.businessName}" cambiado a ${updatedStatus ? 'ACTIVO' : 'SUSPENDIDO'}.`);
-  };
-
-  const handleSwitchTenant = (t: TenantItem) => {
-    if (user?.roleId === 'SUPER_ADMIN') {
-      setUser({
-        ...user,
-        tenantId: t.id,
-        businessName: t.businessName,
-      });
-      alert(`👑 Súper Admin: Ha conmutado la gestión activa a "${t.businessName}".`);
-      setActiveTab('METRICS');
+      }, handleLogout);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setStorePwdMsg({ type: 'err', text: data.message || 'Error actualizando contraseña.' });
+        return;
+      }
+      if (data.tokens?.accessToken) {
+        setSessionTokens(data.tokens.accessToken, data.tokens.refreshToken);
+      }
+      setStoreCurPwd('');
+      setStoreNewPwd('');
+      setStoreConfPwd('');
+      setStorePwdMsg({ type: 'ok', text: 'Contraseña actualizada correctamente.' });
+    } catch {
+      setStorePwdMsg({ type: 'err', text: 'Error de red actualizando contraseña.' });
     }
   };
 
@@ -2311,7 +2041,7 @@ export const App: React.FC = () => {
               SISTEMA BIMONEDA & GESTIÓN INTEGRAL
             </p>
             <div style={{ marginTop: '10px', display: 'inline-block', backgroundColor: '#062F3B', padding: '4px 12px', borderRadius: '16px', border: '1px solid #10B98144', fontSize: '11px', color: '#94A3B8' }}>
-              BCV Oficial: {bcvRate.toFixed(2)} Bs/$ • SENIAT Prov. 0071
+              {bcvRate > 0 ? `BCV Oficial: ${bcvRate.toFixed(2)} Bs/$ • SENIAT Prov. 0071` : 'SENIAT Prov. 0071 • Conexión Segura'}
             </div>
           </div>
 
@@ -2327,7 +2057,7 @@ export const App: React.FC = () => {
               <input
                 type="text"
                 autoComplete="username"
-                placeholder="Ej. superadmin, admin o cajero1"
+                placeholder="Ingresa tu usuario"
                 value={usernameInput}
                 onChange={(e) => setUsernameInput(e.target.value)}
                 style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid #334155', backgroundColor: '#062F3B', color: '#FFFFFF', fontSize: '14px', outline: 'none' }}
@@ -2346,6 +2076,20 @@ export const App: React.FC = () => {
               />
             </div>
 
+            {requiresTwoFactor && (
+              <div>
+                <label style={{ display: 'block', fontSize: '12px', color: '#A3E635', marginBottom: '6px', fontWeight: '600' }}>Código 2FA (Authenticator)</label>
+                <input
+                  type="text"
+                  maxLength={6}
+                  placeholder="6 dígitos TOTP"
+                  value={twoFactorInput}
+                  onChange={(e) => setTwoFactorInput(e.target.value)}
+                  style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid #10B981', backgroundColor: '#062F3B', color: '#FFFFFF', fontSize: '16px', textAlign: 'center', letterSpacing: '4px', outline: 'none' }}
+                />
+              </div>
+            )}
+
             <button
               type="submit"
               disabled={loginLoading}
@@ -2363,24 +2107,26 @@ export const App: React.FC = () => {
                 transition: 'background-color 0.2s',
               }}
             >
-              {loginLoading ? 'Iniciando sesión...' : 'Iniciar Sesión'}
+              {loginLoading ? 'Autenticando...' : 'Iniciar Sesión'}
             </button>
           </form>
-
-          {(import.meta as any).env?.DEV && (
-            <div style={{ textAlign: 'center', margin: '20px 0 10px 0' }}>
-              <a
-                href="/docs/demo"
-                target="_blank"
-                rel="noreferrer"
-                style={{ fontSize: '11px', color: '#38BDF8', textDecoration: 'none' }}
-              >
-                Guía de pruebas en entorno local (/docs/demo)
-              </a>
-            </div>
-          )}
         </div>
       </div>
+    );
+  }
+
+  // VISTA EXCLUSIVA Y ORGANIZADA DEL SÚPER ADMINISTRADOR (SIN MEZCLAR FUNCIONES DE TIENDA/POS)
+  if (user.roleId === 'SUPER_ADMIN') {
+    return (
+      <SuperAdminConsole
+        user={user}
+        bcvRate={bcvRate}
+        onLogout={handleLogout}
+        onUserUpdated={(updated) => {
+          setUser(updated);
+          localStorage.setItem('vuelto_user_session', JSON.stringify(updated));
+        }}
+      />
     );
   }
 
@@ -2504,11 +2250,7 @@ export const App: React.FC = () => {
             marginBottom: '16px',
             textAlign: 'center',
           }}>
-            {isSuperAdmin
-              ? '👑 SÚPER ADMIN GLOBAL (TENANTS)'
-              : isVendedor
-              ? '🛒 MODO CAJERO / VENDEDOR'
-              : '💼 MODO ADMINISTRADOR TIENDA'}
+            {isVendedor ? '🛒 MODO CAJERO / VENDEDOR' : '💼 MODO ADMINISTRADOR TIENDA'}
           </div>
 
           {/* NAVEGACIÓN BASADA EN ROLES (RBAC) */}
@@ -2521,9 +2263,6 @@ export const App: React.FC = () => {
                   { id: 'RATES', label: 'Tasas Oficiales BCV', icon: <RefreshCw size={17} /> },
                 ]
               : [
-                  ...(isSuperAdmin
-                    ? [{ id: 'SUPER_ADMIN', label: 'Súper Admin (Negocios)', icon: <Building size={17} /> }]
-                    : []),
                   { id: 'POS', label: 'Punto de Venta (POS)', icon: <ShoppingCart size={17} /> },
                   { id: 'METRICS', label: 'Dashboard & Finanzas', icon: <TrendingUp size={17} /> },
                   { id: 'INVENTORY', label: 'Inventario & Kardex', icon: <Package size={17} /> },
@@ -2609,9 +2348,14 @@ export const App: React.FC = () => {
               <p style={{ fontSize: '12px', fontWeight: 'bold', color: '#F8FAFC' }}>{user.fullName}</p>
               <p style={{ fontSize: '10px', color: '#38BDF8' }}>@{user.username} ({user.roleId})</p>
             </div>
-            <button onClick={handleLogout} title="Cerrar Sesión" style={{ background: 'none', border: 'none', color: '#94A3B8', cursor: 'pointer', padding: '4px' }}>
-              <LogOut size={16} />
-            </button>
+            <div style={{ display: 'flex', gap: '4px' }}>
+              <button onClick={() => { setStorePwdMsg(null); setIsStorePwdModalOpen(true); }} title="Cambiar Contraseña" style={{ background: 'none', border: 'none', color: '#38BDF8', cursor: 'pointer', padding: '4px' }}>
+                <ShieldCheck size={16} />
+              </button>
+              <button onClick={handleLogout} title="Cerrar Sesión" style={{ background: 'none', border: 'none', color: '#94A3B8', cursor: 'pointer', padding: '4px' }}>
+                <LogOut size={16} />
+              </button>
+            </div>
           </div>
         </aside>
 
@@ -3829,7 +3573,7 @@ export const App: React.FC = () => {
                         <td style={{ padding: '12px 14px', textAlign: 'center' }}>
                           <div style={{ display: 'flex', gap: '6px', justifyContent: 'center' }}>
                             <button
-                              onClick={() => setSelectedSale(sale)}
+                              onClick={() => handleInspectSale(sale)}
                               style={{ backgroundColor: '#062F3B', border: '1px solid #155E75', color: '#FFFFFF', padding: '5px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
                             >
                               Ver Detalle
@@ -4003,7 +3747,7 @@ export const App: React.FC = () => {
                       ].map((opt) => (
                         <div
                           key={opt.id}
-                          onClick={() => setActiveRateSource(opt.id as any)}
+                          onClick={() => handleSelectRateSource(opt.id as any)}
                           style={{
                             display: 'flex',
                             alignItems: 'center',
@@ -4029,7 +3773,7 @@ export const App: React.FC = () => {
                     </div>
 
                     {activeRateSource === 'CUSTOM' && (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', backgroundColor: '#062F3B', padding: '10px', borderRadius: '8px', marginBottom: '12px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', backgroundColor: '#062F3B', padding: '10px', borderRadius: '8px', marginBottom: '12px', flexWrap: 'wrap' }}>
                         <span style={{ fontSize: '12px', color: '#CBD5E1' }}>Monto Tasa (Bs):</span>
                         <input
                           type="number"
@@ -4038,6 +3782,12 @@ export const App: React.FC = () => {
                           onChange={(e) => setCustomRateInput(e.target.value)}
                           style={{ width: '100px', padding: '6px', borderRadius: '6px', border: '1px solid #10B981', backgroundColor: '#071F27', color: '#10B981', fontWeight: 'bold', fontSize: '14px' }}
                         />
+                        <button
+                          onClick={() => handleSelectRateSource('CUSTOM', parseFloat(customRateInput) || bcvRate)}
+                          style={{ padding: '6px 12px', borderRadius: '6px', border: 'none', backgroundColor: '#10B981', color: '#022C22', fontWeight: 'bold', fontSize: '12px', cursor: 'pointer' }}
+                        >
+                          Guardar Tasa
+                        </button>
                       </div>
                     )}
 
@@ -4066,7 +3816,7 @@ export const App: React.FC = () => {
                           </p>
                         </div>
                         <button
-                          onClick={() => setEnableIva(!enableIva)}
+                          onClick={() => handleToggleTaxRegime('enableIva', !enableIva)}
                           style={{
                             padding: '6px 14px',
                             borderRadius: '20px',
@@ -4091,7 +3841,7 @@ export const App: React.FC = () => {
                           </p>
                         </div>
                         <button
-                          onClick={() => setEnableIgtf(!enableIgtf)}
+                          onClick={() => handleToggleTaxRegime('enableIgtf', !enableIgtf)}
                           style={{
                             padding: '6px 14px',
                             borderRadius: '20px',
@@ -4115,29 +3865,13 @@ export const App: React.FC = () => {
                 </div>
               )}
 
-              {/* Gráfico Histórico */}
+              {/* Referencia de Tasas en Vivo */}
               <div style={{ backgroundColor: '#0B3B49', padding: '20px', borderRadius: '12px', border: '1px solid #155E75' }}>
-                <h3 style={{ fontSize: '15px', fontWeight: 'bold', marginBottom: '16px' }}>Tendencia de Fluctuación de la Tasa BCV (Últimos 7 días)</h3>
-                <div style={{ display: 'flex', alignItems: 'flex-end', gap: '16px', height: '140px', paddingTop: '10px' }}>
-                  {[
-                    { day: '18 Nov', rate: 49.35 },
-                    { day: '19 Nov', rate: 49.87 },
-                    { day: '20 Nov', rate: 50.66 },
-                    { day: '21 Nov', rate: 51.18 },
-                    { day: '22 Nov', rate: 51.71 },
-                    { day: '23 Nov', rate: 52.24 },
-                    { day: '24 Nov (Hoy)', rate: bcvRate },
-                  ].map((pt, idx) => {
-                    const heightPercent = ((pt.rate - 48) / (bcvRate + 1 - 48)) * 100;
-                    return (
-                      <div key={idx} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', height: '100%', justifyContent: 'flex-end' }}>
-                        <span style={{ fontSize: '10px', color: '#10B981', fontWeight: 'bold', marginBottom: '4px' }}>{pt.rate.toFixed(2)}</span>
-                        <div style={{ width: '100%', height: `${Math.max(heightPercent, 20)}%`, backgroundColor: idx === 6 ? '#10B981' : '#0284C7', borderRadius: '4px 4px 0 0' }} />
-                        <span style={{ fontSize: '10px', color: '#94A3B8', marginTop: '6px' }}>{pt.day}</span>
-                      </div>
-                    );
-                  })}
-                </div>
+                <h3 style={{ fontSize: '15px', fontWeight: 'bold', marginBottom: '10px' }}>Estado de Sincronización BCV</h3>
+                <p style={{ fontSize: '13px', color: '#CBD5E1' }}>
+                  Última tasa oficial sincronizada: <strong style={{ color: '#10B981' }}>{bcvRate > 0 ? `${bcvRate.toFixed(2)} Bs/$` : 'Pendiente de sincronización'}</strong>
+                  {ratesData?.bcv?.lastUpdated ? ` • Actualizado: ${new Date(ratesData.bcv.lastUpdated).toLocaleString('es-VE')}` : ''}
+                </p>
               </div>
             </div>
           )}
@@ -4281,290 +4015,6 @@ export const App: React.FC = () => {
                         </td>
                       </tr>
                     ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-
-          {/* TAB 11: SÚPER ADMINISTRADOR GLOBAL (CRUD DE TODOS LOS NEGOCIOS / TENANTS) */}
-          {activeTab === 'SUPER_ADMIN' && isSuperAdmin && (
-            <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '12px' }}>
-                <div>
-                  <h2 style={{ fontSize: '24px', fontWeight: 'bold' }}>👑 Súper Administrador Global (CRUD de Negocios & Tenants)</h2>
-                  <p style={{ color: '#94A3B8', fontSize: '13px' }}>
-                    Control maestro multi-inquilino: alta de nuevos negocios, auditoría de métricas de ventas y conmutación entre tiendas.
-                  </p>
-                </div>
-
-                <button
-                  onClick={() => setIsAddTenantModalOpen(true)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '8px',
-                    backgroundColor: '#10B981',
-                    color: '#FFFFFF',
-                    padding: '10px 18px',
-                    borderRadius: '8px',
-                    border: 'none',
-                    fontWeight: 'bold',
-                    fontSize: '13px',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <Plus size={16} />
-                  <span>+ Registrar Nuevo Negocio (Tenant)</span>
-                </button>
-              </div>
-
-              {/* TARJETAS DE MÉTRICAS GLOBALES DE LA PLATAFORMA */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '14px', marginBottom: '24px' }}>
-                <div style={{ backgroundColor: '#0B3B49', padding: '18px', borderRadius: '12px', border: '1px solid #155E75' }}>
-                  <span style={{ fontSize: '11px', color: '#94A3B8' }}>Total Comercios Registrados</span>
-                  <p style={{ fontSize: '24px', fontWeight: 'bold', color: '#38BDF8', marginTop: '6px' }}>{tenantsList.length}</p>
-                  <span style={{ fontSize: '10px', color: '#10B981' }}>● Plataforma SaaS Multi-Tenant</span>
-                </div>
-
-                <div style={{ backgroundColor: '#0B3B49', padding: '18px', borderRadius: '12px', border: '1px solid #155E75' }}>
-                  <span style={{ fontSize: '11px', color: '#94A3B8' }}>Facturación Acumulada Global</span>
-                  <p style={{ fontSize: '24px', fontWeight: 'bold', color: '#10B981', marginTop: '6px' }}>
-                    ${tenantsList.reduce((acc, t) => acc + (t.totalSalesUsd || 0), 0).toLocaleString('en-US', { minimumFractionDigits: 2 })} USD
-                  </p>
-                  <span style={{ fontSize: '10px', color: '#38BDF8' }}>Ventas procesadas</span>
-                </div>
-
-                <div style={{ backgroundColor: '#0B3B49', padding: '18px', borderRadius: '12px', border: '1px solid #155E75' }}>
-                  <span style={{ fontSize: '11px', color: '#94A3B8' }}>Comercios Operativos</span>
-                  <p style={{ fontSize: '24px', fontWeight: 'bold', color: '#A3E635', marginTop: '6px' }}>
-                    {tenantsList.filter((t) => t.isActive).length} Activos
-                  </p>
-                  <span style={{ fontSize: '10px', color: '#94A3B8' }}>Emitiendo facturas</span>
-                </div>
-
-                <div style={{ backgroundColor: '#0B3B49', padding: '18px', borderRadius: '12px', border: '1px solid #155E75' }}>
-                  <span style={{ fontSize: '11px', color: '#94A3B8' }}>Comercios Suspendidos</span>
-                  <p style={{ fontSize: '24px', fontWeight: 'bold', color: '#EF4444', marginTop: '6px' }}>
-                    {tenantsList.filter((t) => !t.isActive).length}
-                  </p>
-                  <span style={{ fontSize: '10px', color: '#94A3B8' }}>Acceso bloqueado</span>
-                </div>
-              </div>
-
-              {/* BARRA DE FILTRO Y PESTAÑAS DE ESTADO (CRUD SUPER ADMIN) */}
-              <div style={{ marginBottom: '16px', display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
-                <div style={{ position: 'relative', flex: 1, minWidth: '280px' }}>
-                  <Search size={16} color="#94A3B8" style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)' }} />
-                  <input
-                    type="text"
-                    placeholder="Buscar negocio por Nombre Comercial, Razón Social, RIF o Slug..."
-                    value={tenantSearchQuery}
-                    onChange={(e) => setTenantSearchQuery(e.target.value)}
-                    style={{ width: '100%', padding: '10px 10px 10px 36px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#FFFFFF', fontSize: '13px', outline: 'none' }}
-                  />
-                </div>
-
-                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                  {[
-                    { id: 'ALL', label: `Todos (${tenantsList.length})` },
-                    { id: 'ACTIVE', label: `Activos (${tenantsList.filter((t) => t.isActive).length})` },
-                    { id: 'SUSPENDED', label: `Suspendidos (${tenantsList.filter((t) => !t.isActive).length})` },
-                    { id: 'SPECIAL', label: `Especiales (${tenantsList.filter((t) => t.isSpecialTaxpayer).length})` },
-                  ].map((f) => (
-                    <button
-                      key={f.id}
-                      onClick={() => setTenantFilterStatus(f.id as any)}
-                      style={{
-                        padding: '8px 14px',
-                        borderRadius: '8px',
-                        border: tenantFilterStatus === f.id ? '1px solid #10B981' : '1px solid #155E75',
-                        backgroundColor: tenantFilterStatus === f.id ? '#065F46' : '#062F3B',
-                        color: tenantFilterStatus === f.id ? '#FFFFFF' : '#94A3B8',
-                        fontWeight: 'bold',
-                        fontSize: '12px',
-                        cursor: 'pointer',
-                      }}
-                    >
-                      {f.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* TABLA GLOBAL DE TENANTS / NEGOCIOS */}
-              <div style={{ backgroundColor: '#0B3B49', borderRadius: '12px', border: '1px solid #155E75', overflowX: 'auto' }}>
-                <table style={{ width: '100%', textAlign: 'left', borderCollapse: 'collapse', fontSize: '12px' }}>
-                  <thead>
-                    <tr style={{ backgroundColor: '#062F3B', color: '#94A3B8', borderBottom: '1px solid #155E75' }}>
-                      <th style={{ padding: '12px 14px' }}>Comercio / Razón Social</th>
-                      <th style={{ padding: '12px 14px' }}>RIF</th>
-                      <th style={{ padding: '12px 14px' }}>Contacto & Dirección</th>
-                      <th style={{ padding: '12px 14px' }}>Régimen SENIAT</th>
-                      <th style={{ padding: '12px 14px' }}>Métricas (Ventas/Prod)</th>
-                      <th style={{ padding: '12px 14px' }}>Estado</th>
-                      <th style={{ padding: '12px 14px', textAlign: 'center' }}>Acciones Super Admin (CRUD)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {tenantsList
-                      .filter((t) => {
-                        const matchesQuery =
-                          t.businessName.toLowerCase().includes(tenantSearchQuery.toLowerCase()) ||
-                          t.tradeName.toLowerCase().includes(tenantSearchQuery.toLowerCase()) ||
-                          t.documentNumber.includes(tenantSearchQuery) ||
-                          t.slug.toLowerCase().includes(tenantSearchQuery.toLowerCase());
-                        if (!matchesQuery) return false;
-                        if (tenantFilterStatus === 'ACTIVE') return t.isActive;
-                        if (tenantFilterStatus === 'SUSPENDED') return !t.isActive;
-                        if (tenantFilterStatus === 'SPECIAL') return t.isSpecialTaxpayer;
-                        return true;
-                      })
-                      .map((tenant) => (
-                        <tr key={tenant.id} style={{ borderBottom: '1px solid #155E7533' }}>
-                          <td style={{ padding: '12px 14px' }}>
-                            <p style={{ fontWeight: 'bold', color: '#FFFFFF', fontSize: '13px' }}>{tenant.businessName}</p>
-                            <p style={{ fontSize: '11px', color: '#94A3B8' }}>{tenant.tradeName} • <span style={{ fontFamily: 'monospace', color: '#38BDF8' }}>@{tenant.slug}</span></p>
-                          </td>
-                          <td style={{ padding: '12px 14px', fontWeight: 'bold', fontFamily: 'monospace', color: '#A3E635' }}>
-                            {tenant.documentType}-{tenant.documentNumber}
-                          </td>
-                          <td style={{ padding: '12px 14px' }}>
-                            <p style={{ color: '#CBD5E1', fontSize: '11px' }}>{tenant.phone}</p>
-                            <p style={{ color: '#64748B', fontSize: '10px' }}>{tenant.email}</p>
-                          </td>
-                          <td style={{ padding: '12px 14px' }}>
-                            <span style={{ padding: '2px 8px', borderRadius: '4px', backgroundColor: tenant.isSpecialTaxpayer ? '#EF444422' : '#10B98122', color: tenant.isSpecialTaxpayer ? '#EF4444' : '#10B981', fontWeight: 'bold', fontSize: '10px' }}>
-                              {tenant.isSpecialTaxpayer ? 'Contribuyente Especial (IGTF 3%)' : 'Ordinario / Emprendimiento'}
-                            </span>
-                          </td>
-                          <td style={{ padding: '12px 14px' }}>
-                            <p style={{ fontWeight: 'bold', color: '#10B981' }}>${(tenant.totalSalesUsd || 0).toFixed(2)} USD</p>
-                            <p style={{ fontSize: '10px', color: '#94A3B8' }}>{tenant.productsCount || 0} prods • {tenant.invoicesCount || 0} facturas</p>
-                          </td>
-                          <td style={{ padding: '12px 14px' }}>
-                            <span style={{ padding: '3px 8px', borderRadius: '12px', backgroundColor: tenant.isActive ? '#10B98122' : '#EF444422', color: tenant.isActive ? '#10B981' : '#EF4444', fontWeight: 'bold', fontSize: '10px' }}>
-                              {tenant.isActive ? '● ACTIVO' : '● SUSPENDIDO'}
-                            </span>
-                          </td>
-                          <td style={{ padding: '12px 14px', textAlign: 'center' }}>
-                            <div style={{ display: 'flex', gap: '5px', justifyContent: 'center', flexWrap: 'wrap' }}>
-                              <button
-                                onClick={() => {
-                                  setSelectedTenantDetail(tenant);
-                                  setIsViewTenantDetailModalOpen(true);
-                                }}
-                                title="Ver ficha técnica completa del comercio"
-                                style={{
-                                  padding: '5px 8px',
-                                  borderRadius: '6px',
-                                  border: '1px solid #155E75',
-                                  backgroundColor: '#062F3B',
-                                  color: '#0284C7',
-                                  fontSize: '11px',
-                                  fontWeight: 'bold',
-                                  cursor: 'pointer',
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: '4px',
-                                }}
-                              >
-                                <Eye size={12} />
-                                <span>Detalles</span>
-                              </button>
-
-                              <button
-                                onClick={() => {
-                                  setEditingTenant(tenant);
-                                  setIsEditTenantModalOpen(true);
-                                }}
-                                title="Editar configuración comercial y fiscal"
-                                style={{
-                                  padding: '5px 8px',
-                                  borderRadius: '6px',
-                                  border: '1px solid #155E75',
-                                  backgroundColor: '#062F3B',
-                                  color: '#F59E0B',
-                                  fontSize: '11px',
-                                  fontWeight: 'bold',
-                                  cursor: 'pointer',
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: '4px',
-                                }}
-                              >
-                                <Edit3 size={12} />
-                                <span>Editar</span>
-                              </button>
-
-                              <button
-                                onClick={() => handleSwitchTenant(tenant)}
-                                title="Conmutar contexto de trabajo a este tenant"
-                                style={{
-                                  padding: '5px 8px',
-                                  borderRadius: '6px',
-                                  border: 'none',
-                                  backgroundColor: user?.tenantId === tenant.id ? '#10B981' : '#0284C7',
-                                  color: '#FFFFFF',
-                                  fontSize: '11px',
-                                  fontWeight: 'bold',
-                                  cursor: 'pointer',
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: '4px',
-                                }}
-                              >
-                                <ExternalLink size={12} />
-                                <span>{user?.tenantId === tenant.id ? 'En uso' : 'Gestionar'}</span>
-                              </button>
-
-                              <button
-                                onClick={() => handleToggleTenantActive(tenant.id)}
-                                title={tenant.isActive ? 'Suspender comercio' : 'Reactivar comercio'}
-                                style={{
-                                  padding: '5px 8px',
-                                  borderRadius: '6px',
-                                  border: 'none',
-                                  backgroundColor: tenant.isActive ? '#64748B' : '#16A34A',
-                                  color: '#FFFFFF',
-                                  fontSize: '11px',
-                                  fontWeight: 'bold',
-                                  cursor: 'pointer',
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: '4px',
-                                }}
-                              >
-                                {tenant.isActive ? <ToggleRight size={12} /> : <ToggleLeft size={12} />}
-                                <span>{tenant.isActive ? 'Suspender' : 'Activar'}</span>
-                              </button>
-
-                              <button
-                                onClick={() => {
-                                  setDeletingTenant(tenant);
-                                  setIsDeleteTenantModalOpen(true);
-                                }}
-                                title="Eliminar / Dar de baja este negocio"
-                                style={{
-                                  padding: '5px 8px',
-                                  borderRadius: '6px',
-                                  border: 'none',
-                                  backgroundColor: '#DC2626',
-                                  color: '#FFFFFF',
-                                  fontSize: '11px',
-                                  fontWeight: 'bold',
-                                  cursor: 'pointer',
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: '4px',
-                                }}
-                              >
-                                <Trash2 size={12} />
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
                   </tbody>
                 </table>
               </div>
@@ -5446,148 +4896,6 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* MODAL SÚPER ADMIN: REGISTRAR NUEVO NEGOCIO (TENANT) */}
-      {isAddTenantModalOpen && (
-        <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px', zIndex: 1000 }}>
-          <div style={{ width: '100%', maxWidth: '600px', backgroundColor: '#0B3B49', borderRadius: '20px', padding: '28px', border: '1px solid #10B981', maxHeight: '90vh', overflowY: 'auto' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
-              <div>
-                <h3 style={{ fontSize: '18px', fontWeight: 'bold', color: '#FFFFFF' }}>👑 Registrar Nuevo Negocio (Tenant)</h3>
-                <p style={{ fontSize: '11px', color: '#94A3B8' }}>Alta de comercio en la plataforma central multi-inquilino</p>
-              </div>
-              <button onClick={() => setIsAddTenantModalOpen(false)} style={{ background: 'none', border: 'none', color: '#94A3B8', cursor: 'pointer' }}>
-                <X size={20} />
-              </button>
-            </div>
-
-            <form onSubmit={handleCreateTenant} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                <div style={{ gridColumn: 'span 2' }}>
-                  <label style={{ display: 'block', fontSize: '11px', color: '#94A3B8', marginBottom: '4px' }}>Razón Social *</label>
-                  <input
-                    type="text"
-                    placeholder="Ej. Distribuidora Los Andes C.A."
-                    value={newTenantBusinessName}
-                    onChange={(e) => setNewTenantBusinessName(e.target.value)}
-                    style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#FFFFFF', fontSize: '13px' }}
-                    required
-                  />
-                </div>
-
-                <div>
-                  <label style={{ display: 'block', fontSize: '11px', color: '#94A3B8', marginBottom: '4px' }}>Nombre Comercial</label>
-                  <input
-                    type="text"
-                    placeholder="Ej. Abasto Los Andes"
-                    value={newTenantTradeName}
-                    onChange={(e) => setNewTenantTradeName(e.target.value)}
-                    style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#FFFFFF', fontSize: '13px' }}
-                  />
-                </div>
-
-                <div>
-                  <label style={{ display: 'block', fontSize: '11px', color: '#94A3B8', marginBottom: '4px' }}>Identificador / Slug URL</label>
-                  <input
-                    type="text"
-                    placeholder="los-andes"
-                    value={newTenantSlug}
-                    onChange={(e) => setNewTenantSlug(e.target.value)}
-                    style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#38BDF8', fontSize: '13px', fontFamily: 'monospace' }}
-                  />
-                </div>
-
-                <div>
-                  <label style={{ display: 'block', fontSize: '11px', color: '#94A3B8', marginBottom: '4px' }}>RIF / Documento Fiscal *</label>
-                  <div style={{ display: 'flex', gap: '6px' }}>
-                    <select
-                      value={newTenantDocType}
-                      onChange={(e) => setNewTenantDocType(e.target.value as any)}
-                      style={{ padding: '10px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#A3E635', fontSize: '12px', fontWeight: 'bold' }}
-                    >
-                      <option value="J">J-</option>
-                      <option value="G">G-</option>
-                      <option value="V">V-</option>
-                      <option value="E">E-</option>
-                    </select>
-                    <input
-                      type="text"
-                      placeholder="401234567"
-                      value={newTenantDocNumber}
-                      onChange={(e) => setNewTenantDocNumber(e.target.value)}
-                      style={{ flex: 1, padding: '10px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#FFFFFF', fontSize: '13px' }}
-                      required
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label style={{ display: 'block', fontSize: '11px', color: '#94A3B8', marginBottom: '4px' }}>Teléfono WhatsApp *</label>
-                  <input
-                    type="text"
-                    placeholder="+584121112233"
-                    value={newTenantPhone}
-                    onChange={(e) => setNewTenantPhone(e.target.value)}
-                    style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#FFFFFF', fontSize: '13px' }}
-                    required
-                  />
-                </div>
-
-                <div style={{ gridColumn: 'span 2' }}>
-                  <label style={{ display: 'block', fontSize: '11px', color: '#94A3B8', marginBottom: '4px' }}>Email de Contacto</label>
-                  <input
-                    type="email"
-                    placeholder="administracion@losandes.ve"
-                    value={newTenantEmail}
-                    onChange={(e) => setNewTenantEmail(e.target.value)}
-                    style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#FFFFFF', fontSize: '13px' }}
-                  />
-                </div>
-
-                <div style={{ gridColumn: 'span 2' }}>
-                  <label style={{ display: 'block', fontSize: '11px', color: '#94A3B8', marginBottom: '4px' }}>Dirección Fiscal</label>
-                  <input
-                    type="text"
-                    placeholder="Av. Principal, Edificio Central, Piso 1"
-                    value={newTenantAddress}
-                    onChange={(e) => setNewTenantAddress(e.target.value)}
-                    style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#FFFFFF', fontSize: '13px' }}
-                  />
-                </div>
-
-                <div style={{ gridColumn: 'span 2', display: 'flex', alignItems: 'center', gap: '8px', backgroundColor: '#062F3B', padding: '10px', borderRadius: '8px', border: '1px solid #155E75' }}>
-                  <input
-                    type="checkbox"
-                    id="isSpecialTaxpayerCheck"
-                    checked={newTenantIsSpecial}
-                    onChange={(e) => setNewTenantIsSpecial(e.target.checked)}
-                    style={{ width: '16px', height: '16px', accentColor: '#10B981' }}
-                  />
-                  <label htmlFor="isSpecialTaxpayerCheck" style={{ fontSize: '12px', color: '#CBD5E1', cursor: 'pointer' }}>
-                    <strong>¿Designado Contribuyente Especial por el SENIAT?</strong> (Habilita retención y cobro de IGTF 3% en divisas)
-                  </label>
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
-                <button
-                  type="button"
-                  onClick={() => setIsAddTenantModalOpen(false)}
-                  style={{ flex: 1, padding: '12px', borderRadius: '8px', border: '1px solid #334155', backgroundColor: 'transparent', color: '#CBD5E1', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer' }}
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  style={{ flex: 1, padding: '12px', borderRadius: '8px', border: 'none', backgroundColor: '#10B981', color: '#FFFFFF', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer' }}
-                >
-                  Crear y Habilitar Comercio
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
       {/* MODAL 2: AJUSTE FÍSICO DE STOCK (KARDEX) */}
       {isStockAdjustModalOpen && selectedStockProduct && (
         <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px', zIndex: 100 }}>
@@ -6052,210 +5360,30 @@ export const App: React.FC = () => {
           </div>
         </div>
       )}
-      {/* MODAL SÚPER ADMIN: EDITAR NEGOCIO (TENANT) */}
-      {isEditTenantModalOpen && editingTenant && (
-        <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px', zIndex: 1100 }}>
-          <div style={{ width: '100%', maxWidth: '600px', backgroundColor: '#0B3B49', borderRadius: '20px', padding: '26px', border: '1px solid #F59E0B', maxHeight: '90vh', overflowY: 'auto', boxShadow: '0 25px 60px rgba(0,0,0,0.8)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
-              <div>
-                <h3 style={{ fontSize: '18px', fontWeight: 'bold', color: '#FFFFFF' }}>✏️ Editar Comercio: {editingTenant.businessName}</h3>
-                <p style={{ fontSize: '11px', color: '#F59E0B' }}>Modificar datos fiscales y configuración del tenant</p>
-              </div>
-              <button onClick={() => setIsEditTenantModalOpen(false)} style={{ background: 'none', border: 'none', color: '#94A3B8', cursor: 'pointer' }}>
+
+      {/* MODAL CAMBIAR CONTRASEÑA (TIENDA) */}
+      {isStorePwdModalOpen && (
+        <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px', zIndex: 1100 }}>
+          <div style={{ width: '100%', maxWidth: '420px', backgroundColor: '#0B3B49', borderRadius: '18px', padding: '24px', border: '1px solid #38BDF8' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+              <h3 style={{ fontSize: '17px', fontWeight: 'bold' }}>Cambiar Mi Contraseña</h3>
+              <button onClick={() => setIsStorePwdModalOpen(false)} style={{ background: 'none', border: 'none', color: '#94A3B8', cursor: 'pointer' }}>
                 <X size={20} />
               </button>
             </div>
-
-            <form onSubmit={handleUpdateTenant} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                <div style={{ gridColumn: 'span 2' }}>
-                  <label style={{ display: 'block', fontSize: '11px', color: '#94A3B8', marginBottom: '4px' }}>Razón Social *</label>
-                  <input
-                    type="text"
-                    value={editingTenant.businessName}
-                    onChange={(e) => setEditingTenant({ ...editingTenant, businessName: e.target.value })}
-                    style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#FFFFFF', fontSize: '13px' }}
-                    required
-                  />
-                </div>
-
-                <div>
-                  <label style={{ display: 'block', fontSize: '11px', color: '#94A3B8', marginBottom: '4px' }}>Nombre Comercial</label>
-                  <input
-                    type="text"
-                    value={editingTenant.tradeName}
-                    onChange={(e) => setEditingTenant({ ...editingTenant, tradeName: e.target.value })}
-                    style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#FFFFFF', fontSize: '13px' }}
-                  />
-                </div>
-
-                <div>
-                  <label style={{ display: 'block', fontSize: '11px', color: '#94A3B8', marginBottom: '4px' }}>RIF / Cédula Fiscal</label>
-                  <input
-                    type="text"
-                    value={`${editingTenant.documentType}-${editingTenant.documentNumber}`}
-                    onChange={(e) => {
-                      const val = e.target.value.replace(/[^0-9]/g, '');
-                      setEditingTenant({ ...editingTenant, documentNumber: val });
-                    }}
-                    style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#A3E635', fontSize: '13px', fontFamily: 'monospace' }}
-                  />
-                </div>
-
-                <div>
-                  <label style={{ display: 'block', fontSize: '11px', color: '#94A3B8', marginBottom: '4px' }}>Teléfono WhatsApp</label>
-                  <input
-                    type="text"
-                    value={editingTenant.phone}
-                    onChange={(e) => setEditingTenant({ ...editingTenant, phone: e.target.value })}
-                    style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#FFFFFF', fontSize: '13px' }}
-                  />
-                </div>
-
-                <div>
-                  <label style={{ display: 'block', fontSize: '11px', color: '#94A3B8', marginBottom: '4px' }}>Email de Contacto</label>
-                  <input
-                    type="email"
-                    value={editingTenant.email}
-                    onChange={(e) => setEditingTenant({ ...editingTenant, email: e.target.value })}
-                    style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#FFFFFF', fontSize: '13px' }}
-                  />
-                </div>
-
-                <div style={{ gridColumn: 'span 2' }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', backgroundColor: '#062F3B', padding: '10px 14px', borderRadius: '8px', border: '1px solid #155E75' }}>
-                    <input
-                      type="checkbox"
-                      checked={editingTenant.isSpecialTaxpayer}
-                      onChange={(e) => setEditingTenant({ ...editingTenant, isSpecialTaxpayer: e.target.checked })}
-                    />
-                    <span style={{ fontSize: '12px', color: '#FFFFFF' }}>Contribuyente Especial SENIAT (Aplica IGTF 3% en Divisas)</span>
-                  </label>
-                </div>
+            {storePwdMsg && (
+              <div style={{ marginBottom: '12px', padding: '10px', borderRadius: '8px', fontSize: '12px', backgroundColor: storePwdMsg.type === 'ok' ? '#10B98122' : '#EF444422', color: storePwdMsg.type === 'ok' ? '#A3E635' : '#FCA5A5', border: `1px solid ${storePwdMsg.type === 'ok' ? '#10B981' : '#EF4444'}` }}>
+                {storePwdMsg.text}
               </div>
-
-              <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
-                <button
-                  type="button"
-                  onClick={() => setIsEditTenantModalOpen(false)}
-                  style={{ flex: 1, padding: '11px', borderRadius: '8px', border: '1px solid #334155', backgroundColor: 'transparent', color: '#CBD5E1', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer' }}
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  style={{ flex: 1, padding: '11px', borderRadius: '8px', border: 'none', backgroundColor: '#F59E0B', color: '#000000', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer' }}
-                >
-                  Guardar Cambios
-                </button>
-              </div>
+            )}
+            <form onSubmit={handleStoreChangePassword} style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <input type="password" required placeholder="Contraseña actual" value={storeCurPwd} onChange={(e) => setStoreCurPwd(e.target.value)} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#FFFFFF' }} />
+              <input type="password" required minLength={8} placeholder="Nueva contraseña (min 8, Mayús/Minús/Núm)" value={storeNewPwd} onChange={(e) => setStoreNewPwd(e.target.value)} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#FFFFFF' }} />
+              <input type="password" required placeholder="Confirmar nueva contraseña" value={storeConfPwd} onChange={(e) => setStoreConfPwd(e.target.value)} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #155E75', backgroundColor: '#062F3B', color: '#FFFFFF' }} />
+              <button type="submit" style={{ padding: '11px', borderRadius: '8px', border: 'none', backgroundColor: '#10B981', color: '#071F27', fontWeight: 'bold', cursor: 'pointer', marginTop: '4px' }}>
+                Actualizar Contraseña
+              </button>
             </form>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL SÚPER ADMIN: VER DETALLE / CREDENCIALES DEL COMERCIO */}
-      {isViewTenantDetailModalOpen && selectedTenantDetail && (
-        <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px', zIndex: 1100 }}>
-          <div style={{ width: '100%', maxWidth: '540px', backgroundColor: '#0B3B49', borderRadius: '20px', padding: '24px', border: '1px solid #0284C7', boxShadow: '0 25px 60px rgba(0,0,0,0.8)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-              <div>
-                <h3 style={{ fontSize: '18px', fontWeight: 'bold', color: '#FFFFFF' }}>🏢 {selectedTenantDetail.businessName}</h3>
-                <p style={{ fontSize: '11px', color: '#0284C7' }}>Ficha técnica y credenciales de acceso</p>
-              </div>
-              <button onClick={() => setIsViewTenantDetailModalOpen(false)} style={{ background: 'none', border: 'none', color: '#94A3B8', cursor: 'pointer' }}>
-                <X size={20} />
-              </button>
-            </div>
-
-            <div style={{ backgroundColor: '#062F3B', padding: '14px', borderRadius: '12px', border: '1px solid #155E75', marginBottom: '14px', display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '12px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#94A3B8' }}>Nombre Comercial:</span>
-                <span style={{ color: '#FFFFFF', fontWeight: 'bold' }}>{selectedTenantDetail.tradeName}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#94A3B8' }}>Identificación Fiscal:</span>
-                <span style={{ color: '#A3E635', fontFamily: 'monospace', fontWeight: 'bold' }}>
-                  {selectedTenantDetail.documentType}-{selectedTenantDetail.documentNumber}
-                </span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#94A3B8' }}>Slug de Acceso Web:</span>
-                <span style={{ color: '#38BDF8', fontFamily: 'monospace' }}>{selectedTenantDetail.slug}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#94A3B8' }}>WhatsApp / Contacto:</span>
-                <span style={{ color: '#FFFFFF' }}>{selectedTenantDetail.phone || 'No configurado'}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#94A3B8' }}>Email Notificaciones:</span>
-                <span style={{ color: '#FFFFFF' }}>{selectedTenantDetail.email || 'No configurado'}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#94A3B8' }}>Régimen SENIAT:</span>
-                <span style={{ color: selectedTenantDetail.isSpecialTaxpayer ? '#EF4444' : '#10B981', fontWeight: 'bold' }}>
-                  {selectedTenantDetail.isSpecialTaxpayer ? 'Contribuyente Especial (IGTF 3%)' : 'Ordinario / Emprendimiento'}
-                </span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#94A3B8' }}>Prefijo EAN-13 Interno:</span>
-                <span style={{ color: '#A3E635', fontFamily: 'monospace' }}>{selectedTenantDetail.internalBarcodePrefix || '204'}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#94A3B8' }}>Estado de Cuenta:</span>
-                <span style={{ color: selectedTenantDetail.isActive ? '#10B981' : '#EF4444', fontWeight: 'bold' }}>
-                  {selectedTenantDetail.isActive ? '● ACTIVO' : '● SUSPENDIDO'}
-                </span>
-              </div>
-            </div>
-
-            {/* DATOS DE ACCESO GENERADOS */}
-            <div style={{ backgroundColor: '#071F27', padding: '12px 14px', borderRadius: '10px', border: '1px solid #10B98144', marginBottom: '16px' }}>
-              <span style={{ fontSize: '11px', color: '#10B981', fontWeight: 'bold' }}>CREDENCIALES ADMINISTRATIVAS:</span>
-              <p style={{ fontSize: '12px', color: '#CBD5E1', marginTop: '4px' }}>
-                Usuario Admin: <strong style={{ color: '#FFFFFF' }}>admin_{selectedTenantDetail.slug.slice(0, 8)}</strong> • Clave: <code style={{ color: '#A3E635' }}>Asignada al registrar el tenant</code>
-              </p>
-            </div>
-
-            <button
-              onClick={() => setIsViewTenantDetailModalOpen(false)}
-              style={{ width: '100%', padding: '12px', borderRadius: '8px', border: 'none', backgroundColor: '#0284C7', color: '#FFFFFF', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer' }}
-            >
-              Cerrar Ficha Técnica
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL SÚPER ADMIN: CONFIRMAR BAJA / ELIMINACIÓN */}
-      {isDeleteTenantModalOpen && deletingTenant && (
-        <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px', zIndex: 1100 }}>
-          <div style={{ width: '100%', maxWidth: '440px', backgroundColor: '#0B3B49', borderRadius: '20px', padding: '24px', border: '1px solid #EF4444', textAlign: 'center' }}>
-            <div style={{ width: '50px', height: '50px', borderRadius: '25px', backgroundColor: '#EF444422', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 14px auto', color: '#EF4444' }}>
-              <Trash2 size={24} />
-            </div>
-            <h3 style={{ fontSize: '18px', fontWeight: 'bold', color: '#FFFFFF', marginBottom: '6px' }}>
-              ¿Dar de Baja Comercio?
-            </h3>
-            <p style={{ fontSize: '13px', color: '#CBD5E1', marginBottom: '16px' }}>
-              ¿Estás seguro de que deseas dar de baja al comercio <strong>"{deletingTenant.businessName}"</strong> ({deletingTenant.documentType}-{deletingTenant.documentNumber})? Los accesos al terminal POS y facturación quedarán suspendidos.
-            </p>
-            <div style={{ display: 'flex', gap: '10px' }}>
-              <button
-                type="button"
-                onClick={() => setIsDeleteTenantModalOpen(false)}
-                style={{ flex: 1, padding: '11px', borderRadius: '8px', border: '1px solid #334155', backgroundColor: 'transparent', color: '#CBD5E1', fontWeight: 'bold', fontSize: '12px', cursor: 'pointer' }}
-              >
-                Cancelar
-              </button>
-              <button
-                type="button"
-                onClick={handleDeleteTenant}
-                style={{ flex: 1, padding: '11px', borderRadius: '8px', border: 'none', backgroundColor: '#EF4444', color: '#FFFFFF', fontWeight: 'bold', fontSize: '12px', cursor: 'pointer' }}
-              >
-                Sí, Confirmar Baja
-              </button>
-            </div>
           </div>
         </div>
       )}

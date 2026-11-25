@@ -58,11 +58,13 @@ export const createProductSchema = z
     name: z.string().trim().min(2).max(150),
     unitOfMeasure: z.string().trim().max(20).default('UNIDAD').optional(),
     categoryId: z.string().uuid().optional(),
+    supplierId: z.string().uuid().optional(),
     costPriceUsd: z.number().min(0).default(0),
     salePriceUsd: z.number().min(0),
     taxRate: z.number().default(16.0),
     isExempt: z.boolean().default(false),
     minStockAlert: z.number().default(5),
+    initialStock: z.number().min(0).optional(),
     barcodes: z
       .array(
         z

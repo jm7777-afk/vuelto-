@@ -1,6 +1,6 @@
 import { eq, and, or, sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
-import { products, productBarcodes, productStock, warehouses } from '../db/schema.js';
+import { products, productBarcodes, productStock, warehouses, suppliers, categories, inventoryMovements } from '../db/schema.js';
 import { VenezuelaUtils } from '../utils/venezuela.js';
 import { AuditService } from './audit.service.js';
 
@@ -108,11 +108,13 @@ export class ProductService {
       sku?: string;
       name: string;
       categoryId?: string;
+      supplierId?: string;
       costPriceUsd?: number;
       salePriceUsd: number;
       taxRate?: number;
       isExempt?: boolean;
       minStockAlert?: number;
+      initialStock?: number;
       barcodes?: Array<{ barcode: string; barcodeType: 'EAN13' | 'EAN8' | 'CODE128' | 'UPC' | 'INTERNAL'; isPrimary?: boolean }>;
     }
   ) {
@@ -137,6 +139,7 @@ export class ProductService {
           name: data.name.trim(),
           unitOfMeasure: (data as any).unitOfMeasure || 'UNIDAD',
           categoryId: data.categoryId || null,
+          supplierId: data.supplierId || null,
           costPriceUsd: (data.costPriceUsd || 0).toFixed(4),
           salePriceUsd: data.salePriceUsd.toFixed(4),
           taxRate: (data.taxRate ?? 16.0).toFixed(2),
@@ -159,13 +162,45 @@ export class ProductService {
         }
       }
 
+      // Inicializar stock en el almacén por defecto si existe
+      const initialQty = data.initialStock ?? 0;
+      const [defaultWh] = await tx
+        .select()
+        .from(warehouses)
+        .where(and(eq(warehouses.tenantId, tenantId), eq(warehouses.isActive, true)))
+        .limit(1);
+
+      if (defaultWh) {
+        await tx.insert(productStock).values({
+          tenantId,
+          warehouseId: defaultWh.id,
+          productId: product.id,
+          quantity: initialQty.toFixed(3),
+        });
+
+        if (initialQty > 0) {
+          await tx.insert(inventoryMovements).values({
+            tenantId,
+            warehouseId: defaultWh.id,
+            productId: product.id,
+            userId,
+            movementType: 'IN',
+            quantity: initialQty.toFixed(3),
+            unitCostUsd: (data.costPriceUsd || 0).toFixed(4),
+            referenceType: 'INITIAL_STOCK',
+            referenceId: product.id,
+            reason: 'Stock inicial al crear producto',
+          });
+        }
+      }
+
       await AuditService.log({
         tenantId,
         userId,
         action: 'PRODUCT_CREATE',
         entity: 'product',
         entityId: product.id,
-        payload: { name: product.name, price: product.salePriceUsd },
+        payload: { name: product.name, price: product.salePriceUsd, initialStock: initialQty },
         result: 'SUCCESS',
         channel: 'WEB_ADMIN',
       });
@@ -175,11 +210,34 @@ export class ProductService {
   }
 
   static async list(tenantId: string) {
-    return db
-      .select()
+    const rows = await db
+      .select({
+        id: products.id,
+        tenantId: products.tenantId,
+        sku: products.sku,
+        name: products.name,
+        unitOfMeasure: products.unitOfMeasure,
+        description: products.description,
+        costPriceUsd: products.costPriceUsd,
+        salePriceUsd: products.salePriceUsd,
+        taxRate: products.taxRate,
+        isExempt: products.isExempt,
+        minStockAlert: products.minStockAlert,
+        isActive: products.isActive,
+        createdAt: products.createdAt,
+        categoryName: categories.name,
+        supplierName: suppliers.name,
+        supplierPhone: suppliers.phone,
+        barcode: sql<string>`(SELECT pb.barcode FROM product_barcodes pb WHERE pb.product_id = ${products.id} ORDER BY pb.is_primary DESC LIMIT 1)`,
+        stock: sql<string>`COALESCE((SELECT SUM(ps.quantity) FROM product_stock ps WHERE ps.product_id = ${products.id}), 0)::text`,
+      })
       .from(products)
-      .where(eq(products.tenantId, tenantId))
+      .leftJoin(categories, eq(products.categoryId, categories.id))
+      .leftJoin(suppliers, eq(products.supplierId, suppliers.id))
+      .where(and(eq(products.tenantId, tenantId), eq(products.isActive, true)))
       .orderBy(products.name);
+
+    return rows;
   }
 
   static async update(
@@ -209,6 +267,18 @@ export class ProductService {
       .set(updateData)
       .where(and(eq(products.tenantId, tenantId), eq(products.id, id)))
       .returning();
+
+    if (updated) {
+      await AuditService.log({
+        tenantId,
+        action: 'PRODUCT_UPDATED',
+        entity: 'product',
+        entityId: id,
+        payload: updateData,
+        result: 'SUCCESS',
+        channel: 'WEB_ADMIN',
+      });
+    }
     return updated || null;
   }
 
@@ -218,6 +288,18 @@ export class ProductService {
       .set({ isActive: false, updatedAt: new Date() })
       .where(and(eq(products.tenantId, tenantId), eq(products.id, id)))
       .returning();
+
+    if (deleted) {
+      await AuditService.log({
+        tenantId,
+        action: 'PRODUCT_DELETED',
+        entity: 'product',
+        entityId: id,
+        payload: { name: deleted.name },
+        result: 'SUCCESS',
+        channel: 'WEB_ADMIN',
+      });
+    }
     return deleted || null;
   }
 

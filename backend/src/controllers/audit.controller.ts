@@ -11,8 +11,10 @@ export class AuditController {
       const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
       const action = req.query.action ? String(req.query.action) : undefined;
       const channel = req.query.channel ? String(req.query.channel) : undefined;
+      const result = req.query.result ? String(req.query.result) : undefined;
+      const search = req.query.search ? String(req.query.search) : undefined;
 
-      const logs = await AuditService.listLogs(tenantId, { page, limit, action, channel });
+      const logs = await AuditService.listLogs(tenantId, { page, limit, action, channel, result, search });
       res.json(logs);
     } catch (err) {
       next(err);

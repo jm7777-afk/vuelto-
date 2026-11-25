@@ -141,6 +141,18 @@ export class SupplierService {
       .set(updateData)
       .where(and(eq(suppliers.tenantId, tenantId), eq(suppliers.id, id)))
       .returning();
+
+    if (updated) {
+      await AuditService.log({
+        tenantId,
+        action: 'SUPPLIER_UPDATED',
+        entity: 'supplier',
+        entityId: id,
+        payload: updateData,
+        result: 'SUCCESS',
+        channel: 'WEB_ADMIN',
+      });
+    }
     return updated || null;
   }
 
@@ -150,6 +162,18 @@ export class SupplierService {
       .set({ isActive: false, updatedAt: new Date() })
       .where(and(eq(suppliers.tenantId, tenantId), eq(suppliers.id, id)))
       .returning();
+
+    if (deleted) {
+      await AuditService.log({
+        tenantId,
+        action: 'SUPPLIER_DELETED',
+        entity: 'supplier',
+        entityId: id,
+        payload: { name: deleted.name },
+        result: 'SUCCESS',
+        channel: 'WEB_ADMIN',
+      });
+    }
     return deleted || null;
   }
 }

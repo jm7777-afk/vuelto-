@@ -28,10 +28,14 @@ import { FinancesController } from '../controllers/finances.controller.js';
 import { ConfigController } from '../controllers/config.controller.js';
 import { AuditController } from '../controllers/audit.controller.js';
 import { tenantRouter } from './tenant.routes.js';
+import { monitoringRouter } from './monitoring.routes.js';
 import { ExchangeRateService } from '../services/exchange-rate.service.js';
 import { FiscalReportService } from '../services/fiscal-report.service.js';
 import { FiscalService } from '../services/fiscal.service.js';
 import { SalesService } from '../services/sales.service.js';
+import { db } from '../db/index.js';
+import { users, sales, auditLogs } from '../db/schema.js';
+import { eq, and, gte, desc, sql } from 'drizzle-orm';
 
 export const apiRouter = Router();
 
@@ -51,7 +55,12 @@ apiRouter.get('/exchange-rates/live', async (_req, res, next) => {
 
 apiRouter.get('/exchange-rates/monitor', async (req, res, next) => {
   try {
-    const tenantId = (req as any).tenantId || 'a0000000-0000-0000-0000-000000000001';
+    const tenantId = (req as any).tenantId;
+    if (!tenantId) {
+      const live = await ExchangeRateService.fetchLiveVenezuelanRates();
+      res.json({ liveApi: live, bcv: { rate: live.bcv }, paralelo: { rate: live.paralelo }, euro: { rate: live.euro } });
+      return;
+    }
     const monitor = await ExchangeRateService.getMonitorRates(tenantId);
     res.json(monitor);
   } catch (err) {
@@ -61,7 +70,12 @@ apiRouter.get('/exchange-rates/monitor', async (req, res, next) => {
 
 apiRouter.get('/exchange-rates/current', async (req, res, next) => {
   try {
-    const tenantId = (req as any).tenantId || 'a0000000-0000-0000-0000-000000000001';
+    const tenantId = (req as any).tenantId;
+    if (!tenantId) {
+      const live = await ExchangeRateService.fetchLiveVenezuelanRates();
+      res.json({ bcv: { source: 'BCV', rate: live.bcv, fetchedAt: new Date(), validFrom: new Date(), isStale: false } });
+      return;
+    }
     const rates = await ExchangeRateService.getCurrentRates(tenantId);
     res.json(rates);
   } catch (err) {
@@ -74,6 +88,79 @@ apiRouter.post('/payments/webhooks', PaymentController.handleWebhook);
 
 // Todas las demás rutas de dominio bajo /api/v1 requieren autenticación de tenant
 apiRouter.use(requireTenantAuth);
+
+// --- SESIÓN Y SEGURIDAD DE CUENTA (TODOS LOS ROLES, INCLUYENDO SUPER_ADMIN) ---
+apiRouter.get('/auth/me', AuthController.me);
+apiRouter.post('/auth/change-password', AuthController.changePassword);
+apiRouter.post('/auth/logout', AuthController.logout);
+
+// --- VENDEDORES EN VIVO (REAL DESDE POSTGRESQL) ---
+apiRouter.get('/cashiers/live', requireAdmin, async (req, res, next) => {
+  try {
+    const tenantId = req.tenantId;
+    if (!tenantId) {
+      res.json([]);
+      return;
+    }
+
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const tenantUsers = await db
+      .select({
+        id: users.id,
+        name: users.fullName,
+        username: users.username,
+        roleId: users.roleId,
+        isActive: users.isActive,
+        lastLoginAt: users.lastLoginAt,
+      })
+      .from(users)
+      .where(eq(users.tenantId, tenantId));
+
+    const enriched = await Promise.all(
+      tenantUsers.map(async (u) => {
+        const [todaySales] = await db
+          .select({
+            count: sql<number>`count(*)::int`,
+            totalUsd: sql<string>`coalesce(sum(${sales.totalAmountUsd}), 0)::text`,
+            totalBs: sql<string>`coalesce(sum(${sales.totalAmountBs}), 0)::text`,
+          })
+          .from(sales)
+          .where(and(eq(sales.tenantId, tenantId), eq(sales.userId, u.id), gte(sales.createdAt, startOfDay)));
+
+        const [lastAudit] = await db
+          .select({ action: auditLogs.action, entity: auditLogs.entity, createdAt: auditLogs.createdAt })
+          .from(auditLogs)
+          .where(and(eq(auditLogs.tenantId, tenantId), eq(auditLogs.userId, u.id)))
+          .orderBy(desc(auditLogs.createdAt))
+          .limit(1);
+
+        const lastLoginMs = u.lastLoginAt ? new Date(u.lastLoginAt).getTime() : 0;
+        const recentMs = Date.now() - 30 * 60 * 1000;
+        const status = !u.isActive ? 'OFFLINE' : lastLoginMs >= recentMs ? 'ONLINE' : 'IDLE';
+
+        return {
+          id: u.id,
+          name: u.name,
+          username: u.username,
+          roleId: u.roleId,
+          status,
+          openCartsCount: 0,
+          salesTodayCount: todaySales?.count || 0,
+          salesTodayUsd: parseFloat(todaySales?.totalUsd || '0'),
+          salesTodayBs: parseFloat(todaySales?.totalBs || '0'),
+          lastAction: lastAudit ? `${lastAudit.action} (${lastAudit.entity})` : 'Sin actividad reciente',
+          lastActionTime: lastAudit?.createdAt ? new Date(lastAudit.createdAt).toLocaleString('es-VE') : 'Nunca',
+        };
+      })
+    );
+
+    res.json(enriched);
+  } catch (err) {
+    next(err);
+  }
+});
 
 // --- PAGOS Y PASARELA C2P ---
 apiRouter.post('/payments/c2p/intent', PaymentController.createIntent);
@@ -291,6 +378,7 @@ apiRouter.get('/sync/discrepancies', requireAdmin, async (req, res, next) => {
   }
 });
 
-// --- SÚPER ADMINISTRADOR GLOBAL (CRUD DE TODOS LOS NEGOCIOS / TENANTS) ---
+// --- SÚPER ADMINISTRADOR GLOBAL (CRUD DE TODOS LOS NEGOCIOS / TENANTS & MONITOREO EN TIEMPO REAL) ---
 apiRouter.use('/tenants', tenantRouter);
 apiRouter.use('/super-admin/tenants', tenantRouter);
+apiRouter.use('/super-admin/monitoring', monitoringRouter);

@@ -6,7 +6,8 @@
   "scripts": {
     "build": "npm run build:web && npm run build:backend",
     "build:backend": "npm --prefix backend run build",
-    "build:web": "npm --prefix web run build",
+    "build:web": "npm --prefix web run build && npm run sync:public",
+    "sync:public": "node -e \"const fs=require('fs'),path=require('path');const pub=path.join('backend','public'),dist=path.join('web','dist');fs.rmSync(path.join(pub,'assets'),{recursive:true,force:true});fs.cpSync(dist,pub,{recursive:true,force:true});console.log('Synced web/dist -> backend/public');\"",
     "start": "npm --prefix backend start",
     "start:backend": "npm --prefix backend start",
     "dev:backend": "npm --prefix backend run dev",

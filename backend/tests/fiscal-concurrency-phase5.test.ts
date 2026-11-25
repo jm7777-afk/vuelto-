@@ -20,6 +20,7 @@ import {
 import { eq, and } from 'drizzle-orm';
 import { JwtService } from '../src/services/jwt.service.js';
 import { SalesService } from '../src/services/sales.service.js';
+import { TenantService } from '../src/services/tenant.service.js';
 
 describe('Fase 5: Concurrencia, Fiscalidad Dinámica y Reconciliación Offline', () => {
   const app = createApp();
@@ -163,17 +164,14 @@ describe('Fase 5: Concurrencia, Fiscalidad Dinámica y Reconciliación Offline',
 
   afterAll(async () => {
     try {
-      await db.delete(creditDebitNotes).where(eq(creditDebitNotes.tenantId, testTenantId));
-      await db.delete(saleLines).where(eq(saleLines.tenantId, testTenantId));
-      await db.delete(payments).where(eq(payments.tenantId, testTenantId));
-      await db.delete(sales).where(eq(sales.tenantId, testTenantId));
-      await db.delete(productStock).where(eq(productStock.tenantId, testTenantId));
-      await db.delete(products).where(eq(products.tenantId, testTenantId));
-      await db.delete(warehouses).where(eq(warehouses.tenantId, testTenantId));
-      await db.delete(customers).where(eq(customers.tenantId, testTenantId));
-      await db.delete(exchangeRateSnapshots).where(eq(exchangeRateSnapshots.tenantId, testTenantId));
-      await db.delete(users).where(eq(users.tenantId, testTenantId));
-      await db.delete(tenants).where(eq(tenants.id, testTenantId));
+      const [sa] = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.roleId, 'SUPER_ADMIN'))
+        .limit(1);
+      if (sa && testTenantId) {
+        await TenantService.deleteTenant(sa.id, testTenantId);
+      }
     } catch {}
   });
 

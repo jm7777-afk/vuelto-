@@ -46,14 +46,12 @@ export const roles = pgTable('roles', {
   description: text('description'),
 });
 
-// 3. Users (Usuarios pertenecientes a un Tenant)
+// 3. Users (Usuarios pertenecientes a un Tenant, o Súper Admin global con tenant_id = NULL)
 export const users = pgTable(
   'users',
   {
     id: uuid('id').defaultRandom().primaryKey(),
-    tenantId: uuid('tenant_id')
-      .notNull()
-      .references(() => tenants.id, { onDelete: 'restrict' }),
+    tenantId: uuid('tenant_id').references(() => tenants.id, { onDelete: 'cascade' }),
     roleId: varchar('role_id', { length: 30 })
       .notNull()
       .references(() => roles.id, { onDelete: 'restrict' }),
@@ -524,14 +522,12 @@ export const idempotencyKeys = pgTable(
   ]
 );
 
-// 21. Audit Logs (Inmutable)
+// 21. Audit Logs (Inmutable - tenant_id nullable para eventos globales de Súper Admin y plataforma)
 export const auditLogs = pgTable(
   'audit_logs',
   {
     id: uuid('id').defaultRandom().primaryKey(),
-    tenantId: uuid('tenant_id')
-      .notNull()
-      .references(() => tenants.id, { onDelete: 'restrict' }),
+    tenantId: uuid('tenant_id').references(() => tenants.id, { onDelete: 'set null' }),
     userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
     action: varchar('action', { length: 60 }).notNull(),
     entity: varchar('entity', { length: 50 }).notNull(),

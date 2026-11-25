@@ -1,6 +1,6 @@
 export interface AuthUser {
   id: string;
-  tenantId: string;
+  tenantId: string | null;
   roleId: 'SUPER_ADMIN' | 'ADMIN' | 'VENDEDOR' | 'CONSULTA';
   username: string;
   fullName: string;

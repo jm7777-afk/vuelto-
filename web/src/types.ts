@@ -1,10 +1,13 @@
 export interface UserProfile {
   id: string;
-  tenantId: string;
+  tenantId: string | null;
   username: string;
+  email?: string;
   fullName: string;
-  roleId: string;
+  roleId: 'SUPER_ADMIN' | 'ADMIN' | 'VENDEDOR' | 'CONSULTA';
   businessName: string;
+  twoFactorEnabled?: boolean;
+  lastLoginAt?: string | null;
 }
 
 export interface ProductItem {
@@ -25,6 +28,18 @@ export interface ProductItem {
   inflationDeltaPercent: number;
 }
 
+export interface TenantUserItem {
+  id: string;
+  username: string;
+  email: string;
+  fullName: string;
+  roleId: 'ADMIN' | 'VENDEDOR' | 'CONSULTA';
+  phone?: string | null;
+  isActive: boolean;
+  lastLoginAt?: string | null;
+  createdAt?: string;
+}
+
 export interface TenantItem {
   id: string;
   slug: string;
@@ -42,6 +57,7 @@ export interface TenantItem {
   productsCount?: number;
   invoicesCount?: number;
   totalSalesUsd?: number;
+  users?: TenantUserItem[];
   createdAt: string;
 }
 
@@ -140,6 +156,7 @@ export interface CashierStatus {
   id: string;
   name: string;
   username: string;
+  roleId?: string;
   status: 'ONLINE' | 'IDLE' | 'OFFLINE';
   openCartsCount: number;
   salesTodayCount: number;
@@ -147,6 +164,16 @@ export interface CashierStatus {
   salesTodayBs: number;
   lastAction: string;
   lastActionTime: string;
+}
+
+export interface PosCustomerItem {
+  id: string;
+  name: string;
+  documentType: string;
+  documentNumber: string;
+  phone: string;
+  balanceDue: number;
+  isSpecialMoraCustomer: boolean;
 }
 
 export interface PosCartLine {
@@ -165,15 +192,7 @@ export interface PosTicket {
   id: string;
   ticketNumber: number;
   label: string;
-  customer: {
-    id: string;
-    name: string;
-    documentType: string;
-    documentNumber: string;
-    phone: string;
-    balanceDue: number;
-    isSpecialMoraCustomer: boolean;
-  };
+  customer: PosCustomerItem;
   cartLines: PosCartLine[];
   paymentMethod: 'CASH_USD' | 'CASH_VES' | 'PAGO_MOVIL' | 'DEBIT_CARD' | 'TRANSFER' | 'CREDIT_DEBT' | 'DERIVAR_ADMIN';
   cashAmountUsd: string;
@@ -182,4 +201,89 @@ export interface PosTicket {
   pagoMovilRef: string;
   adminApproved: boolean;
   createdAt: string;
+}
+
+export interface AuditLogItem {
+  id: string;
+  tenantId: string | null;
+  tenantName?: string | null;
+  tenantSlug?: string | null;
+  userId?: string | null;
+  username?: string | null;
+  userFullName?: string | null;
+  userRoleId?: string | null;
+  action: string;
+  entity: string;
+  entityType?: string | null;
+  entityId?: string | null;
+  payload?: any;
+  result: string;
+  channel: string;
+  ipAddress?: string | null;
+  userAgent?: string | null;
+  createdAt: string;
+}
+
+export interface SystemLogEvent {
+  id: string;
+  timestamp: string;
+  level: 'INFO' | 'WARN' | 'ERROR';
+  category: 'HTTP' | 'AUDIT' | 'SECURITY' | 'SYSTEM' | 'ERROR';
+  message: string;
+  method?: string;
+  path?: string;
+  statusCode?: number;
+  durationMs?: number;
+  reqId?: string;
+  tenantId?: string | null;
+  userId?: string | null;
+  username?: string;
+  action?: string;
+  entity?: string;
+  result?: string;
+  channel?: string;
+  ipAddress?: string | null;
+  metadata?: Record<string, any>;
+}
+
+export interface MonitoringSnapshot {
+  timestamp: string;
+  system: {
+    status: 'HEALTHY' | 'DEGRADED';
+    uptimeSeconds: number;
+    nodeVersion: string;
+    environment: string;
+    memory: {
+      rssMb: number;
+      heapUsedMb: number;
+      heapTotalMb: number;
+    };
+  };
+  database: {
+    status: 'connected' | 'disconnected';
+    latencyMs: number;
+    pool: {
+      total: number;
+      idle: number;
+      active: number;
+    };
+  };
+  traffic: {
+    requestsPerMin: number;
+    errorsPerMin: number;
+    avgLatencyMs: number;
+    bufferedEventsCount: number;
+    connectedMonitors: number;
+  };
+  platform: {
+    totalTenants: number;
+    activeTenants: number;
+    suspendedTenants: number;
+    totalUsers: number;
+    activeSessions: number;
+    salesTodayCount: number;
+    salesTodayUsd: number;
+    auditLast24hCount: number;
+  };
+  recentEvents: SystemLogEvent[];
 }

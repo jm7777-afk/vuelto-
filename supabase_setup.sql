@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS "tenants" (
 -- 3. TABLA: USUARIOS
 CREATE TABLE IF NOT EXISTS "users" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
-	"tenant_id" uuid NOT NULL REFERENCES "tenants"("id") ON DELETE RESTRICT,
+	"tenant_id" uuid REFERENCES "tenants"("id") ON DELETE CASCADE,
 	"role_id" varchar(30) NOT NULL REFERENCES "roles"("id") ON DELETE RESTRICT,
 	"username" varchar(50) NOT NULL,
 	"email" varchar(100) NOT NULL,
@@ -316,7 +316,7 @@ CREATE TABLE IF NOT EXISTS "idempotency_keys" (
 -- 21. TABLA: AUDITORÍA INMUTABLE
 CREATE TABLE IF NOT EXISTS "audit_logs" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
-	"tenant_id" uuid NOT NULL REFERENCES "tenants"("id") ON DELETE RESTRICT,
+	"tenant_id" uuid REFERENCES "tenants"("id") ON DELETE SET NULL,
 	"user_id" uuid REFERENCES "users"("id") ON DELETE SET NULL,
 	"action" varchar(60) NOT NULL,
 	"entity" varchar(50) NOT NULL,
@@ -359,7 +359,8 @@ CREATE INDEX IF NOT EXISTS "idx_users_tenant_role" ON "users" ("tenant_id","role
 CREATE UNIQUE INDEX IF NOT EXISTS "uq_tenant_warehouse_code" ON "warehouses" ("tenant_id","code");
 
 -- =============================================================================
--- SEMBRADO DE DATOS INICIALES (ROLES, TIENDA DEMO Y USUARIOS)
+-- SEMBRADO DE DATOS INICIALES (ÚNICAMENTE ROLES DEL SISTEMA)
+-- Nota: Ejecute `npm --prefix backend run db:migrate` para crear el Súper Administrador.
 -- =============================================================================
 
 -- Roles
@@ -369,33 +370,3 @@ INSERT INTO "roles" ("id", "name", "description") VALUES
 ('VENDEDOR', 'Cajero / Vendedor', 'Facturación rápida, escaneo y cuentas abiertas en mostrador'),
 ('CONSULTA', 'Consulta / Auditor', 'Solo lectura para contadores o fiscalizadores')
 ON CONFLICT ("id") DO NOTHING;
-
--- Tienda de Prueba (Tenant)
-INSERT INTO "tenants" (
-    "id", "slug", "business_name", "trade_name", "document_type", "document_number", 
-    "fiscal_address", "phone", "email", "is_special_taxpayer", "internal_barcode_prefix"
-) VALUES (
-    'a0000000-0000-0000-0000-000000000001',
-    'bodega-central',
-    'Inversiones Bodega Central C.A.',
-    'Bodega Central',
-    'J',
-    '123456789',
-    'Av. Libertador con Calle 4, Caracas, Venezuela',
-    '04141234567',
-    'contacto@bodegacentral.ve',
-    true,
-    '200'
-) ON CONFLICT ("slug") DO NOTHING;
-
--- Almacén Principal por Defecto
-INSERT INTO "warehouses" ("tenant_id", "name", "code", "is_default") VALUES
-('a0000000-0000-0000-0000-000000000001', 'Almacén Principal / Tienda', 'ALM-01', true)
-ON CONFLICT DO NOTHING;
-
--- Usuarios Iniciales (Contraseña: Vuelto2026!)
--- Hash bcrypt para 'Vuelto2026!': $2a$10$wOq2M0gG1zQ05mEvG9p9.eTjA8oI2vF1uA8.UfA0nJ1t3C9a8pL3G
-INSERT INTO "users" ("tenant_id", "role_id", "username", "email", "password_hash", "full_name", "phone") VALUES
-('a0000000-0000-0000-0000-000000000001', 'ADMIN', 'admin', 'admin@bodegacentral.ve', '$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', 'Dueño Administrador', '04141234567'),
-('a0000000-0000-0000-0000-000000000001', 'VENDEDOR', 'cajero1', 'cajero1@bodegacentral.ve', '$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', 'Carlos Mendoza', '04129876543')
-ON CONFLICT DO NOTHING;

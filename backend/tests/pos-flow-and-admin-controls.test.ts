@@ -1,14 +1,55 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { eq } from 'drizzle-orm';
+import { db } from '../src/db/index.js';
+import { users } from '../src/db/schema.js';
+import { TenantService } from '../src/services/tenant.service.js';
 import { ConfigService } from '../src/services/config.service.js';
-import { ProductService } from '../src/services/product.service.js';
 import { InventoryService } from '../src/services/inventory.service.js';
 import { BackupService } from '../src/services/backup.service.js';
 import { AuditService } from '../src/services/audit.service.js';
 import { ExchangeRateService } from '../src/services/exchange-rate.service.js';
 
 describe('Flujo de Ventas POS, Tasas y Controles Administrativos', () => {
-  const tenantId = 'a0000000-0000-0000-0000-000000000001';
-  const userId = undefined as any;
+  let tenantId: string;
+  let userId: string;
+  let superAdminId: string;
+
+  beforeAll(async () => {
+    const [sa] = await db
+      .select()
+      .from(users)
+      .where(eq(users.roleId, 'SUPER_ADMIN'))
+      .limit(1);
+    if (!sa) {
+      throw new Error('SUPER_ADMIN requerido para ejecutar pruebas de integración');
+    }
+    superAdminId = sa.id;
+
+    const slug = `pos-flow-test-${Date.now()}`;
+    const created = await TenantService.createTenant(superAdminId, {
+      slug,
+      businessName: 'Comercializadora Test POS C.A.',
+      tradeName: 'Test POS',
+      documentType: 'J',
+      documentNumber: String(Math.floor(100000000 + Math.random() * 899999999)),
+      fiscalAddress: 'Av. Principal Caracas',
+      phone: '04141112233',
+      email: `${slug}@vuelto.ve`,
+      isSpecialTaxpayer: true,
+      adminUsername: `adm_${Date.now()}`,
+      adminEmail: `adm_${Date.now()}@vuelto.ve`,
+      adminFullName: 'Admin Prueba POS',
+      adminPassword: 'TestPosPassword123!',
+    });
+    tenantId = created.id;
+    userId = created.adminUser!.id;
+  });
+
+  afterAll(async () => {
+    if (tenantId && superAdminId) {
+      await TenantService.deleteTenant(superAdminId, tenantId);
+    }
+  });
 
   it('debe obtener y actualizar la configuración de negocio con régimen fiscal flexible (IVA e IGTF)', async () => {
     const config = await ConfigService.getConfig(tenantId);

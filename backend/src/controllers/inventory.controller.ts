@@ -1,4 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
+import { eq, and } from 'drizzle-orm';
+import { db } from '../db/index.js';
+import { warehouses } from '../db/schema.js';
 import { InventoryService } from '../services/inventory.service.js';
 
 export class InventoryController {
@@ -51,8 +54,22 @@ export class InventoryController {
         return;
       }
 
+      let targetWarehouseId = warehouseId;
+      if (!targetWarehouseId) {
+        const [defaultWh] = await db
+          .select({ id: warehouses.id })
+          .from(warehouses)
+          .where(and(eq(warehouses.tenantId, req.tenantId!), eq(warehouses.isActive, true)))
+          .limit(1);
+        if (!defaultWh) {
+          res.status(400).json({ code: 'NO_WAREHOUSE', message: 'No hay almacén activo para este comercio.' });
+          return;
+        }
+        targetWarehouseId = defaultWh.id;
+      }
+
       const result = await InventoryService.createMovement(req.tenantId!, req.user!.id, {
-        warehouseId: warehouseId || 'w0000000-0000-0000-0000-000000000001',
+        warehouseId: targetWarehouseId,
         productId,
         movementType: movementType || 'ADJUSTMENT',
         quantity: parseFloat(quantity),

@@ -1,11 +1,12 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { db } from '../db/index.js';
-import { users, auditLogs, tenants } from '../db/schema.js';
+import { users, tenants } from '../db/schema.js';
 import { eq, and } from 'drizzle-orm';
 import { PasswordService } from '../utils/password.js';
 import { AuthSessionService } from '../services/auth-session.service.js';
 import { TwoFactorService } from '../services/two-factor.service.js';
+import { AuditService } from '../services/audit.service.js';
 
 const loginSchema = z
   .object({
@@ -29,6 +30,20 @@ const enable2FASchema = z
   })
   .strict();
 
+const changePasswordSchema = z
+  .object({
+    currentPassword: z.string().min(1, 'La contraseña actual es requerida'),
+    newPassword: z
+      .string()
+      .min(8, 'La nueva contraseña debe tener al menos 8 caracteres')
+      .max(128, 'La contraseña excede el máximo permitido')
+      .regex(/[A-Z]/, 'Debe incluir al menos una letra mayúscula')
+      .regex(/[a-z]/, 'Debe incluir al menos una letra minúscula')
+      .regex(/[0-9]/, 'Debe incluir al menos un número'),
+    confirmPassword: z.string().min(1, 'Confirma la nueva contraseña'),
+  })
+  .strict();
+
 export class AuthController {
   /**
    * POST /api/v1/auth/login
@@ -36,7 +51,6 @@ export class AuthController {
    */
   static async login(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      // 1. Validación estricta con Zod (.strict(): rechaza parámetros no reconocidos)
       const parseResult = loginSchema.safeParse(req.body);
       if (!parseResult.success) {
         res.status(400).json({
@@ -49,17 +63,23 @@ export class AuthController {
 
       const { username, password, tenantSlug, twoFactorCode } = parseResult.data;
 
-      // 2. Resolver tenant si se especificó slug
       let targetTenantId: string | undefined;
       if (tenantSlug) {
         const [tenantRecord] = await db
-          .select({ id: tenants.id })
+          .select({ id: tenants.id, isActive: tenants.isActive })
           .from(tenants)
           .where(eq(tenants.slug, tenantSlug))
           .limit(1);
 
         if (!tenantRecord) {
           res.status(401).json({ error: 'Comercio o tenant no encontrado' });
+          return;
+        }
+        if (!tenantRecord.isActive) {
+          res.status(403).json({
+            error: 'TENANT_SUSPENDED',
+            message: 'Este comercio se encuentra suspendido. Contacte al Súper Administrador.',
+          });
           return;
         }
         targetTenantId = tenantRecord.id;
@@ -76,8 +96,51 @@ export class AuthController {
         .limit(1);
 
       if (!userRecord || !userRecord.isActive) {
+        await AuditService.log({
+          tenantId: targetTenantId || null,
+          userId: null,
+          action: 'LOGIN_FAILED_UNKNOWN_USER',
+          entity: 'users',
+          entityType: 'security',
+          payload: { username, tenantSlug: tenantSlug || null },
+          result: 'REJECTED',
+          channel: 'API',
+          ipAddress: req.ip || '127.0.0.1',
+          userAgent: (req.headers['user-agent'] as string) || 'unknown',
+        });
         res.status(401).json({ error: 'Credenciales inválidas o usuario inactivo' });
         return;
+      }
+
+      // Verificar que el tenant del usuario siga activo
+      let tenantInfo: { businessName: string; tradeName: string; isActive: boolean } | undefined;
+      if (userRecord.tenantId) {
+        const [t] = await db
+          .select({ businessName: tenants.businessName, tradeName: tenants.tradeName, isActive: tenants.isActive })
+          .from(tenants)
+          .where(eq(tenants.id, userRecord.tenantId))
+          .limit(1);
+        tenantInfo = t;
+        if (!tenantInfo || !tenantInfo.isActive) {
+          await AuditService.log({
+            tenantId: userRecord.tenantId,
+            userId: userRecord.id,
+            action: 'LOGIN_BLOCKED_TENANT_SUSPENDED',
+            entity: 'tenants',
+            entityType: 'security',
+            entityId: userRecord.tenantId,
+            payload: { username },
+            result: 'REJECTED',
+            channel: 'API',
+            ipAddress: req.ip || '127.0.0.1',
+            userAgent: (req.headers['user-agent'] as string) || 'unknown',
+          });
+          res.status(403).json({
+            error: 'TENANT_SUSPENDED',
+            message: 'Este comercio está suspendido o dado de baja. Contacte al Súper Administrador.',
+          });
+          return;
+        }
       }
 
       // 3. Verificación de Bloqueo de Cuenta (Account Lockout)
@@ -86,7 +149,7 @@ export class AuthController {
           (new Date(userRecord.lockedUntil).getTime() - Date.now()) / (60 * 1000)
         );
 
-        await db.insert(auditLogs).values({
+        await AuditService.log({
           tenantId: userRecord.tenantId,
           userId: userRecord.id,
           action: 'LOGIN_BLOCKED_ACCOUNT_LOCKED',
@@ -97,7 +160,7 @@ export class AuthController {
           result: 'REJECTED',
           channel: 'API',
           ipAddress: req.ip || '127.0.0.1',
-          userAgent: req.headers['user-agent'] || 'unknown',
+          userAgent: (req.headers['user-agent'] as string) || 'unknown',
         });
 
         res.status(423).json({
@@ -124,7 +187,7 @@ export class AuthController {
       if (!isPasswordValid) {
         const newFailedAttempts = (userRecord.failedLoginAttempts || 0) + 1;
         const willLock = newFailedAttempts >= 5;
-        const lockDurationMs = 30 * 60 * 1000; // 30 minutos
+        const lockDurationMs = 30 * 60 * 1000;
         const lockedUntil = willLock ? new Date(Date.now() + lockDurationMs) : null;
 
         await db
@@ -136,7 +199,7 @@ export class AuthController {
           })
           .where(eq(users.id, userRecord.id));
 
-        await db.insert(auditLogs).values({
+        await AuditService.log({
           tenantId: userRecord.tenantId,
           userId: userRecord.id,
           action: willLock ? 'ACCOUNT_LOCKED_5_FAILS' : 'LOGIN_FAILED',
@@ -152,7 +215,7 @@ export class AuthController {
           result: 'REJECTED',
           channel: 'API',
           ipAddress: req.ip || '127.0.0.1',
-          userAgent: req.headers['user-agent'] || 'unknown',
+          userAgent: (req.headers['user-agent'] as string) || 'unknown',
         });
 
         if (willLock) {
@@ -171,7 +234,7 @@ export class AuthController {
         return;
       }
 
-      // 5. Verificación 2FA TOTP (Obligatorio para SUPER_ADMIN o si el usuario lo activó)
+      // 5. Verificación 2FA TOTP (si el usuario activó 2FA)
       const requires2FA = userRecord.roleId === 'SUPER_ADMIN' || userRecord.twoFactorEnabled;
       if (requires2FA && userRecord.twoFactorSecret) {
         if (!twoFactorCode) {
@@ -184,7 +247,7 @@ export class AuthController {
 
         const is2FAValid = TwoFactorService.verifyToken(userRecord.twoFactorSecret, twoFactorCode);
         if (!is2FAValid) {
-          await db.insert(auditLogs).values({
+          await AuditService.log({
             tenantId: userRecord.tenantId,
             userId: userRecord.id,
             action: 'LOGIN_2FA_FAILED',
@@ -195,7 +258,7 @@ export class AuthController {
             result: 'REJECTED',
             channel: 'API',
             ipAddress: req.ip || '127.0.0.1',
-            userAgent: req.headers['user-agent'] || 'unknown',
+            userAgent: (req.headers['user-agent'] as string) || 'unknown',
           });
 
           res.status(401).json({ error: 'Código de verificación 2FA inválido o expirado' });
@@ -229,8 +292,7 @@ export class AuthController {
         req.headers['user-agent'] as string
       );
 
-      // Registrar auditoría exitosa
-      await db.insert(auditLogs).values({
+      await AuditService.log({
         tenantId: userRecord.tenantId,
         userId: userRecord.id,
         action: 'LOGIN_SUCCESS',
@@ -241,15 +303,8 @@ export class AuthController {
         result: 'SUCCESS',
         channel: 'API',
         ipAddress: req.ip || '127.0.0.1',
-        userAgent: req.headers['user-agent'] || 'unknown',
+        userAgent: (req.headers['user-agent'] as string) || 'unknown',
       });
-
-      // Obtener datos del tenant
-      const [tenantInfo] = await db
-        .select({ businessName: tenants.businessName, tradeName: tenants.tradeName })
-        .from(tenants)
-        .where(eq(tenants.id, userRecord.tenantId))
-        .limit(1);
 
       res.json({
         message: 'Autenticación exitosa',
@@ -259,8 +314,12 @@ export class AuthController {
           tenantId: userRecord.tenantId,
           username: userRecord.username,
           fullName: userRecord.fullName,
+          email: userRecord.email,
           roleId: userRecord.roleId,
-          businessName: tenantInfo?.tradeName || tenantInfo?.businessName || 'Vuelto',
+          businessName:
+            userRecord.roleId === 'SUPER_ADMIN'
+              ? 'Consola Súper Administrador Vuelto'
+              : tenantInfo?.tradeName || tenantInfo?.businessName || 'Vuelto',
           twoFactorEnabled: userRecord.twoFactorEnabled,
         },
       });
@@ -270,8 +329,198 @@ export class AuthController {
   }
 
   /**
+   * GET /api/v1/auth/me
+   * Verifica la sesión contra PostgreSQL y devuelve los datos vigentes del usuario
+   */
+  static async me(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const [userRecord] = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, req.user!.id))
+        .limit(1);
+
+      if (!userRecord || !userRecord.isActive) {
+        res.status(401).json({ code: 'UNAUTHORIZED', message: 'Usuario inactivo o eliminado' });
+        return;
+      }
+
+      let businessName = 'Consola Súper Administrador Vuelto';
+      if (userRecord.tenantId) {
+        const [t] = await db
+          .select({ businessName: tenants.businessName, tradeName: tenants.tradeName, isActive: tenants.isActive })
+          .from(tenants)
+          .where(eq(tenants.id, userRecord.tenantId))
+          .limit(1);
+        if (!t || !t.isActive) {
+          res.status(403).json({ code: 'TENANT_SUSPENDED', message: 'Comercio suspendido o dado de baja' });
+          return;
+        }
+        businessName = t.tradeName || t.businessName;
+      }
+
+      res.json({
+        id: userRecord.id,
+        tenantId: userRecord.tenantId,
+        username: userRecord.username,
+        email: userRecord.email,
+        fullName: userRecord.fullName,
+        roleId: userRecord.roleId,
+        businessName,
+        twoFactorEnabled: userRecord.twoFactorEnabled,
+        lastLoginAt: userRecord.lastLoginAt,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * POST /api/v1/auth/change-password
+   * Cambio seguro de contraseña desde el panel (Súper Admin o cualquier usuario autenticado)
+   */
+  static async changePassword(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const parseResult = changePasswordSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        const firstIssue = parseResult.error.issues[0]?.message || 'Parámetros de contraseña inválidos';
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: firstIssue,
+          details: parseResult.error.format(),
+        });
+        return;
+      }
+
+      const { currentPassword, newPassword, confirmPassword } = parseResult.data;
+
+      if (newPassword !== confirmPassword) {
+        res.status(400).json({
+          error: 'PASSWORD_MISMATCH',
+          message: 'La nueva contraseña y su confirmación no coinciden.',
+        });
+        return;
+      }
+
+      if (newPassword === currentPassword) {
+        res.status(400).json({
+          error: 'SAME_PASSWORD',
+          message: 'La nueva contraseña debe ser diferente a la contraseña actual.',
+        });
+        return;
+      }
+
+      const [userRecord] = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, req.user!.id))
+        .limit(1);
+
+      if (!userRecord || !userRecord.isActive) {
+        res.status(401).json({ error: 'UNAUTHORIZED', message: 'Usuario no encontrado o inactivo' });
+        return;
+      }
+
+      const isCurrentValid = await PasswordService.verify(currentPassword, userRecord.passwordHash);
+      if (!isCurrentValid) {
+        await AuditService.log({
+          tenantId: userRecord.tenantId,
+          userId: userRecord.id,
+          action: 'PASSWORD_CHANGE_FAILED',
+          entity: 'users',
+          entityType: 'security',
+          entityId: userRecord.id,
+          payload: { username: userRecord.username, reason: 'invalid_current_password' },
+          result: 'REJECTED',
+          channel: 'WEB_ADMIN',
+          ipAddress: req.ip || '127.0.0.1',
+          userAgent: (req.headers['user-agent'] as string) || 'unknown',
+        });
+
+        res.status(401).json({
+          error: 'INVALID_CURRENT_PASSWORD',
+          message: 'La contraseña actual es incorrecta.',
+        });
+        return;
+      }
+
+      const newHash = await PasswordService.hash(newPassword);
+      await db
+        .update(users)
+        .set({
+          passwordHash: newHash,
+          updatedAt: new Date(),
+        })
+        .where(eq(users.id, userRecord.id));
+
+      // Revocar todas las sesiones previas y emitir una nueva sesión limpia para el usuario actual
+      await AuthSessionService.revokeAllUserSessions(userRecord.id);
+
+      const tokens = await AuthSessionService.createSession(
+        {
+          id: userRecord.id,
+          tenantId: userRecord.tenantId,
+          roleId: userRecord.roleId as any,
+          username: userRecord.username,
+          fullName: userRecord.fullName,
+        },
+        req.ip,
+        req.headers['user-agent'] as string
+      );
+
+      await AuditService.log({
+        tenantId: userRecord.tenantId,
+        userId: userRecord.id,
+        action: 'PASSWORD_CHANGED',
+        entity: 'users',
+        entityType: 'security',
+        entityId: userRecord.id,
+        payload: { username: userRecord.username, roleId: userRecord.roleId },
+        result: 'SUCCESS',
+        channel: 'WEB_ADMIN',
+        ipAddress: req.ip || '127.0.0.1',
+        userAgent: (req.headers['user-agent'] as string) || 'unknown',
+      });
+
+      res.json({
+        message: 'Contraseña actualizada correctamente. Las sesiones anteriores han sido revocadas.',
+        tokens,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * POST /api/v1/auth/logout
+   * Revoca todas las sesiones activas del usuario y registra el cierre en auditoría
+   */
+  static async logout(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      if (req.user?.id) {
+        await AuthSessionService.revokeAllUserSessions(req.user.id);
+        await AuditService.log({
+          tenantId: req.user.tenantId,
+          userId: req.user.id,
+          action: 'LOGOUT',
+          entity: 'users',
+          entityType: 'authentication',
+          entityId: req.user.id,
+          payload: { username: req.user.username, roleId: req.user.roleId },
+          result: 'SUCCESS',
+          channel: 'WEB_ADMIN',
+          ipAddress: req.ip || '127.0.0.1',
+          userAgent: (req.headers['user-agent'] as string) || 'unknown',
+        });
+      }
+      res.json({ message: 'Sesión cerrada exitosamente' });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
    * POST /api/v1/auth/refresh
-   * Rotación de refresh token y detección de robo de sesión
    */
   static async refresh(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
@@ -319,7 +568,6 @@ export class AuthController {
 
   /**
    * POST /api/v1/auth/2fa/generate
-   * Generación de secreto TOTP y código QR para Google Authenticator
    */
   static async generate2FA(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
@@ -338,7 +586,6 @@ export class AuthController {
 
   /**
    * POST /api/v1/auth/2fa/enable
-   * Verificación del primer código TOTP para activar 2FA
    */
   static async enable2FA(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
@@ -366,7 +613,7 @@ export class AuthController {
         })
         .where(eq(users.id, req.user!.id));
 
-      await db.insert(auditLogs).values({
+      await AuditService.log({
         tenantId: req.user!.tenantId,
         userId: req.user!.id,
         action: '2FA_ENABLED',
@@ -377,7 +624,7 @@ export class AuthController {
         result: 'SUCCESS',
         channel: 'API',
         ipAddress: req.ip || '127.0.0.1',
-        userAgent: req.headers['user-agent'] || 'unknown',
+        userAgent: (req.headers['user-agent'] as string) || 'unknown',
       });
 
       res.json({ message: '2FA habilitado correctamente' });

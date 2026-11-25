@@ -1,16 +1,27 @@
-import { eq, and, sql } from 'drizzle-orm';
+import { eq, and, desc, sql, ilike, or } from 'drizzle-orm';
 import { db } from '../db/index.js';
-import { auditLogs } from '../db/schema.js';
+import { auditLogs, users, tenants } from '../db/schema.js';
+import { MonitoringService } from './monitoring.service.js';
 
 export interface CreateAuditEntry {
-  tenantId: string;
+  tenantId?: string | null;
   userId?: string | null;
   action: string;
   entity: string;
+  entityType?: string | null;
   entityId?: string | null;
   payload?: any;
-  result: 'SUCCESS' | 'FAILED' | 'VALIDATION_ERROR' | 'PRINTER_UNAVAILABLE' | 'SHARE_CANCELLED' | 'SHARE_ERROR';
-  channel: 'POS_MOBILE' | 'MOBILE_ADMIN' | 'WEB_ADMIN' | 'SYSTEM_JOB';
+  oldValues?: any;
+  newValues?: any;
+  result:
+    | 'SUCCESS'
+    | 'FAILED'
+    | 'REJECTED'
+    | 'VALIDATION_ERROR'
+    | 'PRINTER_UNAVAILABLE'
+    | 'SHARE_CANCELLED'
+    | 'SHARE_ERROR';
+  channel: 'POS_MOBILE' | 'MOBILE_ADMIN' | 'WEB_ADMIN' | 'SYSTEM_JOB' | 'API';
   ipAddress?: string | null;
   userAgent?: string | null;
 }
@@ -20,23 +31,45 @@ const isValidUuid = (id?: string | null): boolean =>
 
 export class AuditService {
   /**
-   * Registra una acción de auditoría inmutable en PostgreSQL.
-   * La tabla rechaza cualquier comando UPDATE o DELETE mediante triggers de BD.
+   * Registra una acción de auditoría inmutable en PostgreSQL y la transmite al monitor en tiempo real.
+   * La tabla soporta tenantId nullable para eventos globales de Súper Admin y plataforma.
    */
   static async log(entry: CreateAuditEntry, tx?: any): Promise<void> {
-    if (!isValidUuid(entry.tenantId)) {
+    // Si se pasó un tenantId explícito no vacío pero inválido (ej. mock), evitar error de tipo UUID en PG
+    if (entry.tenantId !== undefined && entry.tenantId !== null && entry.tenantId !== '' && !isValidUuid(entry.tenantId)) {
       return;
     }
+
+    const safeTenantId = entry.tenantId && isValidUuid(entry.tenantId) ? entry.tenantId : null;
     const safeUserId = isValidUuid(entry.userId) ? entry.userId : null;
     const runner = tx || db;
+
+    // Emitir evento en tiempo real hacia el monitor del Súper Admin
+    MonitoringService.recordEvent({
+      level: entry.result === 'SUCCESS' ? 'INFO' : entry.result === 'REJECTED' || entry.result === 'FAILED' ? 'ERROR' : 'WARN',
+      category: entry.entityType === 'security' ? 'SECURITY' : 'AUDIT',
+      message: `${entry.action} en ${entry.entity}${entry.entityId ? ` (${entry.entityId})` : ''} [${entry.result}]`,
+      tenantId: safeTenantId,
+      userId: safeUserId,
+      action: entry.action,
+      entity: entry.entity,
+      result: entry.result,
+      channel: entry.channel,
+      ipAddress: entry.ipAddress || null,
+      metadata: entry.payload,
+    });
+
     try {
       await runner.insert(auditLogs).values({
-        tenantId: entry.tenantId,
+        tenantId: safeTenantId,
         userId: safeUserId,
         action: entry.action,
         entity: entry.entity,
+        entityType: entry.entityType || null,
         entityId: entry.entityId || null,
         payload: entry.payload ? entry.payload : null,
+        oldValues: entry.oldValues ? entry.oldValues : null,
+        newValues: entry.newValues ? entry.newValues : null,
         result: entry.result,
         channel: entry.channel,
         ipAddress: entry.ipAddress || null,
@@ -46,10 +79,11 @@ export class AuditService {
       if (error?.code === '23503' && entry.userId) {
         try {
           await runner.insert(auditLogs).values({
-            tenantId: entry.tenantId,
+            tenantId: safeTenantId,
             userId: null,
             action: entry.action,
             entity: entry.entity,
+            entityType: entry.entityType || null,
             entityId: entry.entityId || null,
             payload: entry.payload ? entry.payload : null,
             result: entry.result,
@@ -60,22 +94,20 @@ export class AuditService {
           return;
         } catch {}
       }
-      // El log de auditoría nunca debe quebrar la operación de negocio si la BD está saturada,
-      // pero debe registrarse en la salida de error estructurada.
       console.error('Error registrando auditoría en DB:', error);
     }
   }
 
   /**
-   * Consulta el registro de auditoría inmutable con paginación y filtros.
-   * Si tenantId es null o undefined (Súper Administrador), consulta transversalmente.
+   * Consulta el registro de auditoría inmutable con paginación, filtros y datos enriquecidos de usuario/tenant.
+   * Si tenantId es null o undefined (Súper Administrador), consulta transversalmente toda la plataforma.
    */
   static async listLogs(
     tenantId?: string | null,
-    options: { page?: number; limit?: number; action?: string; channel?: string } = {}
+    options: { page?: number; limit?: number; action?: string; channel?: string; result?: string; search?: string } = {}
   ) {
-    const page = options.page || 1;
-    const limit = options.limit || 50;
+    const page = Math.max(1, options.page || 1);
+    const limit = Math.min(200, Math.max(1, options.limit || 50));
     const offset = (page - 1) * limit;
 
     const conditions: any[] = [];
@@ -86,20 +118,66 @@ export class AuditService {
       conditions.push(eq(auditLogs.action, options.action));
     }
     if (options.channel) {
-      conditions.push(eq(auditLogs.channel, options.channel as any));
+      conditions.push(eq(auditLogs.channel, options.channel));
+    }
+    if (options.result) {
+      conditions.push(eq(auditLogs.result, options.result));
+    }
+    if (options.search && options.search.trim()) {
+      const pattern = `%${options.search.trim()}%`;
+      conditions.push(
+        or(
+          ilike(auditLogs.action, pattern),
+          ilike(auditLogs.entity, pattern),
+          ilike(auditLogs.entityId, pattern),
+          ilike(users.username, pattern),
+          ilike(tenants.businessName, pattern)
+        )
+      );
     }
 
-    const query = db
-      .select()
-      .from(auditLogs);
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 
-    const rows = conditions.length > 0
-      ? await query.where(and(...conditions)).orderBy(sql`${auditLogs.createdAt} DESC`).limit(limit).offset(offset)
-      : await query.orderBy(sql`${auditLogs.createdAt} DESC`).limit(limit).offset(offset);
+    const rows = await db
+      .select({
+        id: auditLogs.id,
+        tenantId: auditLogs.tenantId,
+        tenantName: tenants.businessName,
+        tenantSlug: tenants.slug,
+        userId: auditLogs.userId,
+        username: users.username,
+        userFullName: users.fullName,
+        userRoleId: users.roleId,
+        action: auditLogs.action,
+        entity: auditLogs.entity,
+        entityType: auditLogs.entityType,
+        entityId: auditLogs.entityId,
+        payload: auditLogs.payload,
+        result: auditLogs.result,
+        channel: auditLogs.channel,
+        ipAddress: auditLogs.ipAddress,
+        userAgent: auditLogs.userAgent,
+        createdAt: auditLogs.createdAt,
+      })
+      .from(auditLogs)
+      .leftJoin(users, eq(auditLogs.userId, users.id))
+      .leftJoin(tenants, eq(auditLogs.tenantId, tenants.id))
+      .where(whereClause)
+      .orderBy(desc(auditLogs.createdAt))
+      .limit(limit)
+      .offset(offset);
+
+    const [totalRow] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(auditLogs)
+      .leftJoin(users, eq(auditLogs.userId, users.id))
+      .leftJoin(tenants, eq(auditLogs.tenantId, tenants.id))
+      .where(whereClause);
 
     return {
       page,
       limit,
+      total: totalRow?.count || 0,
       logs: rows,
     };
   }
