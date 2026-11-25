@@ -15,7 +15,7 @@ const baseEnvSchema = z.object({
   JWT_ACCESS_EXPIRES_IN: z.string().default('15m'),
   JWT_REFRESH_EXPIRES_IN: z.string().default('7d'),
   ENCRYPTION_KEY: z.string().min(16).default('vuelto-256-bit-aes-encryption-key-32ch'),
-  ALLOWED_ORIGINS: z.string().default('http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173'),
+  ALLOWED_ORIGINS: z.string().default('http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173,https://vuelto.onrender.com,*'),
   MOCK_PAYMENT_ENABLED: z.string().default('true').transform((v) => v === 'true'),
 });
 

@@ -43,21 +43,24 @@ export const createApp = () => {
     })
   );
 
-  // 4. CORS con allowlist configurable por env ALLOWED_ORIGINS
+  // 4. CORS con allowlist configurable por env ALLOWED_ORIGINS y soporte para dominios de producción
   const allowedOriginsList = env.ALLOWED_ORIGINS.split(',').map((o) => o.trim());
   app.use(
     cors({
       origin: (origin, callback) => {
-        // Permitir requests sin header Origin (ej. clientes móviles nativos Expo, curl o cron interna)
-        if (!origin) return callback(null, true);
+        // Permitir peticiones sin header Origin (curl, apps móviles nativas) o autorizadas
         if (
+          !origin ||
           env.NODE_ENV !== 'production' ||
+          allowedOriginsList.includes('*') ||
           allowedOriginsList.includes(origin) ||
-          allowedOriginsList.includes('*')
+          origin.includes('onrender.com') ||
+          origin.includes('localhost') ||
+          origin.includes('127.0.0.1')
         ) {
           return callback(null, true);
         }
-        return callback(new Error(`Origen ${origin} no permitido por política CORS`));
+        return callback(null, false);
       },
       credentials: true,
       methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
