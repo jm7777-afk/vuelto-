@@ -21,8 +21,8 @@ interface LoginScreenProps {
 }
 
 export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
-  const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('admin123');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
 
   const handleLogin = async (userToSubmit?: string, passToSubmit?: string) => {
@@ -36,62 +36,12 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
 
     setLoading(true);
     try {
-      // Intentar login real con la API en Render / Supabase
       const res = await MobileApiService.login(u, p);
       onLoginSuccess(res.user, res.tokens.accessToken, res.tokens.refreshToken);
     } catch (e: any) {
-      // Fallback para modo offline o testing local inmediato con credenciales oficiales
-      if (u === 'superadmin' && (p === 'SuperAdmin2026!' || p === 'superadmin123')) {
-        const fallbackSuperAdmin: MobileUserProfile = {
-          id: '00000000-0000-0000-0000-000000000001',
-          tenantId: 'a0000000-0000-0000-0000-000000000001',
-          username: 'superadmin',
-          fullName: 'Súper Administrador Global',
-          roleId: 'SUPER_ADMIN',
-          businessName: 'Plataforma Global Vuelto',
-        };
-        onLoginSuccess(fallbackSuperAdmin, 'offline_superadmin_token', 'offline_refresh_token');
-      } else if (u === 'admin' && (p === 'Vuelto2026!' || p === 'admin123')) {
-        const fallbackAdmin: MobileUserProfile = {
-          id: '24a8eccf-b45e-4d5a-ac01-b44b77198c10',
-          tenantId: 'a0000000-0000-0000-0000-000000000001',
-          username: 'admin',
-          fullName: 'Dueño Administrador',
-          roleId: 'ADMIN',
-          businessName: 'Bodega Central C.A.',
-        };
-        onLoginSuccess(fallbackAdmin, 'offline_admin_token', 'offline_refresh_token');
-      } else if (u === 'cajero1' && (p === 'Vuelto2026!' || p === 'cajero123')) {
-        const fallbackCajero: MobileUserProfile = {
-          id: '8cb3bb66-6b60-4966-9bc6-e8220f122557',
-          tenantId: 'a0000000-0000-0000-0000-000000000001',
-          username: 'cajero1',
-          fullName: 'Carlos Mendoza (Cajero)',
-          roleId: 'VENDEDOR',
-          businessName: 'Bodega Central C.A.',
-        };
-        onLoginSuccess(fallbackCajero, 'offline_cajero_token', 'offline_refresh_token');
-      } else {
-        Alert.alert('Error de Autenticación', e.message || 'Usuario o contraseña incorrectos.');
-      }
+      Alert.alert('Error de Autenticación', e.message || 'Usuario o contraseña incorrectos.');
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleQuickLogin = (role: 'SUPER_ADMIN' | 'ADMIN' | 'VENDEDOR') => {
-    if (role === 'SUPER_ADMIN') {
-      setUsername('superadmin');
-      setPassword('SuperAdmin2026!');
-      handleLogin('superadmin', 'SuperAdmin2026!');
-    } else if (role === 'ADMIN') {
-      setUsername('admin');
-      setPassword('Vuelto2026!');
-      handleLogin('admin', 'Vuelto2026!');
-    } else {
-      setUsername('cajero1');
-      setPassword('Vuelto2026!');
-      handleLogin('cajero1', 'Vuelto2026!');
     }
   };
 
@@ -154,48 +104,14 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
               )}
             </TouchableOpacity>
 
-            <View style={styles.divider}>
-              <View style={styles.dividerLine} />
-              <Text style={styles.dividerText}>O INGRESO RÁPIDO DEMO</Text>
-              <View style={styles.dividerLine} />
-            </View>
-
-            {/* Accesos Rápidos según Rol (RBAC) */}
-            <TouchableOpacity
-              style={[styles.quickAdminBtn, { backgroundColor: '#8B5CF620', borderColor: '#8B5CF6' }]}
-              onPress={() => handleQuickLogin('SUPER_ADMIN')}
-              disabled={loading}
-            >
-              <Text style={[styles.quickAdminTitle, { color: '#C084FC' }]}>⚡ Súper Administrador Global (superadmin)</Text>
-              <Text style={styles.quickAdminSubtitle}>Control multi-tenant: crea y administra todos los negocios</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.quickAdminBtn}
-              onPress={() => handleQuickLogin('ADMIN')}
-              disabled={loading}
-            >
-              <Text style={styles.quickAdminTitle}>🏢 Dueño Administrador (admin)</Text>
-              <Text style={styles.quickAdminSubtitle}>Costos, margen en $, tasas, mora, proveedores y finanzas</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.quickVendedorBtn}
-              onPress={() => handleQuickLogin('VENDEDOR')}
-              disabled={loading}
-            >
-              <Text style={styles.quickVendedorTitle}>🛒 Cajero / Vendedor (cajero1)</Text>
-              <Text style={styles.quickVendedorSubtitle}>POS, escaneo con cámara del celular y cobro (Costos ocultos)</Text>
-            </TouchableOpacity>
-
-            {/* Tarjeta Explicativa de la Vista del Vendedor */}
-            <View style={{ marginTop: 14, padding: 12, borderRadius: 10, backgroundColor: '#062F3B', borderWidth: 1, borderColor: '#155E75' }}>
+            {/* Información de Seguridad */}
+            <View style={{ marginTop: 18, padding: 12, borderRadius: 10, backgroundColor: '#062F3B', borderWidth: 1, borderColor: '#155E75' }}>
               <Text style={{ color: '#A3E635', fontWeight: 'bold', fontSize: 11, marginBottom: 4 }}>
-                ℹ️ Delimitación de la Vista del Vendedor:
+                ℹ️ Acceso Seguro Multi-Tenant:
               </Text>
               <Text style={{ color: '#94A3B8', fontSize: 11, lineHeight: 15 }}>
-                • Permitido: Escáner con la cámara física, fichero multi-ticket, cobro bimoneda, comprobantes WhatsApp y clientes por C.I.{'\n'}
-                • Estrictamente Oculto: Precios de costo, márgenes de ganancia en $, pedidos a proveedores, finanzas, tasas y creación de negocios.
+                • Autenticación cifrada conectada al servidor seguro Vuelto.{'\n'}
+                • Los permisos y vistas se aplican estrictamente según el rol comercial asignado.
               </Text>
             </View>
           </View>

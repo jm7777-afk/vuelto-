@@ -54,15 +54,43 @@ La aplicación quedará accesible en `http://localhost:4000` con la API REST y e
 
 ---
 
-## 🔑 Credenciales Iniciales de Producción y Demo
+## 🔑 Credenciales y Aprovisionamiento Seguro (Seed)
 
-Al iniciar el sistema por primera vez o ejecutar las migraciones (`npm run db:migrate`), se configuran los siguientes usuarios:
+Al desplegar en producción y ejecutar las migraciones iniciales (`npm run db:migrate`), las contraseñas se configuran exclusivamente a través de las siguientes variables de entorno:
 
-| Rol | Usuario | Contraseña | Alcance y Permisos |
+| Rol | Usuario | Variable de Entorno de Contraseña | Alcance y Permisos |
 |---|---|---|---|
-| **Súper Administrador** | `superadmin` | `SuperAdmin2026!` | Acceso global a todos los tenants, creación de negocios, edición fiscal y suspensión/baja. |
-| **Administrador de Tienda** | `admin` | `Vuelto2026!` | Control total de inventario, márgenes en USD, cuentas por cobrar y tasas de cambio. |
-| **Cajero / Vendedor** | `cajero1` | `Vuelto2026!` | Facturación en mostrador, terminal POS ultra-limpio, escáner y cobro con vuelto. |
+| **Súper Administrador** | Configurable (`SEED_SUPERADMIN_USER` o `superadmin`) | `SEED_SUPERADMIN_PASSWORD` | Acceso global a todos los tenants, creación de negocios, edición fiscal y suspensión/baja. |
+| **Administrador de Tienda** | `admin` | `SEED_ADMIN_PASSWORD` | Control total de inventario, márgenes en USD, cuentas por cobrar y tasas de cambio. |
+| **Cajero / Vendedor** | `cajero1` | `SEED_CASHIER_PASSWORD` | Facturación en mostrador, terminal POS ultra-limpio, escáner y cobro con vuelto. |
+
+> **IMPORTANTE:** En producción (`NODE_ENV=production`), estas variables son **estrictamente obligatorias**. El proceso de seed abortará si no se definen explícitamente en el entorno.
+
+---
+
+## 🔐 Rotación de Credenciales
+
+Si se desplegó una base de datos con contraseñas de desarrollo anteriores, ejecute la siguiente sentencia SQL en PostgreSQL para actualizar de inmediato los hashes de las 3 cuentas maestras:
+
+```sql
+-- Generar hashes seguros (bcrypt / argon2) y ejecutar en PostgreSQL:
+UPDATE users 
+SET password_hash = '$2a$10$NUEVO_HASH_BCRYPT_AQUI', 
+    updated_at = NOW() 
+WHERE username = 'superadmin';
+
+UPDATE users 
+SET password_hash = '$2a$10$NUEVO_HASH_BCRYPT_AQUI', 
+    updated_at = NOW() 
+WHERE username = 'admin';
+
+UPDATE users 
+SET password_hash = '$2a$10$NUEVO_HASH_BCRYPT_AQUI', 
+    updated_at = NOW() 
+WHERE username = 'cajero1';
+```
+
+Consulte [`docs/SECURITY_INCIDENT_2026-11-25.md`](./docs/SECURITY_INCIDENT_2026-11-25.md) para el reporte de contención detallado.
 
 ---
 

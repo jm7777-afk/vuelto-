@@ -308,8 +308,8 @@ export const App: React.FC = () => {
     }
   });
 
-  const [usernameInput, setUsernameInput] = useState('admin');
-  const [passwordInput, setPasswordInput] = useState('admin123');
+  const [usernameInput, setUsernameInput] = useState('');
+  const [passwordInput, setPasswordInput] = useState('');
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState('');
 
@@ -2025,6 +2025,7 @@ export const App: React.FC = () => {
     const cleanDoc = newTenantDocNumber.replace(/[^0-9]/g, '');
     const cleanSlug = (newTenantSlug || newTenantBusinessName).toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 30);
 
+    const generatedTempPassword = 'Tmp!' + Math.random().toString(36).slice(-8) + 'A1';
     const payload = {
       slug: cleanSlug,
       businessName: newTenantBusinessName.trim(),
@@ -2038,7 +2039,7 @@ export const App: React.FC = () => {
       internalBarcodePrefix: '204',
       adminFullName: `Admin ${newTenantBusinessName.trim()}`,
       adminUsername: `admin_${cleanSlug.slice(0, 8)}`,
-      adminPassword: 'Password2026!',
+      adminPassword: generatedTempPassword,
     };
 
     try {
@@ -2127,7 +2128,7 @@ export const App: React.FC = () => {
     setNewTenantPhone('');
     setNewTenantEmail('');
     setNewTenantSlug('');
-    alert(`¡Negocio "${payload.businessName}" creado exitosamente! Credenciales de acceso generadas: Usuario admin_${cleanSlug.slice(0, 8)} | Clave: Password2026!`);
+    alert(`¡Negocio "${payload.businessName}" creado exitosamente! Credenciales de acceso generadas: Usuario ${payload.adminUsername} | Clave Temporal: ${generatedTempPassword} (por favor cámbiela tras el primer acceso)`);
   };
 
   // U: UPDATE TENANT
@@ -2273,55 +2274,18 @@ export const App: React.FC = () => {
             </button>
           </form>
 
-          <div style={{ display: 'flex', alignItems: 'center', margin: '24px 0', gap: '10px' }}>
-            <div style={{ flex: 1, height: '1px', backgroundColor: '#155E75' }} />
-            <span style={{ fontSize: '10px', color: '#64748B', fontWeight: 'bold' }}>DEMO RÁPIDO SEGÚN ROL</span>
-            <div style={{ flex: 1, height: '1px', backgroundColor: '#155E75' }} />
-          </div>
-
-          {/* Tarjeta de Credenciales Oficiales */}
-          <div style={{ backgroundColor: '#062F3B', padding: '12px 14px', borderRadius: '10px', border: '1px solid #155E75', marginBottom: '16px' }}>
-            <p style={{ fontSize: '11px', fontWeight: 'bold', color: '#A3E635', marginBottom: '6px' }}>
-              🔑 Credenciales del Sistema:
-            </p>
-            <div style={{ fontSize: '11px', color: '#CBD5E1', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-              <div>👑 <strong style={{ color: '#C084FC' }}>Súper Admin:</strong> <code style={{ color: '#F8FAFC' }}>superadmin</code> / <code style={{ color: '#A3E635' }}>SuperAdmin2026!</code> (Crear y gestionar negocios)</div>
-              <div>🏢 <strong style={{ color: '#38BDF8' }}>Admin Tienda:</strong> <code style={{ color: '#F8FAFC' }}>admin</code> / <code style={{ color: '#A3E635' }}>Vuelto2026!</code> (Costos, margen en $, tasas, compras)</div>
-              <div>🛒 <strong style={{ color: '#10B981' }}>Cajero/Vendedor:</strong> <code style={{ color: '#F8FAFC' }}>cajero1</code> / <code style={{ color: '#A3E635' }}>Vuelto2026!</code> (POS, escaneo con cámara, cobro)</div>
+          {(import.meta as any).env?.DEV && (
+            <div style={{ textAlign: 'center', margin: '20px 0 10px 0' }}>
+              <a
+                href="/docs/demo"
+                target="_blank"
+                rel="noreferrer"
+                style={{ fontSize: '11px', color: '#38BDF8', textDecoration: 'none' }}
+              >
+                Guía de pruebas en entorno local (/docs/demo)
+              </a>
             </div>
-          </div>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            <button
-              onClick={() => handleLogin('SUPER_ADMIN')}
-              style={{ padding: '12px', borderRadius: '10px', border: '1px solid #8B5CF644', backgroundColor: '#8B5CF615', color: '#C084FC', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer', textAlign: 'left' }}
-            >
-              👑 Entrar como Súper Administrador Global (superadmin)
-              <span style={{ display: 'block', fontSize: '10px', color: '#94A3B8', marginTop: '2px', fontWeight: 'normal' }}>
-                Control multi-tenant: crea comercios, suspende/activa tiendas y visualiza volumen global
-              </span>
-            </button>
-
-            <button
-              onClick={() => handleLogin('ADMIN')}
-              style={{ padding: '12px', borderRadius: '10px', border: '1px solid #0284C744', backgroundColor: '#0284C715', color: '#38BDF8', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer', textAlign: 'left' }}
-            >
-              🏢 Entrar como Dueño Administrador (admin)
-              <span style={{ display: 'block', fontSize: '10px', color: '#94A3B8', marginTop: '2px', fontWeight: 'normal' }}>
-                Control total de tienda: Proveedores, Costos, Margen en $, Mora, Finanzas y Tasas BCV
-              </span>
-            </button>
-
-            <button
-              onClick={() => handleLogin('VENDEDOR')}
-              style={{ padding: '12px', borderRadius: '10px', border: '1px solid #10B98144', backgroundColor: '#10B98115', color: '#A3E635', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer', textAlign: 'left' }}
-            >
-              🛒 Entrar como Cajero / Vendedor (cajero1)
-              <span style={{ display: 'block', fontSize: '10px', color: '#94A3B8', marginTop: '2px', fontWeight: 'normal' }}>
-                Vista aislada de ventas: POS, escaneo con cámara, clientes por C.I. y WhatsApp (Costos ocultos)
-              </span>
-            </button>
-          </div>
+          )}
         </div>
       </div>
     );
@@ -6156,7 +6120,7 @@ export const App: React.FC = () => {
             <div style={{ backgroundColor: '#071F27', padding: '12px 14px', borderRadius: '10px', border: '1px solid #10B98144', marginBottom: '16px' }}>
               <span style={{ fontSize: '11px', color: '#10B981', fontWeight: 'bold' }}>CREDENCIALES ADMINISTRATIVAS:</span>
               <p style={{ fontSize: '12px', color: '#CBD5E1', marginTop: '4px' }}>
-                Usuario Admin: <strong style={{ color: '#FFFFFF' }}>admin_{selectedTenantDetail.slug.slice(0, 8)}</strong> • Clave: <code style={{ color: '#A3E635' }}>Password2026!</code>
+                Usuario Admin: <strong style={{ color: '#FFFFFF' }}>admin_{selectedTenantDetail.slug.slice(0, 8)}</strong> • Clave: <code style={{ color: '#A3E635' }}>Asignada al registrar el tenant</code>
               </p>
             </div>
 

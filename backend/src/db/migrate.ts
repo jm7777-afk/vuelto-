@@ -35,8 +35,26 @@ export async function runMigrationAndSeed() {
       .onConflictDoNothing()
       .returning();
 
+    const isProduction = process.env.NODE_ENV === 'production';
+    const seedSuperadminUser = process.env.SEED_SUPERADMIN_USER || 'superadmin';
+    const seedSuperadminPassword = process.env.SEED_SUPERADMIN_PASSWORD;
+    const seedAdminPassword = process.env.SEED_ADMIN_PASSWORD;
+    const seedCashierPassword = process.env.SEED_CASHIER_PASSWORD;
+
+    if (isProduction) {
+      if (!seedSuperadminPassword || !seedAdminPassword || !seedCashierPassword) {
+        throw new Error(
+          'FATAL: En entorno de producción (NODE_ENV=production) es obligatorio definir las variables de entorno SEED_SUPERADMIN_PASSWORD, SEED_ADMIN_PASSWORD y SEED_CASHIER_PASSWORD.'
+        );
+      }
+    }
+
+    const effectiveSuperadminPass = seedSuperadminPassword || 'dev_superadmin_local_secret!';
+    const effectiveAdminPass = seedAdminPassword || 'dev_admin_local_secret!';
+    const effectiveCashierPass = seedCashierPassword || 'dev_cashier_local_secret!';
+
     if (demoTenant) {
-      const passwordHash = await bcrypt.hash('Vuelto2026!', 10);
+      const passwordHash = await bcrypt.hash(effectiveAdminPass, 10);
 
       // 3. Usuario Administrador de Prueba
       await db
@@ -53,6 +71,7 @@ export async function runMigrationAndSeed() {
         .onConflictDoNothing();
 
       // 4. Usuario Cajero de Prueba
+      const cashierPasswordHash = await bcrypt.hash(effectiveCashierPass, 10);
       await db
         .insert(users)
         .values({
@@ -60,28 +79,28 @@ export async function runMigrationAndSeed() {
           roleId: 'VENDEDOR',
           username: 'cajero1',
           email: 'cajero1@bodegacentral.ve',
-          passwordHash,
+          passwordHash: cashierPasswordHash,
           fullName: 'Carlos Mendoza',
           phone: '04129876543',
         })
         .onConflictDoNothing();
 
       // 5. Usuario Súper Administrador Maestro (Control Global Multi-Tenant)
-      const superAdminPasswordHash = await bcrypt.hash('SuperAdmin2026!', 10);
+      const superAdminPasswordHash = await bcrypt.hash(effectiveSuperadminPass, 10);
       await db
         .insert(users)
         .values({
           tenantId: demoTenant.id,
           roleId: 'SUPER_ADMIN',
-          username: 'superadmin',
-          email: 'superadmin@vuelto.app',
+          username: seedSuperadminUser,
+          email: `${seedSuperadminUser}@vuelto.app`,
           passwordHash: superAdminPasswordHash,
           fullName: 'Súper Administrador Maestro',
           phone: '04140000000',
         })
         .onConflictDoNothing();
 
-      console.log('✓ Tenant y usuarios demo creados (superadmin [SuperAdmin2026!], admin / cajero1 [Vuelto2026!])');
+      console.log(`✓ Tenant y usuarios iniciales verificados (${seedSuperadminUser}, admin, cajero1)`);
     }
 
     console.log('Migración y sembrado completados con éxito.');

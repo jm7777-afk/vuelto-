@@ -20,7 +20,7 @@ services:
       - key: JWT_REFRESH_SECRET
         generateValue: true
       - key: MOCK_PAYMENT_ENABLED
-        value: "true"
+        value: "false"
 
   # Frontend Web Admin - React SPA (Vite)
   - type: web
