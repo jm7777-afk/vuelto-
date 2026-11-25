@@ -117,10 +117,22 @@ El repositorio incluye el archivo [`render.yaml`](./render.yaml) listo para el d
 |---|---|---|
 | `PORT` | Puerto de escucha | Inyectado por Render (ej. 10000) o 4000 local |
 | `NODE_ENV` | Entorno de ejecución | `production` |
-| `DATABASE_URL` | Cadena de conexión PostgreSQL | Inyectada automáticamente por Render Postgres |
-| `JWT_SECRET` | Clave secreta para tokens JWT | Generada aleatoriamente por Render Blueprint |
-| `JWT_REFRESH_SECRET` | Clave secreta para Refresh Tokens | Generada aleatoriamente por Render Blueprint |
-| `MOCK_PAYMENT_ENABLED` | Simulación de pasarela de pago | `true` para pruebas |
+| `DATABASE_URL` | Cadena de conexión PostgreSQL | Inyectada automáticamente por Render Postgres / Supabase |
+| `JWT_SECRET` | Clave secreta para tokens JWT | Mínimo 32 caracteres (generada aleatoriamente) |
+| `JWT_REFRESH_SECRET` | Clave secreta para Refresh Tokens | Mínimo 32 caracteres (generada aleatoriamente) |
+| `ENCRYPTION_KEY` | Clave AES-256 para cifrado en reposo | Mínimo 32 caracteres (para secretos TOTP 2FA) |
+| `ALLOWED_ORIGINS` | Orígenes permitidos en política CORS | `https://vuelto.onrender.com,*` |
+| `MOCK_PAYMENT_ENABLED` | Simulación de pasarela de pago | `false` para producción |
+
+---
+
+## 📚 Documentación y Guías Operativas
+
+* 📖 **[Guía Maestra de Configuración a Producción, Credenciales y Uso](docs/GUIA_CONFIGURACION_PRODUCCION_Y_USO.md)**: Configuración paso a paso en Render/Supabase, variables de entorno, seguridad, políticas de contraseñas y manual de uso por rol (SuperAdmin, Admin de Tienda, Cajero).
+* 🛡️ **[Política de Seguridad y Divulgación de Vulnerabilidades](docs/SECURITY.md)**: SLA de respuesta (72h), alcance y canales de reporte.
+* 📷 **[Manual de Pruebas y Uso del Escáner de Cámara y Balanza](docs/QA_SCANNER.md)**: Guía detallada para escaneo de códigos de barra (EAN-13, balanzas 20/21/22).
+* 🗄️ **[Procedimiento de Respaldos de Base de Datos](docs/BACKUP.md)**: Estrategia de backups automáticos y manuales en PostgreSQL.
+* 🚨 **[Runbook de Recuperación ante Desastres (DR)](docs/DR_RUNBOOK.md)**: Procedimiento de restauración ante incidentes mayores.
 
 ---
 
