@@ -414,12 +414,14 @@ export const sales = pgTable(
     igtfAmountBs: numeric('igtf_amount_bs', { precision: 14, scale: 2 }).default('0.00').notNull(),
     totalAmountBs: numeric('total_amount_bs', { precision: 14, scale: 2 }).notNull(),
 
-    status: varchar('status', { length: 20 }).default('COMPLETED').notNull(), // 'COMPLETED', 'CANCELLED'
+    status: varchar('status', { length: 30 }).default('COMPLETED').notNull(), // 'COMPLETED', 'CANCELLED', 'ANNULLED_BY_NC', 'SYNCED_WITH_STOCK_DEFICIT'
     fiscalStatus: varchar('fiscal_status', { length: 25 }).default('PENDING').notNull(), // 'PENDING', 'TRANSMITTED', 'NON_FISCAL'
+    clientAssignedUuid: varchar('client_assigned_uuid', { length: 64 }), // Idempotencia de sync offline
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
     uniqueIndex('uq_tenant_invoice_num').on(table.tenantId, table.invoiceSeries, table.invoiceNumber),
+    uniqueIndex('uq_tenant_client_uuid').on(table.tenantId, table.clientAssignedUuid),
     index('idx_sales_tenant_date').on(table.tenantId, table.createdAt),
   ]
 );
@@ -671,5 +673,75 @@ export const financialTransactions = pgTable(
   },
   (table) => [
     index('idx_fin_tx_date').on(table.tenantId, table.type, table.transactionDate),
+  ]
+);
+
+// 27. Dynamic Tax Rates (Tasas impositivas dinámicas en BD)
+export const taxRates = pgTable(
+  'tax_rates',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    code: varchar('code', { length: 30 }).notNull(), // 'GENERAL', 'REDUCED', 'ADDITIONAL', 'EXEMPT'
+    rate: numeric('rate', { precision: 6, scale: 4 }).notNull(), // ej: 0.1600, 0.0800, 0.3100, 0.0000
+    description: varchar('description', { length: 100 }),
+    validFrom: timestamp('valid_from', { withTimezone: true }).defaultNow().notNull(),
+    validTo: timestamp('valid_to', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('idx_tax_rates_tenant_code').on(table.tenantId, table.code),
+  ]
+);
+
+// 28. Dynamic IGTF Rules (Reglas dinámicas de IGTF en BD)
+export const igtfRules = pgTable(
+  'igtf_rules',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    currency: varchar('currency', { length: 10 }).notNull(), // 'USD', 'EUR'
+    paymentMethod: varchar('payment_method', { length: 30 }).notNull(), // 'CASH'
+    rate: numeric('rate', { precision: 6, scale: 4 }).default('0.0300').notNull(),
+    appliesToSpecialTaxpayerOnly: boolean('applies_to_special_taxpayer_only').default(true).notNull(),
+    validFrom: timestamp('valid_from', { withTimezone: true }).defaultNow().notNull(),
+    validTo: timestamp('valid_to', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('idx_igtf_rules_tenant').on(table.tenantId, table.currency, table.paymentMethod),
+  ]
+);
+
+// 29. Credit & Debit Notes (Notas de Crédito y Débito)
+export const creditDebitNotes = pgTable(
+  'credit_debit_notes',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    saleId: uuid('sale_id')
+      .notNull()
+      .references(() => sales.id, { onDelete: 'restrict' }),
+    type: varchar('type', { length: 20 }).default('CREDIT_NOTE').notNull(), // 'CREDIT_NOTE', 'DEBIT_NOTE'
+    noteNumber: varchar('note_number', { length: 50 }).notNull(), // ej. 'NC-00000001'
+    reason: text('reason').notNull(),
+    amountUsd: numeric('amount_usd', { precision: 14, scale: 2 }).notNull(),
+    taxAdjustedUsd: numeric('tax_adjusted_usd', { precision: 14, scale: 2 }).notNull(),
+    totalUsd: numeric('total_usd', { precision: 14, scale: 2 }).notNull(),
+    amountBs: numeric('amount_bs', { precision: 14, scale: 2 }).notNull(),
+    taxAdjustedBs: numeric('tax_adjusted_bs', { precision: 14, scale: 2 }).notNull(),
+    totalBs: numeric('total_bs', { precision: 14, scale: 2 }).notNull(),
+    returnInventory: boolean('return_inventory').default(true).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('uq_tenant_note_number').on(table.tenantId, table.noteNumber),
+    index('idx_notes_sale').on(table.tenantId, table.saleId),
   ]
 );

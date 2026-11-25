@@ -15,9 +15,11 @@ import {
   idempotencyKeys,
   tenants,
   tenantConfigurations,
+  creditDebitNotes,
 } from '../db/schema.js';
 import { VoucherService } from './voucher.service.js';
 import { AuditService } from './audit.service.js';
+import { MetricsService } from './metrics.service.js';
 import { MockPaymentGateway } from '../gateways/mock-payment.gateway.js';
 
 export interface ConfirmSaleLineInput {
@@ -41,6 +43,9 @@ export interface ConfirmSaleInput {
   lines: ConfirmSaleLineInput[];
   payments: ConfirmSalePaymentInput[];
   adminAuthorized?: boolean;
+  clientAssignedUuid?: string;
+  isOfflineSync?: boolean;
+  localTimestamp?: string;
   vueltoOption?: {
     type: 'CASH' | 'WALLET_CREDIT' | 'CHANGE_VOUCHER' | 'PAGO_MOVIL';
     amountUsd: number;
@@ -83,11 +88,36 @@ export class SalesService {
 
     if (existingIdempotency && existingIdempotency.responseBody) {
       // Reintento de red: devolver exactamente la misma respuesta sin reprocesar
-      return existingIdempotency.responseBody as any;
+      return {
+        ...(existingIdempotency.responseBody as any),
+        isExistingOfflineSync: true,
+      };
     }
 
     // 2. Ejecutar transacción atómica en PostgreSQL
     const saleResult = await db.transaction(async (tx) => {
+      // 0. Idempotencia de sincronización offline por clientAssignedUuid
+      if (input.clientAssignedUuid) {
+        const [existing] = await tx
+          .select()
+          .from(sales)
+          .where(and(eq(sales.tenantId, tenantId), eq(sales.clientAssignedUuid, input.clientAssignedUuid)))
+          .limit(1);
+
+        if (existing) {
+          return {
+            id: existing.id,
+            invoiceFormattedNumber: existing.invoiceFormattedNumber,
+            rateValue: existing.rateValue,
+            totalAmountUsd: existing.totalAmountUsd,
+            totalAmountBs: existing.totalAmountBs,
+            igtfAmountUsd: existing.igtfAmountUsd,
+            status: existing.status,
+            isExistingOfflineSync: true,
+          };
+        }
+      }
+
       // A. Validar Tenant y Contribuyente Especial
       const [tenant] = await tx
         .select()
@@ -163,6 +193,7 @@ export class SalesService {
       let taxAmount16Usd = 0;
       let taxAmount8Usd = 0;
       let subtotalUsd = 0;
+      let saleStatus = 'COMPLETED';
 
       const processedLines: any[] = [];
 
@@ -226,7 +257,12 @@ export class SalesService {
 
         const currentQty = stock ? parseFloat(stock.quantity) : 0;
         if (!prod.allowNegativeStock && currentQty < line.quantity) {
-          throw new Error(`Stock insuficiente para "${prod.name}". Disponible: ${currentQty}`);
+          if (input.isOfflineSync) {
+            saleStatus = 'SYNCED_WITH_STOCK_DEFICIT';
+            MetricsService.recordLowStock(tenantId);
+          } else {
+            throw new Error(`Stock insuficiente para "${prod.name}". Disponible: ${currentQty}`);
+          }
         }
 
         const newQty = currentQty - line.quantity;
@@ -262,6 +298,10 @@ export class SalesService {
       const totalAmountBs = totalAmountUsd * rateValue;
 
       // G. Asignar Correlativo Consecutivo sin Saltos (Lock Pesimista)
+      // Bloqueo Advisory Lock de PostgreSQL por tenant con timeout estricto de 5s
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('invoice_' || ${tenantId}));`);
+      await tx.execute(sql`SET LOCAL lock_timeout = '5000ms';`);
+
       const series = 'A';
       // Bloqueo SELECT ... FOR UPDATE en la secuencia
       const [seq] = await tx
@@ -320,8 +360,9 @@ export class SalesService {
           igtfAmountBs: (igtfAmountUsd * rateValue).toFixed(2),
           totalAmountBs: totalAmountBs.toFixed(2),
 
-          status: 'COMPLETED',
+          status: saleStatus,
           fiscalStatus: 'PENDING',
+          clientAssignedUuid: input.clientAssignedUuid || null,
         })
         .returning();
 
@@ -471,7 +512,7 @@ export class SalesService {
         },
         result: 'SUCCESS',
         channel: 'POS_MOBILE',
-      });
+      }, tx);
 
       const cleanPhone = customer.phone ? customer.phone.replace(/\D/g, '') : '';
       const whatsappText = `*${tenant.businessName || 'VUELTO POS'}* - *Nota de Entrega / Factura Digital*
@@ -499,6 +540,7 @@ _¡Gracias por su compra! Conserve este comprobante digital._`;
         totalAmountUsd: totalAmountUsd.toFixed(2),
         totalAmountBs: totalAmountBs.toFixed(2),
         igtfAmountUsd: igtfAmountUsd.toFixed(2),
+        status: sale.status,
         vueltoIssued,
         digitalDeliveryNote: {
           whatsappText,
@@ -523,5 +565,174 @@ _¡Gracias por su compra! Conserve este comprobante digital._`;
     });
 
     return saleResult;
+  }
+
+  /**
+   * Emite una Nota de Crédito o Débito formal, ajusta IVA, retorna stock al almacén
+   * y marca la factura original como ANNULLED_BY_NC
+   */
+  static async createCreditNote(
+    tenantId: string,
+    userId: string,
+    saleId: string,
+    data: { reason: string; returnInventory?: boolean }
+  ) {
+    return await db.transaction(async (tx) => {
+      const [sale] = await tx
+        .select()
+        .from(sales)
+        .where(and(eq(sales.tenantId, tenantId), eq(sales.id, saleId)))
+        .limit(1);
+
+      if (!sale) {
+        throw new Error('SALE_NOT_FOUND');
+      }
+
+      if (sale.status === 'ANNULLED_BY_NC') {
+        throw new Error('SALE_ALREADY_ANNULLED');
+      }
+
+      const [ncCount] = await tx
+        .select({ count: sql<number>`count(*)` })
+        .from(creditDebitNotes)
+        .where(eq(creditDebitNotes.tenantId, tenantId));
+
+      const nextNcNumber = `NC-${new Date().getFullYear()}-${String(Number(ncCount.count || 0) + 1).padStart(8, '0')}`;
+
+      const [note] = await tx
+        .insert(creditDebitNotes)
+        .values({
+          tenantId,
+          saleId: sale.id,
+          type: 'CREDIT_NOTE',
+          noteNumber: nextNcNumber,
+          reason: data.reason || 'Anulación por Nota de Crédito',
+          amountUsd: sale.totalAmountUsd,
+          taxAdjustedUsd: sale.taxAmount16Usd,
+          totalUsd: sale.totalAmountUsd,
+          amountBs: sale.totalAmountBs,
+          taxAdjustedBs: sale.taxAmount16Bs,
+          totalBs: sale.totalAmountBs,
+          returnInventory: data.returnInventory ?? true,
+        })
+        .returning();
+
+      // Reintegrar inventario al almacén si returnInventory es true
+      if (data.returnInventory !== false) {
+        const lines = await tx
+          .select()
+          .from(saleLines)
+          .where(eq(saleLines.saleId, sale.id));
+
+        for (const line of lines) {
+          await tx.execute(sql`
+            UPDATE product_stock
+            SET quantity = quantity + ${line.quantity}, updated_at = NOW()
+            WHERE tenant_id = ${tenantId} AND warehouse_id = ${sale.warehouseId} AND product_id = ${line.productId};
+          `);
+
+          await tx.insert(inventoryMovements).values({
+            tenantId,
+            productId: line.productId,
+            warehouseId: sale.warehouseId,
+            userId,
+            movementType: 'IN',
+            quantity: line.quantity,
+            unitCostUsd: line.unitCostUsd,
+            referenceType: 'CREDIT_NOTE',
+            referenceId: note.id,
+            reason: `Retorno de mercancía por Nota de Crédito ${note.noteNumber}`,
+          });
+        }
+      }
+
+      // Marcar factura original como anulada
+      await tx
+        .update(sales)
+        .set({ status: 'ANNULLED_BY_NC' })
+        .where(eq(sales.id, sale.id));
+
+      await AuditService.log({
+        tenantId,
+        userId,
+        action: 'CREDIT_NOTE_ISSUED',
+        entity: 'credit_debit_notes',
+        entityId: note.id,
+        payload: {
+          saleId: sale.id,
+          noteNumber: note.noteNumber,
+          amountUsd: note.amountUsd,
+          returnInventory: data.returnInventory ?? true,
+        },
+        result: 'SUCCESS',
+        channel: 'WEB_ADMIN',
+      }, tx);
+
+      return note;
+    });
+  }
+
+  /**
+   * Lista ventas con discrepancias o déficit de stock para revisión administrativa
+   */
+  static async getDiscrepancies(tenantId: string) {
+    return await db
+      .select({
+        id: sales.id,
+        invoiceFormattedNumber: sales.invoiceFormattedNumber,
+        status: sales.status,
+        totalAmountUsd: sales.totalAmountUsd,
+        totalAmountBs: sales.totalAmountBs,
+        createdAt: sales.createdAt,
+        clientAssignedUuid: sales.clientAssignedUuid,
+      })
+      .from(sales)
+      .where(
+        and(
+          eq(sales.tenantId, tenantId),
+          eq(sales.status, 'SYNCED_WITH_STOCK_DEFICIT')
+        )
+      )
+      .orderBy(sql`created_at DESC`);
+  }
+
+  /**
+   * Sincroniza un lote de ventas fuera de línea de manera idempotente
+   */
+  static async syncOfflineBatch(tenantId: string, userId: string, batch: ConfirmSaleInput[]) {
+    const results: any[] = [];
+    let syncedCount = 0;
+    let duplicateCount = 0;
+    let deficitCount = 0;
+
+    for (const item of batch) {
+      try {
+        const idempotencyKey = item.clientAssignedUuid || crypto.randomUUID();
+        const res = await this.confirmSale(tenantId, userId, idempotencyKey, {
+          ...item,
+          isOfflineSync: true,
+        });
+
+        if ((res as any).isExistingOfflineSync) {
+          duplicateCount++;
+        } else {
+          syncedCount++;
+          if ((res as any).status === 'SYNCED_WITH_STOCK_DEFICIT') {
+            deficitCount++;
+          }
+        }
+        results.push(res);
+      } catch (err: any) {
+        results.push({ error: err.message, clientAssignedUuid: item.clientAssignedUuid });
+      }
+    }
+
+    return {
+      totalReceived: batch.length,
+      syncedCount,
+      duplicateCount,
+      deficitCount,
+      sales: results,
+    };
   }
 }

@@ -30,6 +30,8 @@ import { AuditController } from '../controllers/audit.controller.js';
 import { tenantRouter } from './tenant.routes.js';
 import { ExchangeRateService } from '../services/exchange-rate.service.js';
 import { FiscalReportService } from '../services/fiscal-report.service.js';
+import { FiscalService } from '../services/fiscal.service.js';
+import { SalesService } from '../services/sales.service.js';
 
 export const apiRouter = Router();
 
@@ -222,6 +224,72 @@ apiRouter.post('/auth/2fa/enable', AuthController.enable2FA);
 apiRouter.get('/audit', requireAdmin, AuditController.listLogs);
 apiRouter.get('/audit/logs', requireAdmin, AuditController.listLogs);
 apiRouter.get('/admin/backup', requireAdmin, AuditController.downloadBackup);
+
+// --- REPORTES FISCALES SENIAT Y LIBRO DE COMPRAS (FASE 5) ---
+apiRouter.get('/reports/purchases-book/csv', requireAdmin, async (req, res, next) => {
+  try {
+    const csvData = await FiscalReportService.getPurchasesBookCsv(req.tenantId!, req.query);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename=Libro_Compras_SENIAT.csv');
+    res.send(csvData);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- TASAS DINÁMICAS Y FISCALIDAD (FASE 5) ---
+apiRouter.put('/admin/fiscal/rates', requireAdmin, async (req, res, next) => {
+  try {
+    const updated = await FiscalService.updateRates(req.tenantId!, req.user!.id, req.body);
+    res.json({ message: 'Tasas fiscales actualizadas correctamente', rates: updated });
+  } catch (err) {
+    next(err);
+  }
+});
+
+apiRouter.put('/exchange-rates/manual', requireAdmin, async (req, res, next) => {
+  try {
+    const rate = await ExchangeRateService.setManualRate(
+      req.tenantId!,
+      req.user!.id,
+      parseFloat(req.body.newRate),
+      req.body.reason || 'Ajuste manual de tasa'
+    );
+    res.json({ message: 'Tasa de cambio manual establecida correctamente', rate });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- NOTAS DE CRÉDITO Y ANULACIONES (FASE 5) ---
+apiRouter.post('/sales/:id/credit-note', requireCashierOrAdmin, async (req, res, next) => {
+  try {
+    const note = await SalesService.createCreditNote(req.tenantId!, req.user!.id, String(req.params.id), req.body);
+    res.status(201).json({ message: 'Nota de crédito emitida y factura anulada con éxito', note });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- SINCRONIZACIÓN OFFLINE Y DISCREPANCIAS (FASE 5) ---
+apiRouter.post('/sync/offline-batch', requireCashierOrAdmin, async (req, res, next) => {
+  try {
+    const batch = Array.isArray(req.body) ? req.body : req.body.sales || [];
+    const result = await SalesService.syncOfflineBatch(req.tenantId!, req.user!.id, batch);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+apiRouter.get('/sync/discrepancies', requireAdmin, async (req, res, next) => {
+  try {
+    const discrepancies = await SalesService.getDiscrepancies(req.tenantId!);
+    res.json(discrepancies);
+  } catch (err) {
+    next(err);
+  }
+});
 
 // --- SÚPER ADMINISTRADOR GLOBAL (CRUD DE TODOS LOS NEGOCIOS / TENANTS) ---
 apiRouter.use('/super-admin/tenants', tenantRouter);

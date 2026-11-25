@@ -382,4 +382,55 @@ export class ExchangeRateService {
 
     return this.getActiveRate(tenantId);
   }
+
+  /**
+   * Ajuste manual de tasa por parte de un Administrador con auditoría obligatoria
+   * (PUT /api/v1/exchange-rates/manual)
+   */
+  static async setManualRate(
+    tenantId: string,
+    userId: string,
+    newRate: number,
+    reason: string
+  ): Promise<RateResult> {
+    const current = await this.getCurrentRates(tenantId);
+    const oldRate = current.bcv.rate;
+
+    const [snapshot] = await db
+      .insert(exchangeRateSnapshots)
+      .values({
+        tenantId,
+        source: 'BCV',
+        rate: newRate.toFixed(4),
+        fetchedAt: new Date(),
+        validFrom: new Date(),
+        isOfficial: false,
+      })
+      .returning();
+
+    await AuditService.log({
+      tenantId,
+      userId,
+      action: 'EXCHANGE_RATE_MANUAL_OVERRIDE',
+      entity: 'exchange_rate_snapshots',
+      entityId: snapshot.id,
+      payload: {
+        oldRate,
+        newRate,
+        reason,
+        adjustedBy: userId,
+      },
+      result: 'SUCCESS',
+      channel: 'WEB_ADMIN',
+    });
+
+    return {
+      id: snapshot.id,
+      source: 'BCV',
+      rate: newRate,
+      fetchedAt: new Date(snapshot.fetchedAt),
+      validFrom: new Date(snapshot.validFrom),
+      isStale: false,
+    };
+  }
 }

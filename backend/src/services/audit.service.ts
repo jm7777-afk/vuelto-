@@ -23,13 +23,14 @@ export class AuditService {
    * Registra una acción de auditoría inmutable en PostgreSQL.
    * La tabla rechaza cualquier comando UPDATE o DELETE mediante triggers de BD.
    */
-  static async log(entry: CreateAuditEntry): Promise<void> {
+  static async log(entry: CreateAuditEntry, tx?: any): Promise<void> {
     if (!isValidUuid(entry.tenantId)) {
       return;
     }
     const safeUserId = isValidUuid(entry.userId) ? entry.userId : null;
+    const runner = tx || db;
     try {
-      await db.insert(auditLogs).values({
+      await runner.insert(auditLogs).values({
         tenantId: entry.tenantId,
         userId: safeUserId,
         action: entry.action,
@@ -44,7 +45,7 @@ export class AuditService {
     } catch (error: any) {
       if (error?.code === '23503' && entry.userId) {
         try {
-          await db.insert(auditLogs).values({
+          await runner.insert(auditLogs).values({
             tenantId: entry.tenantId,
             userId: null,
             action: entry.action,

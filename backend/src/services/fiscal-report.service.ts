@@ -1,6 +1,6 @@
 import { eq, and, gte, lte, sql, desc } from 'drizzle-orm';
 import { db } from '../db/index.js';
-import { sales, customers, tenants } from '../db/schema.js';
+import { sales, customers, tenants, purchaseOrders, suppliers } from '../db/schema.js';
 
 export interface SalesBookRow {
   operationNumber: number;
@@ -202,6 +202,94 @@ export class FiscalReportService {
 
     // Totales
     csv += `\nTOTALES:;;;;;${summary.totalVentasBs.toFixed(2).replace('.', ',')};${summary.totalExentoBs.toFixed(2).replace('.', ',')};${summary.totalBase16Bs.toFixed(2).replace('.', ',')};;${summary.totalIva16Bs.toFixed(2).replace('.', ',')};${summary.totalBase8Bs.toFixed(2).replace('.', ',')};;${summary.totalIva8Bs.toFixed(2).replace('.', ',')};${summary.totalIgtfBs.toFixed(2).replace('.', ',')};;${summary.totalVentasUsd.toFixed(2).replace('.', ',')}\n`;
+
+    return csv;
+  }
+
+  /**
+   * Genera el Libro de Compras Fiscal en formato CSV con BOM UTF-8 conforme a Providencia SENIAT 0071
+   */
+  static async getPurchasesBookCsv(
+    tenantId: string,
+    options: { month?: number; year?: number } = {}
+  ): Promise<string> {
+    const [tenant] = await db.select().from(tenants).where(eq(tenants.id, tenantId)).limit(1);
+    if (!tenant) throw new Error('TENANT_NOT_FOUND');
+
+    const orders = await db
+      .select({
+        id: purchaseOrders.id,
+        orderNumber: purchaseOrders.orderNumber,
+        status: purchaseOrders.status,
+        totalEstimatedUsd: purchaseOrders.totalEstimatedUsd,
+        createdAt: purchaseOrders.createdAt,
+        supplierName: suppliers.name,
+        supplierDocType: suppliers.documentType,
+        supplierDocNumber: suppliers.documentNumber,
+      })
+      .from(purchaseOrders)
+      .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
+      .where(eq(purchaseOrders.tenantId, tenantId))
+      .orderBy(desc(purchaseOrders.createdAt));
+
+    let csv = '\uFEFF'; // BOM UTF-8 para Excel
+    csv += `LIBRO DE COMPRAS FISCAL (PROVIDENCIA SENIAT 0071)\n`;
+    csv += `Razón Social:;${tenant.businessName}\n`;
+    csv += `RIF:;${tenant.documentType}-${tenant.documentNumber}\n`;
+    csv += `Dirección Fiscal:;${tenant.fiscalAddress.replace(/\n/g, ' ')}\n\n`;
+
+    const headers = [
+      'N° Operación',
+      'Fecha Factura',
+      'RIF Proveedor',
+      'Nombre o Razón Social Proveedor',
+      'N° Factura / Documento',
+      'N° Control Fiscal',
+      'Total Compras con IVA (Bs)',
+      'Compras Exentas (Bs)',
+      'Base Imponible 16% (Bs)',
+      '% Alíc.',
+      'Impuesto IVA 16% (Bs)',
+      'Retención IVA (Bs)',
+      'Total Compra (USD)',
+    ];
+    csv += headers.join(';') + '\n';
+
+    let opNum = 1;
+    let totalComprasUsd = 0;
+    const approximateRate = 920;
+
+    for (const ord of orders) {
+      const usdAmount = parseFloat(ord.totalEstimatedUsd || '0');
+      totalComprasUsd += usdAmount;
+      const dateStr = new Date(ord.createdAt).toISOString().split('T')[0];
+      const totalBs = usdAmount * approximateRate;
+      const base16Bs = (totalBs / 1.16);
+      const iva16Bs = totalBs - base16Bs;
+
+      const line = [
+        opNum++,
+        dateStr,
+        `${ord.supplierDocType}-${ord.supplierDocNumber}`,
+        `"${ord.supplierName.replace(/"/g, '""')}"`,
+        ord.orderNumber,
+        `00-${ord.orderNumber.replace(/[^0-9]/g, '').slice(-6).padStart(6, '0')}`,
+        totalBs.toFixed(2).replace('.', ','),
+        '0,00',
+        base16Bs.toFixed(2).replace('.', ','),
+        '16%',
+        iva16Bs.toFixed(2).replace('.', ','),
+        '0,00',
+        usdAmount.toFixed(2).replace('.', ','),
+      ];
+      csv += line.join(';') + '\n';
+    }
+
+    const totalBsAll = totalComprasUsd * approximateRate;
+    const totalBaseAll = totalBsAll / 1.16;
+    const totalIvaAll = totalBsAll - totalBaseAll;
+
+    csv += `\nTOTALES:;;;;;;${totalBsAll.toFixed(2).replace('.', ',')};0,00;${totalBaseAll.toFixed(2).replace('.', ',')};;${totalIvaAll.toFixed(2).replace('.', ',')};0,00;${totalComprasUsd.toFixed(2).replace('.', ',')}\n`;
 
     return csv;
   }

@@ -32,6 +32,52 @@ export async function runMigrationAndSeed() {
         ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS old_values JSONB;
         ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS new_values JSONB;
         ALTER TABLE audit_logs DROP CONSTRAINT IF EXISTS audit_logs_user_id_fkey;
+
+        ALTER TABLE sales ADD COLUMN IF NOT EXISTS client_assigned_uuid VARCHAR(64);
+        ALTER TABLE sales ALTER COLUMN status TYPE VARCHAR(50);
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_tenant_client_assigned_uuid ON sales(tenant_id, client_assigned_uuid);
+
+        -- Tablas fiscales dinámicas (Fase 5)
+        CREATE TABLE IF NOT EXISTS tax_rates (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          code VARCHAR(30) NOT NULL,
+          rate NUMERIC(6, 4) NOT NULL,
+          description VARCHAR(100),
+          valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          valid_to TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS igtf_rules (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          currency VARCHAR(10) NOT NULL,
+          payment_method VARCHAR(30) NOT NULL,
+          rate NUMERIC(6, 4) NOT NULL DEFAULT 0.0300,
+          applies_to_special_taxpayer_only BOOLEAN NOT NULL DEFAULT true,
+          valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          valid_to TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS credit_debit_notes (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          sale_id UUID NOT NULL REFERENCES sales(id) ON DELETE RESTRICT,
+          type VARCHAR(20) NOT NULL DEFAULT 'CREDIT_NOTE',
+          note_number VARCHAR(50) NOT NULL,
+          reason TEXT NOT NULL,
+          amount_usd NUMERIC(14, 2) NOT NULL,
+          tax_adjusted_usd NUMERIC(14, 2) NOT NULL,
+          total_usd NUMERIC(14, 2) NOT NULL,
+          amount_bs NUMERIC(14, 2) NOT NULL,
+          tax_adjusted_bs NUMERIC(14, 2) NOT NULL,
+          total_bs NUMERIC(14, 2) NOT NULL,
+          return_inventory BOOLEAN NOT NULL DEFAULT true,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_tenant_note_number ON credit_debit_notes(tenant_id, note_number);
       `);
       console.log('✓ Tablas y columnas de seguridad verificadas en PostgreSQL');
 
@@ -60,6 +106,9 @@ export async function runMigrationAndSeed() {
         'purchase_orders',
         'receivable_payments',
         'financial_transactions',
+        'tax_rates',
+        'igtf_rules',
+        'credit_debit_notes',
       ];
 
       for (const table of rlsTables) {

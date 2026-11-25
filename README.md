@@ -10,7 +10,11 @@ Plataforma integral de punto de venta (POS), inventario, clientes y facturación
    - **Node.js 20+** con **TypeScript (strict mode)** y **Express 5**.
    - **PostgreSQL** administrado a través de **Drizzle ORM** (21 tablas relacionales).
    - **Aislamiento Multi-Tenant por Fila**: Extracción estricta de `tenant_id` exclusivamente desde el JWT verificado en el servidor.
-   - **Cumplimiento Fiscal SENIAT**:
+   - **Cumplimiento Fiscal y Normativa SENIAT (Providencias 0071 / 0141)**:
+     - Genera reportes oficiales (Libro de Ventas y Compras) en formato exigido por la Providencia SENIAT N° 0071.
+     - *Nota legal:* Para comercios obligados por Providencia 0141, se requiere impresora fiscal física homologada.
+     - Numeración correlativa estricta sin saltos mediante bloqueos pesimistas (`pg_advisory_xact_lock` y `SELECT ... FOR UPDATE`).
+     - Emisión de Notas de Crédito y Débito con anulación y retorno de stock en inventario.
      - Numeración correlativa consecutiva sin saltos mediante bloqueos pesimistas (`SELECT ... FOR UPDATE`).
      - Desglose formal de alícuotas (16% General, 8% Reducida, 0% Exenta).
      - Percepción obligatoria del **3% IGTF** sobre pagos en divisas / USD en efectivo.
