@@ -28,6 +28,7 @@ import {
   Terminal,
   Copy,
   UserPlus,
+  HelpCircle,
 } from 'lucide-react';
 import type {
   UserProfile,
@@ -43,6 +44,7 @@ interface SuperAdminConsoleProps {
   user: UserProfile;
   bcvRate: number;
   onLogout: () => void;
+  onShowOnboarding?: () => void;
   onUserUpdated: (updated: UserProfile) => void;
 }
 
@@ -79,6 +81,7 @@ export const SuperAdminConsole: React.FC<SuperAdminConsoleProps> = ({
   user,
   bcvRate,
   onLogout,
+  onShowOnboarding,
   onUserUpdated,
 }) => {
   const [activeTab, setActiveTab] = useState<SuperAdminTab>('TENANTS');
@@ -194,51 +197,65 @@ export const SuperAdminConsole: React.FC<SuperAdminConsoleProps> = ({
     loadSnapshot();
   }, [loadTenants, loadSnapshot]);
 
-  // Suscripción SSE en tiempo real para Monitoreo
+  // Suscripción SSE en tiempo real para Monitoreo mediante ticket efímero de un solo uso (sin JWT en URL)
   useEffect(() => {
-    const token = getAccessToken();
-    if (!token) return;
+    let es: EventSource | null = null;
+    let cancelled = false;
 
-    const es = new EventSource(`/api/v1/super-admin/monitoring/stream?token=${encodeURIComponent(token)}`);
+    const connectStream = async () => {
+      try {
+        const res = await apiFetch('/api/v1/super-admin/monitoring/stream-ticket', { method: 'POST' }, onLogout);
+        if (!res.ok || cancelled) return;
+        const { ticket } = await res.json();
+        if (!ticket || cancelled) return;
 
-    es.onopen = () => {
-      setSseConnected(true);
+        es = new EventSource(`/api/v1/super-admin/monitoring/stream?ticket=${encodeURIComponent(ticket)}`);
+
+        es.onopen = () => {
+          setSseConnected(true);
+        };
+
+        es.addEventListener('snapshot', (e: MessageEvent) => {
+          try {
+            const data: MonitoringSnapshot = JSON.parse(e.data);
+            setSnapshot(data);
+            if (!streamPausedRef.current && Array.isArray(data.recentEvents)) {
+              setLiveEvents(data.recentEvents);
+            }
+          } catch {}
+        });
+
+        es.addEventListener('telemetry', (e: MessageEvent) => {
+          try {
+            const data: MonitoringSnapshot = JSON.parse(e.data);
+            setSnapshot(data);
+          } catch {}
+        });
+
+        es.addEventListener('event', (e: MessageEvent) => {
+          if (streamPausedRef.current) return;
+          try {
+            const evt: SystemLogEvent = JSON.parse(e.data);
+            setLiveEvents((prev) => [evt, ...prev].slice(0, 250));
+          } catch {}
+        });
+
+        es.onerror = () => {
+          setSseConnected(false);
+        };
+      } catch {
+        setSseConnected(false);
+      }
     };
 
-    es.addEventListener('snapshot', (e: MessageEvent) => {
-      try {
-        const data: MonitoringSnapshot = JSON.parse(e.data);
-        setSnapshot(data);
-        if (!streamPausedRef.current && Array.isArray(data.recentEvents)) {
-          setLiveEvents(data.recentEvents);
-        }
-      } catch {}
-    });
-
-    es.addEventListener('telemetry', (e: MessageEvent) => {
-      try {
-        const data: MonitoringSnapshot = JSON.parse(e.data);
-        setSnapshot(data);
-      } catch {}
-    });
-
-    es.addEventListener('event', (e: MessageEvent) => {
-      if (streamPausedRef.current) return;
-      try {
-        const evt: SystemLogEvent = JSON.parse(e.data);
-        setLiveEvents((prev) => [evt, ...prev].slice(0, 250));
-      } catch {}
-    });
-
-    es.onerror = () => {
-      setSseConnected(false);
-    };
+    connectStream();
 
     return () => {
-      es.close();
+      cancelled = true;
+      es?.close();
       setSseConnected(false);
     };
-  }, [user.id]);
+  }, [user.id, onLogout]);
 
   // ==================== 3. AUDITORÍA INMUTABLE GLOBAL (POSTGRESQL) ====================
   const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>([]);
@@ -736,6 +753,32 @@ export const SuperAdminConsole: React.FC<SuperAdminConsoleProps> = ({
               );
             })}
           </nav>
+
+          {onShowOnboarding && (
+            <button
+              type="button"
+              onClick={onShowOnboarding}
+              style={{
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '6px',
+                padding: '8px 12px',
+                borderRadius: '8px',
+                border: '1px solid rgba(0, 230, 195, 0.28)',
+                backgroundColor: '#062F3B',
+                color: '#00E6C3',
+                fontSize: '12px',
+                fontWeight: 600,
+                cursor: 'pointer',
+                marginBottom: '12px',
+              }}
+            >
+              <HelpCircle size={14} />
+              <span>Ver Guía Inicial</span>
+            </button>
+          )}
 
           {/* Info BCV y Estado DB */}
           <div style={{ backgroundColor: '#062F3B', padding: '12px', borderRadius: '10px', border: '1px solid #155E75', marginBottom: '14px', fontSize: '11px' }}>

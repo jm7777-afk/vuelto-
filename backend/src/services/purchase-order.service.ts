@@ -1,5 +1,5 @@
 import { eq, and, desc, sql } from 'drizzle-orm';
-import { db } from '../db/index.js';
+import { withTenant } from '../db/tenantDb.js';
 import { purchaseOrders, purchaseOrderLines, suppliers, products, warehouses } from '../db/schema.js';
 import { InventoryService } from './inventory.service.js';
 import { AuditService } from './audit.service.js';
@@ -20,19 +20,16 @@ export interface CreatePurchaseOrderInput {
 
 export class PurchaseOrderService {
   static async create(tenantId: string, userId: string, input: CreatePurchaseOrderInput) {
-    return await db.transaction(async (tx) => {
-      // 1. Generar número de orden si no viene
+    return await withTenant(tenantId, async (tx) => {
       const orderNumber =
         input.orderNumber ||
         `OC-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
 
-      // 2. Calcular total
       let totalEstimatedUsd = 0;
       for (const line of input.lines) {
         totalEstimatedUsd += line.quantityOrdered * line.unitCostUsd;
       }
 
-      // 3. Crear orden
       const [order] = await tx
         .insert(purchaseOrders)
         .values({
@@ -46,7 +43,6 @@ export class PurchaseOrderService {
         })
         .returning();
 
-      // 4. Crear líneas
       for (const line of input.lines) {
         const subtotal = line.quantityOrdered * line.unitCostUsd;
         await tx.insert(purchaseOrderLines).values({
@@ -68,104 +64,108 @@ export class PurchaseOrderService {
         payload: { orderNumber, totalUsd: totalEstimatedUsd.toFixed(2), linesCount: input.lines.length },
         result: 'SUCCESS',
         channel: 'WEB_ADMIN',
-      });
+      }, tx);
 
       return order;
     });
   }
 
   static async list(tenantId: string, status?: string) {
-    let query = db
-      .select({
-        id: purchaseOrders.id,
-        orderNumber: purchaseOrders.orderNumber,
-        status: purchaseOrders.status,
-        expectedDeliveryDate: purchaseOrders.expectedDeliveryDate,
-        totalEstimatedUsd: purchaseOrders.totalEstimatedUsd,
-        notes: purchaseOrders.notes,
-        receivedAt: purchaseOrders.receivedAt,
-        createdAt: purchaseOrders.createdAt,
-        supplierId: purchaseOrders.supplierId,
-        supplierName: suppliers.name,
-        supplierPhone: suppliers.phone,
-        supplierDoc: sql`concat(${suppliers.documentType}, '-', ${suppliers.documentNumber})`,
-      })
-      .from(purchaseOrders)
-      .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
-      .where(
-        status
-          ? and(eq(purchaseOrders.tenantId, tenantId), eq(purchaseOrders.status, status))
-          : eq(purchaseOrders.tenantId, tenantId)
-      )
-      .orderBy(desc(purchaseOrders.createdAt));
-
-    return await query;
+    return await withTenant(tenantId, (tx) =>
+      tx
+        .select({
+          id: purchaseOrders.id,
+          orderNumber: purchaseOrders.orderNumber,
+          status: purchaseOrders.status,
+          expectedDeliveryDate: purchaseOrders.expectedDeliveryDate,
+          totalEstimatedUsd: purchaseOrders.totalEstimatedUsd,
+          notes: purchaseOrders.notes,
+          receivedAt: purchaseOrders.receivedAt,
+          createdAt: purchaseOrders.createdAt,
+          supplierId: purchaseOrders.supplierId,
+          supplierName: suppliers.name,
+          supplierPhone: suppliers.phone,
+          supplierDoc: sql`concat(${suppliers.documentType}, '-', ${suppliers.documentNumber})`,
+        })
+        .from(purchaseOrders)
+        .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
+        .where(
+          status
+            ? and(eq(purchaseOrders.tenantId, tenantId), eq(purchaseOrders.status, status))
+            : eq(purchaseOrders.tenantId, tenantId)
+        )
+        .orderBy(desc(purchaseOrders.createdAt))
+    );
   }
 
   static async getById(tenantId: string, orderId: string) {
-    const [order] = await db
-      .select({
-        id: purchaseOrders.id,
-        orderNumber: purchaseOrders.orderNumber,
-        status: purchaseOrders.status,
-        expectedDeliveryDate: purchaseOrders.expectedDeliveryDate,
-        totalEstimatedUsd: purchaseOrders.totalEstimatedUsd,
-        notes: purchaseOrders.notes,
-        receivedAt: purchaseOrders.receivedAt,
-        createdAt: purchaseOrders.createdAt,
-        supplierId: purchaseOrders.supplierId,
-        supplierName: suppliers.name,
-        supplierPhone: suppliers.phone,
-      })
-      .from(purchaseOrders)
-      .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
-      .where(and(eq(purchaseOrders.tenantId, tenantId), eq(purchaseOrders.id, orderId)));
+    return await withTenant(tenantId, async (tx) => {
+      const [order] = await tx
+        .select({
+          id: purchaseOrders.id,
+          orderNumber: purchaseOrders.orderNumber,
+          status: purchaseOrders.status,
+          expectedDeliveryDate: purchaseOrders.expectedDeliveryDate,
+          totalEstimatedUsd: purchaseOrders.totalEstimatedUsd,
+          notes: purchaseOrders.notes,
+          receivedAt: purchaseOrders.receivedAt,
+          createdAt: purchaseOrders.createdAt,
+          supplierId: purchaseOrders.supplierId,
+          supplierName: suppliers.name,
+          supplierPhone: suppliers.phone,
+        })
+        .from(purchaseOrders)
+        .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
+        .where(and(eq(purchaseOrders.tenantId, tenantId), eq(purchaseOrders.id, orderId)));
 
-    if (!order) return null;
+      if (!order) return null;
 
-    const lines = await db
-      .select({
-        id: purchaseOrderLines.id,
-        productId: purchaseOrderLines.productId,
-        productName: products.name,
-        sku: products.sku,
-        quantityOrdered: purchaseOrderLines.quantityOrdered,
-        quantityReceived: purchaseOrderLines.quantityReceived,
-        unitCostUsd: purchaseOrderLines.unitCostUsd,
-        subtotalUsd: purchaseOrderLines.subtotalUsd,
-      })
-      .from(purchaseOrderLines)
-      .innerJoin(products, eq(purchaseOrderLines.productId, products.id))
-      .where(eq(purchaseOrderLines.orderId, order.id));
+      const lines = await tx
+        .select({
+          id: purchaseOrderLines.id,
+          productId: purchaseOrderLines.productId,
+          productName: products.name,
+          sku: products.sku,
+          quantityOrdered: purchaseOrderLines.quantityOrdered,
+          quantityReceived: purchaseOrderLines.quantityReceived,
+          unitCostUsd: purchaseOrderLines.unitCostUsd,
+          subtotalUsd: purchaseOrderLines.subtotalUsd,
+        })
+        .from(purchaseOrderLines)
+        .innerJoin(products, eq(purchaseOrderLines.productId, products.id))
+        .where(eq(purchaseOrderLines.orderId, order.id));
 
-    return { ...order, lines };
+      return { ...order, lines };
+    });
   }
 
   static async updateStatus(tenantId: string, userId: string, orderId: string, status: string) {
-    const [updated] = await db
-      .update(purchaseOrders)
-      .set({ status, updatedAt: new Date() })
-      .where(and(eq(purchaseOrders.tenantId, tenantId), eq(purchaseOrders.id, orderId)))
-      .returning();
+    return await withTenant(tenantId, async (tx) => {
+      const [updated] = await tx
+        .update(purchaseOrders)
+        .set({ status, updatedAt: new Date() })
+        .where(and(eq(purchaseOrders.tenantId, tenantId), eq(purchaseOrders.id, orderId)))
+        .returning();
 
-    if (updated) {
-      await AuditService.log({
-        tenantId,
-        userId,
-        action: 'PURCHASE_ORDER_STATUS_CHANGED',
-        entity: 'purchase_order',
-        entityId: orderId,
-        payload: { newStatus: status },
-        result: 'SUCCESS',
-        channel: 'WEB_ADMIN',
-      });
-    }
+      if (updated) {
+        await AuditService.log({
+          tenantId,
+          userId,
+          action: 'PURCHASE_ORDER_STATUS_CHANGED',
+          entity: 'purchase_order',
+          entityId: orderId,
+          payload: { newStatus: status },
+          result: 'SUCCESS',
+          channel: 'WEB_ADMIN',
+        }, tx);
+      }
 
-    return updated || null;
+      return updated || null;
+    });
   }
 
   /**
-   * Recepción de Pedido: Carga física a almacén en Kardex y actualiza costo de reposición
+   * Recepción de Pedido: Carga física atómica a almacén en Kardex y actualiza costo de reposición
    */
   static async receive(
     tenantId: string,
@@ -173,16 +173,16 @@ export class PurchaseOrderService {
     orderId: string,
     warehouseId?: string
   ) {
-    return await db.transaction(async (tx) => {
+    return await withTenant(tenantId, async (tx) => {
       const [order] = await tx
         .select()
         .from(purchaseOrders)
-        .where(and(eq(purchaseOrders.tenantId, tenantId), eq(purchaseOrders.id, orderId)));
+        .where(and(eq(purchaseOrders.tenantId, tenantId), eq(purchaseOrders.id, orderId)))
+        .for('update');
 
       if (!order) throw new Error('Orden de compra no encontrada');
       if (order.status === 'RECEIVED') throw new Error('La orden ya fue recibida previamente');
 
-      // Buscar almacén predeterminado si no se pasa
       let targetWhId = warehouseId;
       if (!targetWhId) {
         const [defaultWh] = await tx
@@ -208,7 +208,6 @@ export class PurchaseOrderService {
         .from(purchaseOrderLines)
         .where(eq(purchaseOrderLines.orderId, orderId));
 
-      // Cargar cada producto al inventario mediante InventoryService
       for (const line of lines) {
         const qty = parseFloat(line.quantityOrdered);
         const cost = parseFloat(line.unitCostUsd);
@@ -223,16 +222,14 @@ export class PurchaseOrderService {
           referenceType: 'PURCHASE',
           referenceId: order.id,
           channel: 'WEB_ADMIN',
-        });
+        }, tx);
 
-        // Actualizar línea con cantidad recibida
         await tx
           .update(purchaseOrderLines)
           .set({ quantityReceived: line.quantityOrdered })
           .where(eq(purchaseOrderLines.id, line.id));
       }
 
-      // Marcar orden como recibida
       const [updatedOrder] = await tx
         .update(purchaseOrders)
         .set({ status: 'RECEIVED', receivedAt: new Date(), updatedAt: new Date() })
@@ -248,7 +245,7 @@ export class PurchaseOrderService {
         payload: { orderNumber: order.orderNumber, linesReceived: lines.length },
         result: 'SUCCESS',
         channel: 'WEB_ADMIN',
-      });
+      }, tx);
 
       return updatedOrder;
     });

@@ -25,6 +25,11 @@ export class MonitoringController {
     }
   }
 
+  static issueStreamTicket(req: Request, res: Response): void {
+    const ticketData = MonitoringService.issueStreamTicket(req.user!.id);
+    res.json(ticketData);
+  }
+
   static stream(req: Request, res: Response): void {
     MonitoringService.subscribe(req, res, req.user?.id || 'superadmin');
   }

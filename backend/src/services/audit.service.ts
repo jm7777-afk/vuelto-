@@ -1,6 +1,6 @@
 import { eq, and, desc, sql, ilike, or } from 'drizzle-orm';
-import { db } from '../db/index.js';
 import { auditLogs, users, tenants } from '../db/schema.js';
+import { withTenant, withSuperAdmin } from '../db/tenantDb.js';
 import { MonitoringService } from './monitoring.service.js';
 
 export interface CreateAuditEntry {
@@ -42,7 +42,6 @@ export class AuditService {
 
     const safeTenantId = entry.tenantId && isValidUuid(entry.tenantId) ? entry.tenantId : null;
     const safeUserId = isValidUuid(entry.userId) ? entry.userId : null;
-    const runner = tx || db;
 
     // Emitir evento en tiempo real hacia el monitor del Súper Admin
     MonitoringService.recordEvent({
@@ -59,41 +58,55 @@ export class AuditService {
       metadata: entry.payload,
     });
 
-    try {
-      await runner.insert(auditLogs).values({
-        tenantId: safeTenantId,
-        userId: safeUserId,
-        action: entry.action,
-        entity: entry.entity,
-        entityType: entry.entityType || null,
-        entityId: entry.entityId || null,
-        payload: entry.payload ? entry.payload : null,
-        oldValues: entry.oldValues ? entry.oldValues : null,
-        newValues: entry.newValues ? entry.newValues : null,
-        result: entry.result,
-        channel: entry.channel,
-        ipAddress: entry.ipAddress || null,
-        userAgent: entry.userAgent || null,
-      });
-    } catch (error: any) {
-      if (error?.code === '23503' && entry.userId) {
-        try {
-          await runner.insert(auditLogs).values({
-            tenantId: safeTenantId,
-            userId: null,
-            action: entry.action,
-            entity: entry.entity,
-            entityType: entry.entityType || null,
-            entityId: entry.entityId || null,
-            payload: entry.payload ? entry.payload : null,
-            result: entry.result,
-            channel: entry.channel,
-            ipAddress: entry.ipAddress || null,
-            userAgent: entry.userAgent || null,
-          });
-          return;
-        } catch {}
+    const insertRow = async (executor: any) => {
+      try {
+        await executor.insert(auditLogs).values({
+          tenantId: safeTenantId,
+          userId: safeUserId,
+          action: entry.action,
+          entity: entry.entity,
+          entityType: entry.entityType || null,
+          entityId: entry.entityId || null,
+          payload: entry.payload ? entry.payload : null,
+          oldValues: entry.oldValues ? entry.oldValues : null,
+          newValues: entry.newValues ? entry.newValues : null,
+          result: entry.result,
+          channel: entry.channel,
+          ipAddress: entry.ipAddress || null,
+          userAgent: entry.userAgent || null,
+        });
+      } catch (error: any) {
+        if (error?.code === '23503' && entry.userId) {
+          try {
+            await executor.insert(auditLogs).values({
+              tenantId: safeTenantId,
+              userId: null,
+              action: entry.action,
+              entity: entry.entity,
+              entityType: entry.entityType || null,
+              entityId: entry.entityId || null,
+              payload: entry.payload ? entry.payload : null,
+              result: entry.result,
+              channel: entry.channel,
+              ipAddress: entry.ipAddress || null,
+              userAgent: entry.userAgent || null,
+            });
+            return;
+          } catch {}
+        }
+        throw error;
       }
+    };
+
+    try {
+      if (tx) {
+        await insertRow(tx);
+      } else if (safeTenantId) {
+        await withTenant(safeTenantId, (scopedTx) => insertRow(scopedTx));
+      } else {
+        await withSuperAdmin((adminTx) => insertRow(adminTx));
+      }
+    } catch (error: any) {
       console.error('Error registrando auditoría en DB:', error);
     }
   }
@@ -138,47 +151,54 @@ export class AuditService {
 
     const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 
-    const rows = await db
-      .select({
-        id: auditLogs.id,
-        tenantId: auditLogs.tenantId,
-        tenantName: tenants.businessName,
-        tenantSlug: tenants.slug,
-        userId: auditLogs.userId,
-        username: users.username,
-        userFullName: users.fullName,
-        userRoleId: users.roleId,
-        action: auditLogs.action,
-        entity: auditLogs.entity,
-        entityType: auditLogs.entityType,
-        entityId: auditLogs.entityId,
-        payload: auditLogs.payload,
-        result: auditLogs.result,
-        channel: auditLogs.channel,
-        ipAddress: auditLogs.ipAddress,
-        userAgent: auditLogs.userAgent,
-        createdAt: auditLogs.createdAt,
-      })
-      .from(auditLogs)
-      .leftJoin(users, eq(auditLogs.userId, users.id))
-      .leftJoin(tenants, eq(auditLogs.tenantId, tenants.id))
-      .where(whereClause)
-      .orderBy(desc(auditLogs.createdAt))
-      .limit(limit)
-      .offset(offset);
+    const queryRunner = async (scopedTx: any) => {
+      const rows = await scopedTx
+        .select({
+          id: auditLogs.id,
+          tenantId: auditLogs.tenantId,
+          tenantName: tenants.businessName,
+          tenantSlug: tenants.slug,
+          userId: auditLogs.userId,
+          username: users.username,
+          userFullName: users.fullName,
+          userRoleId: users.roleId,
+          action: auditLogs.action,
+          entity: auditLogs.entity,
+          entityType: auditLogs.entityType,
+          entityId: auditLogs.entityId,
+          payload: auditLogs.payload,
+          result: auditLogs.result,
+          channel: auditLogs.channel,
+          ipAddress: auditLogs.ipAddress,
+          userAgent: auditLogs.userAgent,
+          createdAt: auditLogs.createdAt,
+        })
+        .from(auditLogs)
+        .leftJoin(users, eq(auditLogs.userId, users.id))
+        .leftJoin(tenants, eq(auditLogs.tenantId, tenants.id))
+        .where(whereClause)
+        .orderBy(desc(auditLogs.createdAt))
+        .limit(limit)
+        .offset(offset);
 
-    const [totalRow] = await db
-      .select({ count: sql<number>`count(*)::int` })
-      .from(auditLogs)
-      .leftJoin(users, eq(auditLogs.userId, users.id))
-      .leftJoin(tenants, eq(auditLogs.tenantId, tenants.id))
-      .where(whereClause);
+      const [totalRow] = await scopedTx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(auditLogs)
+        .leftJoin(users, eq(auditLogs.userId, users.id))
+        .leftJoin(tenants, eq(auditLogs.tenantId, tenants.id))
+        .where(whereClause);
 
-    return {
-      page,
-      limit,
-      total: totalRow?.count || 0,
-      logs: rows,
+      return {
+        page,
+        limit,
+        total: totalRow?.count || 0,
+        logs: rows,
+      };
     };
+
+    if (tenantId) {
+      return withTenant(tenantId, queryRunner);
+    }
+    return withSuperAdmin(queryRunner);
   }
 }

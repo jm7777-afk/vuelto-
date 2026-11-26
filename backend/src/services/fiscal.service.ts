@@ -1,6 +1,6 @@
 import { eq, and, sql, desc } from 'drizzle-orm';
-import { db } from '../db/index.js';
-import { taxRates, igtfRules, tenants } from '../db/schema.js';
+import { withTenant } from '../db/tenantDb.js';
+import { taxRates, igtfRules } from '../db/schema.js';
 import { AuditService } from './audit.service.js';
 
 interface FiscalCacheEntry {
@@ -35,15 +35,17 @@ export class FiscalService {
     }
 
     try {
-      const records = await db
-        .select()
-        .from(taxRates)
-        .where(
-          and(
-            eq(taxRates.tenantId, tenantId),
-            sql`(${taxRates.validTo} IS NULL OR ${taxRates.validTo} > NOW())`
+      const records = await withTenant(tenantId, (tx) =>
+        tx
+          .select()
+          .from(taxRates)
+          .where(
+            and(
+              eq(taxRates.tenantId, tenantId),
+              sql`(${taxRates.validTo} IS NULL OR ${taxRates.validTo} > NOW())`
+            )
           )
-        );
+      );
 
       const rates: Record<string, number> = { ...this.STATUTORY_DEFAULTS };
 
@@ -74,19 +76,21 @@ export class FiscalService {
     }
 
     try {
-      const [rule] = await db
-        .select()
-        .from(igtfRules)
-        .where(
-          and(
-            eq(igtfRules.tenantId, tenantId),
-            eq(igtfRules.currency, currency),
-            eq(igtfRules.paymentMethod, paymentMethod),
-            sql`(${igtfRules.validTo} IS NULL OR ${igtfRules.validTo} > NOW())`
+      const [rule] = await withTenant(tenantId, (tx) =>
+        tx
+          .select()
+          .from(igtfRules)
+          .where(
+            and(
+              eq(igtfRules.tenantId, tenantId),
+              eq(igtfRules.currency, currency),
+              eq(igtfRules.paymentMethod, paymentMethod),
+              sql`(${igtfRules.validTo} IS NULL OR ${igtfRules.validTo} > NOW())`
+            )
           )
-        )
-        .orderBy(desc(igtfRules.createdAt))
-        .limit(1);
+          .orderBy(desc(igtfRules.createdAt))
+          .limit(1)
+      );
 
       const rate = rule ? parseFloat(rule.rate) : this.STATUTORY_DEFAULTS.IGTF;
 
@@ -114,61 +118,63 @@ export class FiscalService {
   ): Promise<any> {
     const now = new Date();
 
-    if (data.generalRate !== undefined) {
-      await db.insert(taxRates).values({
+    await withTenant(tenantId, async (tx) => {
+      if (data.generalRate !== undefined) {
+        await tx.insert(taxRates).values({
+          tenantId,
+          code: 'GENERAL',
+          rate: data.generalRate.toFixed(4),
+          description: 'Alícuota General de IVA',
+          validFrom: now,
+        });
+      }
+
+      if (data.reducedRate !== undefined) {
+        await tx.insert(taxRates).values({
+          tenantId,
+          code: 'REDUCED',
+          rate: data.reducedRate.toFixed(4),
+          description: 'Alícuota Reducida de IVA',
+          validFrom: now,
+        });
+      }
+
+      if (data.additionalRate !== undefined) {
+        await tx.insert(taxRates).values({
+          tenantId,
+          code: 'ADDITIONAL',
+          rate: data.additionalRate.toFixed(4),
+          description: 'Alícuota Adicional de IVA (Lujo)',
+          validFrom: now,
+        });
+      }
+
+      if (data.igtfRate !== undefined) {
+        await tx.insert(igtfRules).values({
+          tenantId,
+          currency: 'USD',
+          paymentMethod: 'CASH',
+          rate: data.igtfRate.toFixed(4),
+          appliesToSpecialTaxpayerOnly: true,
+          validFrom: now,
+        });
+      }
+
+      // Invalidar caché local
+      this.cache.delete(tenantId);
+
+      // Auditoría dentro de la transacción RLS
+      await AuditService.log({
         tenantId,
-        code: 'GENERAL',
-        rate: data.generalRate.toFixed(4),
-        description: 'Alícuota General de IVA',
-        validFrom: now,
-      });
-    }
-
-    if (data.reducedRate !== undefined) {
-      await db.insert(taxRates).values({
-        tenantId,
-        code: 'REDUCED',
-        rate: data.reducedRate.toFixed(4),
-        description: 'Alícuota Reducida de IVA',
-        validFrom: now,
-      });
-    }
-
-    if (data.additionalRate !== undefined) {
-      await db.insert(taxRates).values({
-        tenantId,
-        code: 'ADDITIONAL',
-        rate: data.additionalRate.toFixed(4),
-        description: 'Alícuota Adicional de IVA (Lujo)',
-        validFrom: now,
-      });
-    }
-
-    if (data.igtfRate !== undefined) {
-      await db.insert(igtfRules).values({
-        tenantId,
-        currency: 'USD',
-        paymentMethod: 'CASH',
-        rate: data.igtfRate.toFixed(4),
-        appliesToSpecialTaxpayerOnly: true,
-        validFrom: now,
-      });
-    }
-
-    // Invalidar caché local
-    this.cache.delete(tenantId);
-
-    // Auditoría
-    await AuditService.log({
-      tenantId,
-      userId,
-      action: 'FISCAL_RATES_UPDATED',
-      entity: 'tax_rates',
-      payload: data,
-      result: 'SUCCESS',
-      channel: 'WEB_ADMIN',
+        userId,
+        action: 'FISCAL_RATES_UPDATED',
+        entity: 'tax_rates',
+        payload: data,
+        result: 'SUCCESS',
+        channel: 'WEB_ADMIN',
+      }, tx);
     });
 
-    return await this.getTaxRates(tenantId);
+    return this.getTaxRates(tenantId);
   }
 }

@@ -1,7 +1,9 @@
 import { EventEmitter } from 'events';
+import crypto from 'crypto';
 import { Response, Request } from 'express';
 import { sql, gte, and, isNull, gt } from 'drizzle-orm';
-import { db, pool } from '../db/index.js';
+import { pool } from '../db/index.js';
+import { withSuperAdmin } from '../db/tenantDb.js';
 import { tenants, users, sales, auditLogs, refreshTokens } from '../db/schema.js';
 
 export type MonitorEventCategory = 'HTTP' | 'AUDIT' | 'SECURITY' | 'SYSTEM' | 'ERROR';
@@ -41,8 +43,29 @@ export class MonitoringService {
   private static emitter = new EventEmitter();
   private static buffer: MonitorEvent[] = [];
   private static sseClients = new Map<string, SseClient>();
+  private static streamTickets = new Map<string, { userId: string; expiresAt: number }>();
   private static requestTimestamps: number[] = [];
   private static errorTimestamps: number[] = [];
+
+  static issueStreamTicket(userId: string): { ticket: string; expiresInSeconds: number } {
+    const now = Date.now();
+    for (const [k, entry] of this.streamTickets.entries()) {
+      if (entry.expiresAt <= now) {
+        this.streamTickets.delete(k);
+      }
+    }
+    const ticket = crypto.randomBytes(32).toString('hex');
+    this.streamTickets.set(ticket, { userId, expiresAt: now + 30_000 });
+    return { ticket, expiresInSeconds: 30 };
+  }
+
+  static consumeStreamTicket(ticket: string): string | null {
+    const entry = this.streamTickets.get(ticket);
+    if (!entry) return null;
+    this.streamTickets.delete(ticket);
+    if (Date.now() > entry.expiresAt) return null;
+    return entry.userId;
+  }
   private static eventCounter = 0;
 
   static recordEvent(input: Omit<MonitorEvent, 'id' | 'timestamp'> & { timestamp?: string }): MonitorEvent {
@@ -132,34 +155,38 @@ export class MonitoringService {
       startOfDay.setHours(0, 0, 0, 0);
       const last24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-      const [tStats] = await db
-        .select({
-          total: sql<number>`count(*)::int`,
-          active: sql<number>`count(*) filter (where ${tenants.isActive} = true)::int`,
-        })
-        .from(tenants);
+      const { tStats, uStats, sessStats, salesStats, auditStats } = await withSuperAdmin(async (tx) => {
+        const [tRows] = await tx
+          .select({
+            total: sql<number>`count(*)::int`,
+            active: sql<number>`count(*) filter (where ${tenants.isActive} = true)::int`,
+          })
+          .from(tenants);
 
-      const [uStats] = await db
-        .select({ total: sql<number>`count(*)::int` })
-        .from(users);
+        const [uRows] = await tx
+          .select({ total: sql<number>`count(*)::int` })
+          .from(users);
 
-      const [sessStats] = await db
-        .select({ active: sql<number>`count(*)::int` })
-        .from(refreshTokens)
-        .where(and(isNull(refreshTokens.revokedAt), gt(refreshTokens.expiresAt, new Date())));
+        const [sessRows] = await tx
+          .select({ active: sql<number>`count(*)::int` })
+          .from(refreshTokens)
+          .where(and(isNull(refreshTokens.revokedAt), gt(refreshTokens.expiresAt, new Date())));
 
-      const [salesStats] = await db
-        .select({
-          count: sql<number>`count(*)::int`,
-          totalUsd: sql<string>`coalesce(sum(${sales.totalAmountUsd}), 0)::text`,
-        })
-        .from(sales)
-        .where(gte(sales.createdAt, startOfDay));
+        const [sRows] = await tx
+          .select({
+            count: sql<number>`count(*)::int`,
+            totalUsd: sql<string>`coalesce(sum(${sales.totalAmountUsd}), 0)::text`,
+          })
+          .from(sales)
+          .where(gte(sales.createdAt, startOfDay));
 
-      const [auditStats] = await db
-        .select({ count: sql<number>`count(*)::int` })
-        .from(auditLogs)
-        .where(gte(auditLogs.createdAt, last24h));
+        const [aRows] = await tx
+          .select({ count: sql<number>`count(*)::int` })
+          .from(auditLogs)
+          .where(gte(auditLogs.createdAt, last24h));
+
+        return { tStats: tRows, uStats: uRows, sessStats: sessRows, salesStats: sRows, auditStats: aRows };
+      });
 
       dbLatencyMs = Date.now() - dbStart;
       totalTenants = tStats?.total || 0;

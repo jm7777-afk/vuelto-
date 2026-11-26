@@ -1,7 +1,12 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import ReactDOM from 'react-dom/client';
 import { initWebSentry } from './config/sentry';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import './styles/vuelto-intro.css';
+import { LoadingScreen } from './components/LoadingScreen';
+import { OnboardingFlow, ONBOARDING_STORAGE_KEY } from './components/OnboardingFlow';
+import { LoginView } from './components/LoginView';
+import { WebBarcodeScanner } from './components/WebBarcodeScanner';
 import {
   TrendingUp,
   Package,
@@ -76,233 +81,20 @@ initWebSentry();
 
 const DEFAULT_BCV_RATE = 0;
 
-// COMPONENTE: SPLASH SCREEN (ANIMACIÓN VUELTO 60 FPS)
-const VueltoSplashScreen: React.FC<{ onFinish: () => void }> = ({ onFinish }) => {
-  const [phase, setPhase] = useState<'DRAW_INVOICE' | 'BILL_APPEAR' | 'ARROW_ROTATE' | 'TEXT_FADE' | 'STATIC'>('DRAW_INVOICE');
-
-  useEffect(() => {
-    const t1 = setTimeout(() => setPhase('BILL_APPEAR'), 600);
-    const t2 = setTimeout(() => setPhase('ARROW_ROTATE'), 1300);
-    const t3 = setTimeout(() => setPhase('TEXT_FADE'), 2200);
-    const t4 = setTimeout(() => setPhase('STATIC'), 3000);
-    const t5 = setTimeout(() => onFinish(), 3800);
-
-    return () => {
-      clearTimeout(t1);
-      clearTimeout(t2);
-      clearTimeout(t3);
-      clearTimeout(t4);
-      clearTimeout(t5);
-    };
-  }, [onFinish]);
-
-  return (
-    <div
-      onClick={onFinish}
-      title="Clic para omitir intro"
-      style={{
-        position: 'fixed',
-        inset: 0,
-        backgroundColor: '#0B3B49',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 9999,
-        cursor: 'pointer',
-        overflow: 'hidden',
-        userSelect: 'none',
-        transition: 'opacity 0.6s ease',
-      }}
-    >
-      <div style={{ position: 'relative', width: '280px', height: '280px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <svg viewBox="0 0 200 200" width="220" height="220" style={{ overflow: 'visible' }}>
-          <defs>
-            <linearGradient id="vueltoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#14B8A6" />
-              <stop offset="100%" stopColor="#84CC16" />
-            </linearGradient>
-            <linearGradient id="billGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#10B981" />
-              <stop offset="100%" stopColor="#A3E635" />
-            </linearGradient>
-            <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
-              <feGaussianBlur stdDeviation="3" result="blur" />
-              <feComposite in="SourceGraphic" in2="blur" operator="over" />
-            </filter>
-          </defs>
-
-          {/* Factura Fiscal */}
-          <g>
-            <rect
-              x="30"
-              y="30"
-              width="85"
-              height="115"
-              rx="8"
-              fill="#062F3B"
-              stroke="url(#vueltoGrad)"
-              strokeWidth="3.5"
-              strokeDasharray="400"
-              strokeDashoffset={phase === 'DRAW_INVOICE' ? 200 : 0}
-              style={{
-                transition: 'stroke-dashoffset 0.8s cubic-bezier(0.4, 0, 0.2, 1)',
-                filter: 'drop-shadow(0 4px 12px rgba(20, 184, 166, 0.25))',
-              }}
-            />
-            {/* Líneas de conceptos */}
-            <line x1="45" y1="58" x2="90" y2="58" stroke="#14B8A6" strokeWidth="3" strokeLinecap="round" opacity={phase !== 'DRAW_INVOICE' ? 1 : 0} style={{ transition: 'opacity 0.4s ease 0.3s' }} />
-            <line x1="45" y1="74" x2="80" y2="74" stroke="#14B8A6" strokeWidth="3" strokeLinecap="round" opacity={phase !== 'DRAW_INVOICE' ? 1 : 0} style={{ transition: 'opacity 0.4s ease 0.45s' }} />
-            <line x1="45" y1="90" x2="95" y2="90" stroke="#84CC16" strokeWidth="3.5" strokeLinecap="round" opacity={phase !== 'DRAW_INVOICE' ? 1 : 0} style={{ transition: 'opacity 0.4s ease 0.6s' }} />
-          </g>
-
-          {/* Billete inclinado */}
-          <g
-            style={{
-              transformOrigin: '120px 115px',
-              transform: phase === 'DRAW_INVOICE' ? 'scale(0) translate(20px, 20px)' : 'scale(1) rotate(-14deg)',
-              opacity: phase === 'DRAW_INVOICE' ? 0 : 1,
-              transition: 'all 0.6s cubic-bezier(0.34, 1.56, 0.64, 1)',
-            }}
-          >
-            <rect x="95" y="90" width="62" height="38" rx="5" fill="#042F2E" stroke="url(#billGrad)" strokeWidth="3" filter="url(#glow)" />
-            <circle cx="126" cy="109" r="8" fill="none" stroke="#A3E635" strokeWidth="2" />
-            <text x="126" y="113" fill="#A3E635" fontSize="11" fontWeight="bold" textAnchor="middle" fontFamily="sans-serif">$</text>
-          </g>
-
-          {/* Flecha circular de retorno / vuelto */}
-          <g
-            style={{
-              transformOrigin: '125px 125px',
-              transform: phase === 'ARROW_ROTATE' || phase === 'TEXT_FADE' || phase === 'STATIC' ? 'rotate(-360deg)' : 'rotate(0deg)',
-              opacity: phase === 'DRAW_INVOICE' || phase === 'BILL_APPEAR' ? 0 : 1,
-              transition: 'transform 1s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.4s ease',
-            }}
-          >
-            <path d="M 100 135 A 28 28 0 1 0 152 110" fill="none" stroke="#A3E635" strokeWidth="3.5" strokeLinecap="round" strokeDasharray="4 2" />
-            <polygon points="152,102 158,114 146,112" fill="#A3E635" />
-          </g>
-        </svg>
-      </div>
-
-      {/* Entrada tipográfica "vuelto" */}
-      <div
-        style={{
-          marginTop: '16px',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          opacity: phase === 'TEXT_FADE' || phase === 'STATIC' ? 1 : 0,
-          transform: phase === 'TEXT_FADE' || phase === 'STATIC' ? 'translateY(0)' : 'translateY(16px)',
-          transition: 'all 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
-        }}
-      >
-        <span style={{ fontSize: '46px', fontWeight: '900', color: '#FFFFFF', letterSpacing: '2px', fontFamily: 'system-ui, -apple-system, sans-serif', lineHeight: 1 }}>
-          vuelto<span style={{ color: '#A3E635' }}>.</span>
-        </span>
-        <span style={{ fontSize: '11px', color: '#14B8A6', letterSpacing: '3px', textTransform: 'uppercase', fontWeight: 'bold', marginTop: '8px' }}>
-          Plataforma de Facturación Bimoneda
-        </span>
-      </div>
-
-      <p style={{ position: 'absolute', bottom: '24px', fontSize: '11px', color: '#64748B', letterSpacing: '1px' }}>
-        Toca cualquier parte para continuar
-      </p>
-    </div>
-  );
-};
-
-// COMPONENTE: ONBOARDING MODAL
-const VueltoOnboardingModal: React.FC<{ onClose: () => void; onPlaySplash: () => void }> = ({ onClose, onPlaySplash }) => {
-  const [slide, setSlide] = useState(0);
-
-  const slides = [
-    {
-      title: '¡Bienvenido a Vuelto!',
-      subtitle: 'La plataforma POS & ERP diseñada para el comercio venezolano',
-      desc: 'Gestiona ventas en dólares y bolívares sincronizadas al instante con la tasa oficial BCV, cumple al 100% con la Providencia SENIAT 0071 e IGTF 3%, y elimina el problema de la falta de cambio en efectivo.',
-      highlight: '🚀 Cero costos por mensajes usando WhatsApp nativo',
-      icon: <Sparkles size={40} color="#A3E635" />,
-    },
-    {
-      title: 'Cuentas en Espera y Vuelto Inteligente',
-      subtitle: 'Agiliza la cola en horas pico de clientes',
-      desc: 'Pausa carritos de compra sin perderlos mientras el cliente busca más productos. Liquida el vuelto como saldo en Monedero del cliente, Vale Impreso con código de barras o Pago Móvil automático.',
-      highlight: '💳 Sin fricción de cambio ni billetes rotos',
-      icon: <Zap size={40} color="#38BDF8" />,
-    },
-    {
-      title: 'Auditoría, Kardex y Separación de Roles (RBAC)',
-      subtitle: 'Tranquilidad total para el dueño y agilidad para el cajero',
-      desc: 'El vendedor solo ve precios al detal y cobro de facturas. El administrador controla costos al mayor, órdenes de compra a proveedores, cobranzas con recargo por mora y libro fiscal SENIAT.',
-      highlight: '🔒 Aislamiento estricto y trazabilidad por cajero',
-      icon: <ShieldCheck size={40} color="#10B981" />,
-    },
-  ];
-
-  return (
-    <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(7, 31, 39, 0.85)', backdropFilter: 'blur(8px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9000, padding: '20px' }}>
-      <div style={{ backgroundColor: '#0B3B49', width: '100%', maxWidth: '540px', borderRadius: '20px', border: '1px solid #155E75', padding: '32px', boxShadow: '0 20px 40px rgba(0,0,0,0.5)', position: 'relative' }}>
-        <button onClick={onClose} style={{ position: 'absolute', top: '16px', right: '16px', background: 'none', border: 'none', color: '#94A3B8', cursor: 'pointer', padding: '8px' }}>
-          <X size={20} />
-        </button>
-
-        <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '16px' }}>
-          <div style={{ padding: '16px', borderRadius: '50%', backgroundColor: '#062F3B', border: '2px solid #14B8A6' }}>
-            {slides[slide].icon}
-          </div>
-        </div>
-
-        <h3 style={{ fontSize: '22px', fontWeight: 'bold', color: '#FFFFFF', textAlign: 'center', marginBottom: '6px' }}>{slides[slide].title}</h3>
-        <p style={{ fontSize: '13px', color: '#38BDF8', textAlign: 'center', fontWeight: '600', marginBottom: '16px' }}>{slides[slide].subtitle}</p>
-
-        <p style={{ fontSize: '14px', color: '#CBD5E1', lineHeight: '1.6', textAlign: 'center', marginBottom: '20px' }}>{slides[slide].desc}</p>
-
-        <div style={{ backgroundColor: '#062F3B', padding: '10px 14px', borderRadius: '10px', border: '1px solid #10B98144', marginBottom: '28px', textAlign: 'center', fontSize: '12px', color: '#A3E635', fontWeight: 'bold' }}>
-          {slides[slide].highlight}
-        </div>
-
-        <div style={{ display: 'flex', justifyContent: 'center', gap: '8px', marginBottom: '24px' }}>
-          {slides.map((_, i) => (
-            <div key={i} style={{ width: i === slide ? '24px' : '8px', height: '8px', borderRadius: '4px', backgroundColor: i === slide ? '#A3E635' : '#155E75', transition: 'all 0.3s ease' }} />
-          ))}
-        </div>
-
-        <div style={{ display: 'flex', gap: '12px' }}>
-          {slide > 0 && (
-            <button onClick={() => setSlide(slide - 1)} style={{ padding: '12px 20px', borderRadius: '10px', border: '1px solid #334155', backgroundColor: '#062F3B', color: '#CBD5E1', fontWeight: 'bold', fontSize: '13px', cursor: 'pointer' }}>
-              Anterior
-            </button>
-          )}
-
-          {slide < slides.length - 1 ? (
-            <button onClick={() => setSlide(slide + 1)} style={{ flex: 1, padding: '12px', borderRadius: '10px', border: 'none', backgroundColor: '#0284C7', color: '#FFFFFF', fontWeight: 'bold', fontSize: '14px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
-              <span>Siguiente</span>
-              <ChevronRight size={18} />
-            </button>
-          ) : (
-            <button onClick={onClose} style={{ flex: 1, padding: '12px', borderRadius: '10px', border: 'none', backgroundColor: '#10B981', color: '#FFFFFF', fontWeight: 'bold', fontSize: '14px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
-              <span>Comenzar a Facturar</span>
-              <Check size={18} />
-            </button>
-          )}
-        </div>
-
-        <div style={{ marginTop: '16px', textAlign: 'center' }}>
-          <button onClick={onPlaySplash} style={{ background: 'none', border: 'none', color: '#94A3B8', fontSize: '12px', cursor: 'pointer', textDecoration: 'underline' }}>
-            Volver a ver la animación de bienvenida
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-};
-
 // COMPONENTE PRINCIPAL
 export const App: React.FC = () => {
-  // Splash y Onboarding
+  // Flujo inicial: Loading Screen -> Onboarding (1ra vez) / Login / Dashboard
+  const [bootPhase, setBootPhase] = useState<'LOADING' | 'ONBOARDING' | 'LOGIN' | 'READY'>('LOADING');
+  const [bootSlow, setBootSlow] = useState(false);
+  const [bootError, setBootError] = useState<string | null>(null);
   const [showSplash, setShowSplash] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
+
+  useEffect(() => {
+    if (!showSplash) return;
+    const t = setTimeout(() => setShowSplash(false), 1800);
+    return () => clearTimeout(t);
+  }, [showSplash]);
 
   // Sesión y Auth Persistente (validada contra /api/v1/auth/me)
   const [user, setUser] = useState<UserProfile | null>(() => {
@@ -647,7 +439,18 @@ export const App: React.FC = () => {
   const [newProdStock, setNewProdStock] = useState('0');
   const [newProdMinStock, setNewProdMinStock] = useState('5');
   const [cameraActive, setCameraActive] = useState(false);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [scannedBarcodeInfo, setScannedBarcodeInfo] = useState<string | null>(null);
+  const [posCameraOpen, setPosCameraOpen] = useState(false);
+
+  // Estado Apertura y Cierre de Caja
+  const [cashSession, setCashSession] = useState<any>(null);
+  const [isCashModalOpen, setIsCashModalOpen] = useState(false);
+  const [cashOpeningUsd, setCashOpeningUsd] = useState('0.00');
+  const [cashOpeningBs, setCashOpeningBs] = useState('0.00');
+  const [cashClosingUsd, setCashClosingUsd] = useState('0.00');
+  const [cashClosingBs, setCashClosingBs] = useState('0.00');
+  const [cashNotes, setCashNotes] = useState('');
+  const [cashLoading, setCashLoading] = useState(false);
 
   // Modal Ajuste de Stock Físico (Kardex)
   const [isStockAdjustModalOpen, setIsStockAdjustModalOpen] = useState(false);
@@ -790,24 +593,75 @@ export const App: React.FC = () => {
     return () => clearInterval(interval);
   }, []);
 
-  // Manejo de Cámara Web
-  useEffect(() => {
-    if (cameraActive && videoRef.current) {
-      navigator.mediaDevices
-        ?.getUserMedia({ video: { facingMode: 'environment' } })
-        .then((stream) => {
-          if (videoRef.current) videoRef.current.srcObject = stream;
-        })
-        .catch((err) => {
-          console.warn('Cámara no disponible:', err);
-          alert('No se pudo acceder a la cámara web. Puedes ingresar el código manualmente.');
-          setCameraActive(false);
-        });
-    } else if (!cameraActive && videoRef.current?.srcObject) {
-      const stream = videoRef.current.srcObject as MediaStream;
-      stream.getTracks().forEach((track) => track.stop());
+  // Manejadores de Apertura y Cierre de Caja
+  const handleRefreshCashSession = async () => {
+    try {
+      const res = await apiFetch('/api/v1/cash-sessions/current', {}, handleLogout);
+      if (res.ok) {
+        const data = await res.json();
+        setCashSession(data.session || null);
+        if (data.session?.liveMetrics) {
+          setCashClosingUsd(data.session.liveMetrics.expectedTotalUsd || '0.00');
+          setCashClosingBs(data.session.liveMetrics.expectedTotalBs || '0.00');
+        }
+      }
+    } catch {}
+  };
+
+  const handleOpenCashSession = async () => {
+    setCashLoading(true);
+    try {
+      const res = await apiFetch('/api/v1/cash-sessions/open', {
+        method: 'POST',
+        body: JSON.stringify({
+          openingBalanceUsd: parseFloat(cashOpeningUsd) || 0,
+          openingBalanceBs: parseFloat(cashOpeningBs) || 0,
+          notes: cashNotes.trim() || undefined,
+        }),
+      }, handleLogout);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(data.message || 'No se pudo abrir la caja.');
+        return;
+      }
+      await handleRefreshCashSession();
+      setCashNotes('');
+      setIsCashModalOpen(false);
+      alert('Caja abierta exitosamente. Ya puedes facturar en el turno actual.');
+    } catch {
+      alert('Error de conexión abriendo caja.');
+    } finally {
+      setCashLoading(false);
     }
-  }, [cameraActive]);
+  };
+
+  const handleCloseCashSession = async () => {
+    setCashLoading(true);
+    try {
+      const res = await apiFetch('/api/v1/cash-sessions/close', {
+        method: 'POST',
+        body: JSON.stringify({
+          closingDeclaredUsd: parseFloat(cashClosingUsd) || 0,
+          closingDeclaredBs: parseFloat(cashClosingBs) || 0,
+          notes: cashNotes.trim() || undefined,
+        }),
+      }, handleLogout);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(data.message || 'No se pudo cerrar la caja.');
+        return;
+      }
+      setCashSession(null);
+      setCashNotes('');
+      setIsCashModalOpen(false);
+      const disc = parseFloat(data.session?.discrepancyUsd || '0');
+      alert(`Caja cerrada correctamente. Esperado: $${data.session?.closingExpectedUsd} USD • Declarado: $${data.session?.closingDeclaredUsd} USD • Diferencia: $${disc.toFixed(2)} USD`);
+    } catch {
+      alert('Error de conexión cerrando caja.');
+    } finally {
+      setCashLoading(false);
+    }
+  };
 
   // Cálculos Financieros
   const totalInventoryCostUsd = inventoryList.reduce((acc, p) => acc + p.costPriceUsd * p.stock, 0);
@@ -825,13 +679,23 @@ export const App: React.FC = () => {
   const loadStoreData = async (currentUser: UserProfile | null) => {
     if (!currentUser || currentUser.roleId === 'SUPER_ADMIN') return;
     try {
-      const [prodRes, custRes, salesRes, cfgRes, rateRes] = await Promise.all([
+      const [prodRes, custRes, salesRes, cfgRes, rateRes, cashSessRes] = await Promise.all([
         apiFetch('/api/v1/products', {}, handleLogout),
         apiFetch('/api/v1/customers', {}, handleLogout),
         apiFetch('/api/v1/sales', {}, handleLogout),
         apiFetch('/api/v1/config', {}, handleLogout),
         apiFetch('/api/v1/exchange-rates/active', {}, handleLogout),
+        apiFetch('/api/v1/cash-sessions/current', {}, handleLogout),
       ]);
+
+      if (cashSessRes.ok) {
+        const csData = await cashSessRes.json();
+        setCashSession(csData.session || null);
+        if (csData.session?.liveMetrics) {
+          setCashClosingUsd(csData.session.liveMetrics.expectedTotalUsd || '0.00');
+          setCashClosingBs(csData.session.liveMetrics.expectedTotalBs || '0.00');
+        }
+      }
 
       if (prodRes.ok) {
         const prods = await prodRes.json();
@@ -1077,56 +941,113 @@ export const App: React.FC = () => {
     }
   };
 
-  // Validar sesión existente contra /api/v1/auth/me al cargar la app
-  useEffect(() => {
-    const token = getAccessToken();
-    if (!token) {
-      if (user) {
-        clearSessionStorage();
-        setUser(null);
-      }
-      return;
+  const hasCompletedOnboarding = () => {
+    try {
+      return localStorage.getItem(ONBOARDING_STORAGE_KEY) === 'true';
+    } catch {
+      return false;
     }
+  };
 
-    apiFetch('/api/v1/auth/me')
-      .then(async (res) => {
-        if (!res.ok) {
-          clearSessionStorage();
-          setUser(null);
-          return;
-        }
-        const me = await res.json();
-        const roleFromBackend: UserProfile['roleId'] =
-          me.roleId === 'SUPER_ADMIN'
-            ? 'SUPER_ADMIN'
-            : me.roleId === 'VENDEDOR'
-            ? 'VENDEDOR'
-            : me.roleId === 'CONSULTA'
-            ? 'CONSULTA'
-            : 'ADMIN';
-        const verifiedProfile: UserProfile = {
-          id: me.id,
-          tenantId: me.tenantId ?? null,
-          username: me.username,
-          email: me.email,
-          fullName: me.fullName,
-          roleId: roleFromBackend,
-          businessName: me.businessName,
-          twoFactorEnabled: me.twoFactorEnabled,
-          lastLoginAt: me.lastLoginAt,
-        };
-        setUser(verifiedProfile);
-        localStorage.setItem('vuelto_user_session', JSON.stringify(verifiedProfile));
-        if (roleFromBackend !== 'SUPER_ADMIN') {
-          loadStoreData(verifiedProfile);
-        }
-      })
-      .catch(() => {
-        // Si no hay conexión al servidor, no permitir sesión falsa
+  // Inicialización real: verifica conectividad/recursos, valida sesión contra /api/v1/auth/me y enruta sin tiempos artificiales
+  const runBootstrap = useCallback(async () => {
+    setBootPhase('LOADING');
+    setBootError(null);
+    setBootSlow(false);
+
+    const startedAt = Date.now();
+    const slowTimer = setTimeout(() => setBootSlow(true), 2400);
+
+    const finishTransition = (nextPhase: 'ONBOARDING' | 'LOGIN' | 'READY') => {
+      clearTimeout(slowTimer);
+      const reducedMotion =
+        typeof window !== 'undefined' &&
+        window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+      const minVisualMs = reducedMotion ? 0 : 380;
+      const elapsed = Date.now() - startedAt;
+      const remaining = Math.max(0, minVisualMs - elapsed);
+      if (remaining > 0) {
+        setTimeout(() => setBootPhase(nextPhase), remaining);
+      } else {
+        setBootPhase(nextPhase);
+      }
+    };
+
+    try {
+      const token = getAccessToken();
+
+      if (!token) {
         clearSessionStorage();
         setUser(null);
-      });
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 7000);
+        try {
+          const healthRes = await fetch('/health/live', { signal: controller.signal });
+          if (!healthRes.ok) {
+            throw new Error(`El servidor respondió con estado ${healthRes.status}.`);
+          }
+        } finally {
+          clearTimeout(timeoutId);
+        }
+
+        finishTransition(hasCompletedOnboarding() ? 'LOGIN' : 'ONBOARDING');
+        return;
+      }
+
+      const res = await apiFetch('/api/v1/auth/me');
+      if (!res.ok) {
+        clearSessionStorage();
+        setUser(null);
+        finishTransition(hasCompletedOnboarding() ? 'LOGIN' : 'ONBOARDING');
+        return;
+      }
+
+      const me = await res.json();
+      const roleFromBackend: UserProfile['roleId'] =
+        me.roleId === 'SUPER_ADMIN'
+          ? 'SUPER_ADMIN'
+          : me.roleId === 'VENDEDOR'
+          ? 'VENDEDOR'
+          : me.roleId === 'CONSULTA'
+          ? 'CONSULTA'
+          : 'ADMIN';
+
+      const verifiedProfile: UserProfile = {
+        id: me.id,
+        tenantId: me.tenantId ?? null,
+        username: me.username,
+        email: me.email,
+        fullName: me.fullName,
+        roleId: roleFromBackend,
+        businessName: me.businessName,
+        twoFactorEnabled: me.twoFactorEnabled,
+        lastLoginAt: me.lastLoginAt,
+      };
+
+      setUser(verifiedProfile);
+      localStorage.setItem('vuelto_user_session', JSON.stringify(verifiedProfile));
+
+      if (roleFromBackend !== 'SUPER_ADMIN') {
+        await loadStoreData(verifiedProfile);
+      }
+
+      finishTransition('READY');
+    } catch (err: any) {
+      clearTimeout(slowTimer);
+      clearSessionStorage();
+      setUser(null);
+      setBootError(
+        err?.name === 'AbortError'
+          ? 'El servidor tardó demasiado en responder al inicializar los recursos.'
+          : 'No pudimos conectar con el servidor de Vuelto. Verifica que el backend esté activo e inténtalo de nuevo.'
+      );
+    }
   }, []);
+
+  useEffect(() => {
+    runBootstrap();
+  }, [runBootstrap]);
 
   // Login handler 100% conectado a PostgreSQL (sin fallback ficticio)
   const handleLogin = async () => {
@@ -1193,12 +1114,16 @@ export const App: React.FC = () => {
 
       setUser(loggedProfile);
       localStorage.setItem('vuelto_user_session', JSON.stringify(loggedProfile));
+      try {
+        localStorage.setItem(ONBOARDING_STORAGE_KEY, 'true');
+      } catch {}
       setRequiresTwoFactor(false);
       setTwoFactorInput('');
       setActiveTab(roleFromBackend === 'VENDEDOR' ? 'POS' : 'METRICS');
       if (roleFromBackend !== 'SUPER_ADMIN') {
         await loadStoreData(loggedProfile);
       }
+      setBootPhase('READY');
     } catch {
       setLoginError('No se pudo conectar con el servidor API. Verifica que el backend esté activo.');
     } finally {
@@ -1232,6 +1157,7 @@ export const App: React.FC = () => {
     setTwoFactorInput('');
     setRequiresTwoFactor(false);
     setLoginError('');
+    setBootPhase('LOGIN');
   };
 
   // Guardar Producto en PostgreSQL
@@ -1243,9 +1169,23 @@ export const App: React.FC = () => {
 
     const saleNum = parseFloat(newProdSaleUsd);
     const costNum = parseFloat(newProdCostUsd) || 0;
-    const finalBarcode = newProdBarcode
-      ? ensureValidEan13(newProdBarcode)
-      : ensureValidEan13('7591005' + Math.floor(10000 + Math.random() * 90000));
+    const rawCode = newProdBarcode.trim();
+    let finalBarcode = rawCode;
+    let detectedType: 'EAN13' | 'EAN8' | 'UPC' | 'CODE128' = 'EAN13';
+
+    if (!rawCode) {
+      finalBarcode = ensureValidEan13('7591005' + Math.floor(10000 + Math.random() * 90000));
+      detectedType = 'EAN13';
+    } else if (/^\d{13}$/.test(rawCode)) {
+      finalBarcode = ensureValidEan13(rawCode);
+      detectedType = 'EAN13';
+    } else if (/^\d{8}$/.test(rawCode)) {
+      detectedType = 'EAN8';
+    } else if (/^\d{12}$/.test(rawCode)) {
+      detectedType = 'UPC';
+    } else {
+      detectedType = 'CODE128';
+    }
 
     try {
       const res = await apiFetch('/api/v1/products', {
@@ -1259,7 +1199,7 @@ export const App: React.FC = () => {
           isExempt: false,
           minStockAlert: parseInt(newProdMinStock, 10) || 5,
           initialStock: parseFloat(newProdStock) || 0,
-          barcodes: [{ barcode: finalBarcode, barcodeType: 'EAN13', isPrimary: true }],
+          barcodes: [{ barcode: finalBarcode, barcodeType: detectedType, isPrimary: true }],
         }),
       }, handleLogout);
 
@@ -2017,101 +1957,69 @@ export const App: React.FC = () => {
     }
   };
 
-  // LOGIN SCREEN SI NO ESTÁ AUTENTICADO
-  if (!user) {
+  // 1. LOADING SCREEN INICIAL (HASTA VERIFICAR SESIÓN Y RECURSOS)
+  if (bootPhase === 'LOADING') {
     return (
-      <div style={{ minHeight: '100vh', backgroundColor: '#071F27', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
-        <div style={{ width: '100%', maxWidth: '440px', backgroundColor: '#0B3B49', borderRadius: '24px', border: '1px solid #155E75', padding: '36px', boxShadow: '0 25px 50px -12px rgba(0,0,0,0.6)' }}>
-          <div style={{ textAlign: 'center', marginBottom: '28px' }}>
-            <img
-              src="/vuelto-logo.jpg"
-              alt="Vuelto Logo"
-              style={{
-                height: '70px',
-                objectFit: 'contain',
-                margin: '0 auto 16px auto',
-                display: 'block',
-                borderRadius: '8px',
-              }}
-            />
-            <h1 style={{ fontSize: '38px', fontWeight: '900', color: '#FFFFFF', letterSpacing: '2px', lineHeight: 1 }}>
-              vuelto<span style={{ color: '#A3E635' }}>.</span>
-            </h1>
-            <p style={{ fontSize: '11px', color: '#A3E635', fontWeight: '700', letterSpacing: '2px', marginTop: '6px' }}>
-              SISTEMA BIMONEDA & GESTIÓN INTEGRAL
-            </p>
-            <div style={{ marginTop: '10px', display: 'inline-block', backgroundColor: '#062F3B', padding: '4px 12px', borderRadius: '16px', border: '1px solid #10B98144', fontSize: '11px', color: '#94A3B8' }}>
-              {bcvRate > 0 ? `BCV Oficial: ${bcvRate.toFixed(2)} Bs/$ • SENIAT Prov. 0071` : 'SENIAT Prov. 0071 • Conexión Segura'}
-            </div>
-          </div>
+      <LoadingScreen
+        isSlow={bootSlow}
+        error={bootError}
+        onRetry={runBootstrap}
+        onContinueToLogin={() => {
+          setBootError(null);
+          setBootPhase(hasCompletedOnboarding() ? 'LOGIN' : 'ONBOARDING');
+        }}
+      />
+    );
+  }
 
-          <form onSubmit={(e) => { e.preventDefault(); handleLogin(); }} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-            {loginError && (
-              <div style={{ padding: '12px', borderRadius: '10px', backgroundColor: 'rgba(239, 68, 68, 0.15)', border: '1px solid #EF4444', color: '#FCA5A5', fontSize: '13px', textAlign: 'center', lineHeight: '1.4' }}>
-                {loginError}
-              </div>
-            )}
+  // 2. ONBOARDING INICIAL (SOLO PRIMERA VISITA) O LOGIN SCREEN
+  if (!user) {
+    if (bootPhase === 'ONBOARDING') {
+      return (
+        <OnboardingFlow
+          mode="initial"
+          onComplete={() => setBootPhase('LOGIN')}
+        />
+      );
+    }
 
-            <div>
-              <label style={{ display: 'block', fontSize: '12px', color: '#CBD5E1', marginBottom: '6px', fontWeight: '600' }}>Usuario</label>
-              <input
-                type="text"
-                autoComplete="username"
-                placeholder="Ingresa tu usuario"
-                value={usernameInput}
-                onChange={(e) => setUsernameInput(e.target.value)}
-                style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid #334155', backgroundColor: '#062F3B', color: '#FFFFFF', fontSize: '14px', outline: 'none' }}
-              />
-            </div>
+    return (
+      <LoginView
+        username={usernameInput}
+        password={passwordInput}
+        twoFactorCode={twoFactorInput}
+        requiresTwoFactor={requiresTwoFactor}
+        loading={loginLoading}
+        error={loginError}
+        bcvRate={bcvRate}
+        onChangeUsername={setUsernameInput}
+        onChangePassword={setPasswordInput}
+        onChangeTwoFactor={setTwoFactorInput}
+        onSubmit={handleLogin}
+        onShowOnboarding={() => setBootPhase('ONBOARDING')}
+      />
+    );
+  }
 
-            <div>
-              <label style={{ display: 'block', fontSize: '12px', color: '#CBD5E1', marginBottom: '6px', fontWeight: '600' }}>Contraseña</label>
-              <input
-                type="password"
-                autoComplete="current-password"
-                placeholder="••••••••"
-                value={passwordInput}
-                onChange={(e) => setPasswordInput(e.target.value)}
-                style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid #334155', backgroundColor: '#062F3B', color: '#FFFFFF', fontSize: '14px', outline: 'none' }}
-              />
-            </div>
-
-            {requiresTwoFactor && (
-              <div>
-                <label style={{ display: 'block', fontSize: '12px', color: '#A3E635', marginBottom: '6px', fontWeight: '600' }}>Código 2FA (Authenticator)</label>
-                <input
-                  type="text"
-                  maxLength={6}
-                  placeholder="6 dígitos TOTP"
-                  value={twoFactorInput}
-                  onChange={(e) => setTwoFactorInput(e.target.value)}
-                  style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid #10B981', backgroundColor: '#062F3B', color: '#FFFFFF', fontSize: '16px', textAlign: 'center', letterSpacing: '4px', outline: 'none' }}
-                />
-              </div>
-            )}
-
-            <button
-              type="submit"
-              disabled={loginLoading}
-              style={{
-                width: '100%',
-                padding: '14px',
-                borderRadius: '8px',
-                border: 'none',
-                backgroundColor: loginLoading ? '#0369A1' : '#0284C7',
-                color: '#FFFFFF',
-                fontWeight: 'bold',
-                fontSize: '14px',
-                cursor: loginLoading ? 'wait' : 'pointer',
-                marginTop: '6px',
-                transition: 'background-color 0.2s',
-              }}
-            >
-              {loginLoading ? 'Autenticando...' : 'Iniciar Sesión'}
-            </button>
-          </form>
-        </div>
+  // REPLAY OPCIONAL DE INTRO / ONBOARDING DESDE AYUDA DEL SISTEMA
+  if (showSplash) {
+    return (
+      <div
+        onClick={() => setShowSplash(false)}
+        title="Clic para volver al panel"
+        style={{ cursor: 'pointer' }}
+      >
+        <LoadingScreen />
       </div>
+    );
+  }
+
+  if (showOnboarding) {
+    return (
+      <OnboardingFlow
+        mode="replay"
+        onComplete={() => setShowOnboarding(false)}
+      />
     );
   }
 
@@ -2122,6 +2030,7 @@ export const App: React.FC = () => {
         user={user}
         bcvRate={bcvRate}
         onLogout={handleLogout}
+        onShowOnboarding={() => setShowOnboarding(true)}
         onUserUpdated={(updated) => {
           setUser(updated);
           localStorage.setItem('vuelto_user_session', JSON.stringify(updated));
@@ -2132,8 +2041,6 @@ export const App: React.FC = () => {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', backgroundColor: '#071F27', color: '#F8FAFC', position: 'relative' }}>
-      {showSplash && <VueltoSplashScreen onFinish={() => setShowSplash(false)} />}
-      {showOnboarding && <VueltoOnboardingModal onClose={() => setShowOnboarding(false)} onPlaySplash={() => { setShowOnboarding(false); setShowSplash(true); }} />}
 
       <style>{`
         @media (max-width: 820px) {
@@ -2437,7 +2344,34 @@ export const App: React.FC = () => {
                   </button>
                 </div>
 
-                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleRefreshCashSession();
+                      setIsCashModalOpen(true);
+                    }}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      padding: '4px 10px',
+                      borderRadius: '6px',
+                      backgroundColor: cashSession ? 'rgba(0, 230, 195, 0.14)' : 'rgba(245, 158, 11, 0.16)',
+                      border: cashSession ? '1px solid rgba(0, 230, 195, 0.45)' : '1px solid rgba(245, 158, 11, 0.45)',
+                      color: cashSession ? '#00E6C3' : '#FBBF24',
+                      fontSize: '11px',
+                      fontWeight: 'bold',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <DollarSign size={12} />
+                    <span>
+                      {cashSession
+                        ? `Caja Abierta ($${cashSession.liveMetrics?.expectedTotalUsd || cashSession.openingBalanceUsd})`
+                        : 'Abrir Caja'}
+                    </span>
+                  </button>
                   <div style={{ padding: '4px 10px', borderRadius: '6px', backgroundColor: '#062F3B', border: '1px solid #10B98144', fontSize: '11px', color: '#A3E635', fontWeight: 'bold' }}>
                     Tasa: {activeRate.toFixed(2)} Bs/$
                   </div>
@@ -2497,6 +2431,28 @@ export const App: React.FC = () => {
                     </button>
                   )}
                   <button
+                    type="button"
+                    onClick={() => setPosCameraOpen((prev) => !prev)}
+                    title="Escanear código con cámara"
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      padding: '12px 14px',
+                      marginRight: '6px',
+                      borderRadius: '8px',
+                      border: '1px solid rgba(0, 230, 195, 0.35)',
+                      backgroundColor: posCameraOpen ? '#00E6C3' : '#0A1D3A',
+                      color: posCameraOpen ? '#061426' : '#00E6C3',
+                      fontWeight: 'bold',
+                      fontSize: '12px',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <Camera size={15} />
+                    <span>{posCameraOpen ? 'Cerrar Cámara' : 'Cámara'}</span>
+                  </button>
+                  <button
                     type="submit"
                     style={{
                       padding: '12px 20px',
@@ -2513,6 +2469,53 @@ export const App: React.FC = () => {
                     Agregar (Enter)
                   </button>
                 </form>
+
+                {posCameraOpen && (
+                  <div style={{ marginTop: '10px', padding: '12px', backgroundColor: '#0A1D3A', borderRadius: '12px', border: '1px solid rgba(0, 230, 195, 0.3)' }}>
+                    <WebBarcodeScanner
+                      active={posCameraOpen}
+                      hintText="Enfoca el código del producto para agregarlo al ticket actual"
+                      onDetected={async (code) => {
+                        const localMatch = inventoryList.find((p) => p.barcode === code || p.sku === code);
+                        if (localMatch) {
+                          handlePosAddToCart(localMatch, 1);
+                          setPosScanFeedback({ type: 'success', message: `✅ Escaneado con cámara: ${localMatch.name} (+1)` });
+                          return;
+                        }
+                        try {
+                          const res = await apiFetch(`/api/v1/products/by-barcode/${encodeURIComponent(code)}`, {}, handleLogout);
+                          if (res.ok) {
+                            const found = await res.json();
+                            const item: ProductItem = {
+                              id: found.productId,
+                              name: found.name,
+                              barcode: found.barcode || code,
+                              sku: found.sku || '',
+                              category: 'General',
+                              unitOfMeasure: found.unitOfMeasure || 'UNIDAD',
+                              supplier: '',
+                              supplierPhone: '',
+                              costPriceUsd: parseFloat(found.costPriceUsd || '0'),
+                              salePriceUsd: parseFloat(found.salePriceUsd || '0'),
+                              taxRate: found.isExempt ? 0 : parseFloat(found.taxRate || '16'),
+                              stock: parseFloat(found.currentStock || '0'),
+                              minStockAlert: parseFloat(found.minStockAlert || '5'),
+                              lastPurchaseDate: '',
+                              inflationDeltaPercent: 0,
+                            };
+                            handlePosAddToCart(item, found.embeddedWeightKg || 1);
+                            setPosScanFeedback({ type: 'success', message: `✅ Escaneado desde BD: ${item.name}` });
+                          } else {
+                            setPosBarcodeQuery(code);
+                            setPosScanFeedback({ type: 'warning', message: `Código ${code} no registrado en inventario.` });
+                          }
+                        } catch {
+                          setPosBarcodeQuery(code);
+                        }
+                      }}
+                    />
+                  </div>
+                )}
 
                 {/* POPOVER / DROPDOWN FLOTANTE COMPACTO (1 SOLA LÍNEA POR PRODUCTO) - OCULTO SI ESTÁ VACÍO */}
                 {posBarcodeQuery.trim().length > 0 && (
@@ -4743,20 +4746,46 @@ export const App: React.FC = () => {
             </div>
 
             {addMode === 'CAMERA' && (
-              <div style={{ position: 'relative', height: '180px', backgroundColor: '#000000', borderRadius: '10px', overflow: 'hidden', marginBottom: '16px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <video ref={videoRef} style={{ width: '100%', height: '100%', objectFit: 'cover' }} playsInline muted />
-                <div style={{ position: 'absolute', border: '2px dashed #10B981', width: '200px', height: '90px', borderRadius: '8px' }} />
+              <WebBarcodeScanner
+                active={isAddModalOpen && addMode === 'CAMERA'}
+                hintText="Enfoca el código de barras del nuevo producto o usa Foto/Archivo"
+                onDetected={(code) => {
+                  setNewProdBarcode(code);
+                  const existing = inventoryList.find((p) => p.barcode === code);
+                  if (existing) {
+                    setScannedBarcodeInfo(`⚠️ El código ${code} ya pertenece a "${existing.name}".`);
+                  } else {
+                    setScannedBarcodeInfo(`✅ Código capturado con cámara: ${code}`);
+                  }
+                  setAddMode('MANUAL');
+                  setCameraActive(false);
+                }}
+              />
+            )}
+
+            {scannedBarcodeInfo && (
+              <div
+                style={{
+                  marginBottom: '12px',
+                  padding: '8px 12px',
+                  borderRadius: '8px',
+                  fontSize: '12px',
+                  fontWeight: 'bold',
+                  backgroundColor: scannedBarcodeInfo.startsWith('⚠️') ? 'rgba(245, 158, 11, 0.15)' : 'rgba(0, 230, 195, 0.14)',
+                  border: scannedBarcodeInfo.startsWith('⚠️') ? '1px solid #F59E0B' : '1px solid #00E6C3',
+                  color: scannedBarcodeInfo.startsWith('⚠️') ? '#FDE68A' : '#00E6C3',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                }}
+              >
+                <span>{scannedBarcodeInfo}</span>
                 <button
-                  onClick={() => {
-                    const simulated = ensureValidEan13('7591005' + Math.floor(10000 + Math.random() * 90000));
-                    setNewProdBarcode(simulated);
-                    alert(`Código EAN-13 detectado: ${simulated}`);
-                    setAddMode('MANUAL');
-                    setCameraActive(false);
-                  }}
-                  style={{ position: 'absolute', bottom: '10px', padding: '6px 12px', borderRadius: '6px', border: 'none', backgroundColor: '#10B981', color: '#FFFFFF', fontWeight: 'bold', fontSize: '11px', cursor: 'pointer' }}
+                  type="button"
+                  onClick={() => setScannedBarcodeInfo(null)}
+                  style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer' }}
                 >
-                  Capturar Código
+                  <X size={14} />
                 </button>
               </div>
             )}
@@ -5282,6 +5311,126 @@ export const App: React.FC = () => {
             >
               Registrar en Finanzas
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 8: APERTURA Y CIERRE DE CAJA (TURNO DE CAJERO) */}
+      {isCashModalOpen && (
+        <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(6, 20, 38, 0.78)', backdropFilter: 'blur(6px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px', zIndex: 110 }}>
+          <div style={{ width: '100%', maxWidth: '460px', backgroundColor: '#0A1D3A', borderRadius: '18px', padding: '24px', border: '1px solid rgba(0, 230, 195, 0.3)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <h3 style={{ fontSize: '18px', fontWeight: 'bold', color: '#FFFFFF' }}>
+                {cashSession ? 'Arqueo y Cierre de Caja' : 'Apertura de Caja'}
+              </h3>
+              <button onClick={() => setIsCashModalOpen(false)} style={{ background: 'none', border: 'none', color: '#A7B8CC', cursor: 'pointer' }}>
+                <X size={20} />
+              </button>
+            </div>
+
+            {!cashSession ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                <p style={{ fontSize: '12px', color: '#A7B8CC' }}>
+                  Registra el fondo de caja inicial en divisas y bolívares antes de iniciar la jornada de cobro.
+                </p>
+                <div>
+                  <label style={{ display: 'block', fontSize: '11px', color: '#A7B8CC', marginBottom: '4px' }}>Fondo Inicial USD ($)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={cashOpeningUsd}
+                    onChange={(e) => setCashOpeningUsd(e.target.value)}
+                    className="vuelto-input"
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '11px', color: '#A7B8CC', marginBottom: '4px' }}>Fondo Inicial Bs</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={cashOpeningBs}
+                    onChange={(e) => setCashOpeningBs(e.target.value)}
+                    className="vuelto-input"
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '11px', color: '#A7B8CC', marginBottom: '4px' }}>Observaciones (opcional)</label>
+                  <input
+                    type="text"
+                    placeholder="Turno mañana / Caja 1"
+                    value={cashNotes}
+                    onChange={(e) => setCashNotes(e.target.value)}
+                    className="vuelto-input"
+                  />
+                </div>
+                <button
+                  type="button"
+                  disabled={cashLoading}
+                  onClick={handleOpenCashSession}
+                  className="vuelto-btn-primary"
+                  style={{ width: '100%', marginTop: '6px' }}
+                >
+                  {cashLoading ? 'Abriendo Caja...' : 'Confirmar Apertura de Caja'}
+                </button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                <div style={{ backgroundColor: '#061426', padding: '12px', borderRadius: '10px', border: '1px solid rgba(0, 230, 195, 0.2)', fontSize: '12px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                    <span style={{ color: '#A7B8CC' }}>Fondo inicial:</span>
+                    <strong style={{ color: '#FFFFFF' }}>${cashSession.openingBalanceUsd} USD / {cashSession.openingBalanceBs} Bs</strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                    <span style={{ color: '#A7B8CC' }}>Ventas del turno ({cashSession.liveMetrics?.salesCount || 0}):</span>
+                    <strong style={{ color: '#00E6C3' }}>${cashSession.liveMetrics?.salesTotalUsd || '0.00'} USD</strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid rgba(167, 184, 204, 0.15)', paddingTop: '6px', marginTop: '6px' }}>
+                    <span style={{ color: '#FFFFFF', fontWeight: 'bold' }}>Esperado en caja:</span>
+                    <strong style={{ color: '#00E6C3' }}>${cashSession.liveMetrics?.expectedTotalUsd || cashSession.openingBalanceUsd} USD</strong>
+                  </div>
+                </div>
+
+                <div>
+                  <label style={{ display: 'block', fontSize: '11px', color: '#A7B8CC', marginBottom: '4px' }}>Total Contado USD ($)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={cashClosingUsd}
+                    onChange={(e) => setCashClosingUsd(e.target.value)}
+                    className="vuelto-input"
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '11px', color: '#A7B8CC', marginBottom: '4px' }}>Total Contado Bs</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={cashClosingBs}
+                    onChange={(e) => setCashClosingBs(e.target.value)}
+                    className="vuelto-input"
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '11px', color: '#A7B8CC', marginBottom: '4px' }}>Notas de cierre</label>
+                  <input
+                    type="text"
+                    placeholder="Observaciones de arqueo..."
+                    value={cashNotes}
+                    onChange={(e) => setCashNotes(e.target.value)}
+                    className="vuelto-input"
+                  />
+                </div>
+                <button
+                  type="button"
+                  disabled={cashLoading}
+                  onClick={handleCloseCashSession}
+                  className="vuelto-btn-primary"
+                  style={{ width: '100%', marginTop: '6px' }}
+                >
+                  {cashLoading ? 'Cerrando Caja...' : 'Confirmar Cierre Z de Caja'}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}

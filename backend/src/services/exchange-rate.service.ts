@@ -1,5 +1,5 @@
 import { eq, and, desc } from 'drizzle-orm';
-import { db } from '../db/index.js';
+import { withTenant } from '../db/tenantDb.js';
 import { exchangeRateSnapshots, tenantConfigurations } from '../db/schema.js';
 import { AuditService } from './audit.service.js';
 
@@ -115,64 +115,64 @@ export class ExchangeRateService {
    * Obtiene la tasa oficial vigente para un tenant con fallback a la última tasa conocida
    */
   static async getCurrentRates(tenantId: string): Promise<{ bcv: RateResult; paralelo?: RateResult }> {
-    // 1. Consultar el snapshot más reciente en BD
-    const [latestBcv] = await db
-      .select()
-      .from(exchangeRateSnapshots)
-      .where(
-        and(
-          eq(exchangeRateSnapshots.tenantId, tenantId),
-          eq(exchangeRateSnapshots.source, 'BCV')
-        )
-      )
-      .orderBy(desc(exchangeRateSnapshots.validFrom))
-      .limit(1);
-
     const now = new Date();
 
-    if (latestBcv) {
-      const rateAgeHours = (now.getTime() - new Date(latestBcv.fetchedAt).getTime()) / (1000 * 60 * 60);
-      const isStale = rateAgeHours > 24;
+    return await withTenant(tenantId, async (tx) => {
+      const [latestBcv] = await tx
+        .select()
+        .from(exchangeRateSnapshots)
+        .where(
+          and(
+            eq(exchangeRateSnapshots.tenantId, tenantId),
+            eq(exchangeRateSnapshots.source, 'BCV')
+          )
+        )
+        .orderBy(desc(exchangeRateSnapshots.validFrom))
+        .limit(1);
+
+      if (latestBcv) {
+        const rateAgeHours = (now.getTime() - new Date(latestBcv.fetchedAt).getTime()) / (1000 * 60 * 60);
+        const isStale = rateAgeHours > 24;
+
+        return {
+          bcv: {
+            id: latestBcv.id,
+            source: 'BCV',
+            rate: parseFloat(latestBcv.rate),
+            fetchedAt: new Date(latestBcv.fetchedAt),
+            validFrom: new Date(latestBcv.validFrom),
+            isStale,
+            warningMessage: isStale
+              ? `ADVERTENCIA: La tasa de cambio tiene más de ${Math.floor(rateAgeHours)} horas sin actualizar.`
+              : undefined,
+          },
+        };
+      }
+
+      const defaultRate = this.lastSuccessfulRates.bcv;
+      const [seeded] = await tx
+        .insert(exchangeRateSnapshots)
+        .values({
+          tenantId,
+          source: 'BCV',
+          rate: defaultRate.toFixed(4),
+          fetchedAt: now,
+          validFrom: now,
+          isOfficial: true,
+        })
+        .returning();
 
       return {
         bcv: {
-          id: latestBcv.id,
+          id: seeded.id,
           source: 'BCV',
-          rate: parseFloat(latestBcv.rate),
-          fetchedAt: new Date(latestBcv.fetchedAt),
-          validFrom: new Date(latestBcv.validFrom),
-          isStale,
-          warningMessage: isStale
-            ? `ADVERTENCIA: La tasa de cambio tiene más de ${Math.floor(rateAgeHours)} horas sin actualizar.`
-            : undefined,
+          rate: defaultRate,
+          fetchedAt: now,
+          validFrom: now,
+          isStale: false,
         },
       };
-    }
-
-    // Si es un tenant nuevo sin tasas, registrar tasa base inicial segura obtenida en vivo o de caché
-    const defaultRate = this.lastSuccessfulRates.bcv;
-    const [seeded] = await db
-      .insert(exchangeRateSnapshots)
-      .values({
-        tenantId,
-        source: 'BCV',
-        rate: defaultRate.toFixed(4),
-        fetchedAt: now,
-        validFrom: now,
-        isOfficial: true,
-      })
-      .returning();
-
-    return {
-      bcv: {
-        id: seeded.id,
-        source: 'BCV',
-        rate: defaultRate,
-        fetchedAt: now,
-        validFrom: now,
-        isStale: false,
-      },
-    };
+    });
   }
 
   /**
@@ -193,17 +193,19 @@ export class ExchangeRateService {
         if (ext.validFrom) validFrom = ext.validFrom;
       }
 
-      const [snapshot] = await db
-        .insert(exchangeRateSnapshots)
-        .values({
-          tenantId,
-          source: 'BCV',
-          rate: fetchedRate.toFixed(4),
-          fetchedAt: now,
-          validFrom,
-          isOfficial: true,
-        })
-        .returning();
+      await withTenant(tenantId, async (tx) => {
+        await tx
+          .insert(exchangeRateSnapshots)
+          .values({
+            tenantId,
+            source: 'BCV',
+            rate: fetchedRate.toFixed(4),
+            fetchedAt: now,
+            validFrom,
+            isOfficial: true,
+          })
+          .returning();
+      });
 
       return {
         source: 'BCV',
@@ -213,7 +215,6 @@ export class ExchangeRateService {
         isStale: false,
       };
     } catch (err: any) {
-      // Fallback a última tasa conocida
       console.warn(`Error consultando proveedor de tasas: ${err.message}. Aplicando fallback a última tasa conocida.`);
       const current = await this.getCurrentRates(tenantId);
       return {
@@ -305,11 +306,13 @@ export class ExchangeRateService {
     const bcvRate = live.bcv > 0 ? live.bcv : current.bcv.rate;
     const bcvId = current.bcv.id;
 
-    const [config] = await db
-      .select()
-      .from(tenantConfigurations)
-      .where(eq(tenantConfigurations.tenantId, tenantId))
-      .limit(1);
+    const [config] = await withTenant(tenantId, (tx) =>
+      tx
+        .select()
+        .from(tenantConfigurations)
+        .where(eq(tenantConfigurations.tenantId, tenantId))
+        .limit(1)
+    );
 
     const activeSource = (config?.activeRateSource as any) || 'BCV';
     const customRate = config?.customRateValue ? parseFloat(config.customRateValue) : 0;
@@ -345,39 +348,41 @@ export class ExchangeRateService {
     source: 'BCV' | 'PARALELO' | 'EURO' | 'CUSTOM',
     customRateValue?: number
   ) {
-    const [existing] = await db
-      .select()
-      .from(tenantConfigurations)
-      .where(eq(tenantConfigurations.tenantId, tenantId))
-      .limit(1);
-
     const val = customRateValue && customRateValue > 0 ? customRateValue.toFixed(4) : '0.0000';
 
-    if (existing) {
-      await db
-        .update(tenantConfigurations)
-        .set({
+    await withTenant(tenantId, async (tx) => {
+      const [existing] = await tx
+        .select()
+        .from(tenantConfigurations)
+        .where(eq(tenantConfigurations.tenantId, tenantId))
+        .limit(1);
+
+      if (existing) {
+        await tx
+          .update(tenantConfigurations)
+          .set({
+            activeRateSource: source,
+            customRateValue: val,
+            updatedAt: new Date(),
+          })
+          .where(eq(tenantConfigurations.id, existing.id));
+      } else {
+        await tx.insert(tenantConfigurations).values({
+          tenantId,
           activeRateSource: source,
           customRateValue: val,
-          updatedAt: new Date(),
-        })
-        .where(eq(tenantConfigurations.id, existing.id));
-    } else {
-      await db.insert(tenantConfigurations).values({
-        tenantId,
-        activeRateSource: source,
-        customRateValue: val,
-      });
-    }
+        });
+      }
 
-    await AuditService.log({
-      tenantId,
-      userId,
-      action: 'UPDATE_ACTIVE_RATE',
-      entity: 'TENANT_CONFIGURATION',
-      payload: { activeRateSource: source, customRateValue: val },
-      result: 'SUCCESS',
-      channel: 'WEB_ADMIN',
+      await AuditService.log({
+        tenantId,
+        userId,
+        action: 'UPDATE_ACTIVE_RATE',
+        entity: 'TENANT_CONFIGURATION',
+        payload: { activeRateSource: source, customRateValue: val },
+        result: 'SUCCESS',
+        channel: 'WEB_ADMIN',
+      }, tx);
     });
 
     return this.getActiveRate(tenantId);
@@ -396,32 +401,36 @@ export class ExchangeRateService {
     const current = await this.getCurrentRates(tenantId);
     const oldRate = current.bcv.rate;
 
-    const [snapshot] = await db
-      .insert(exchangeRateSnapshots)
-      .values({
-        tenantId,
-        source: 'BCV',
-        rate: newRate.toFixed(4),
-        fetchedAt: new Date(),
-        validFrom: new Date(),
-        isOfficial: false,
-      })
-      .returning();
+    const snapshot = await withTenant(tenantId, async (tx) => {
+      const [created] = await tx
+        .insert(exchangeRateSnapshots)
+        .values({
+          tenantId,
+          source: 'BCV',
+          rate: newRate.toFixed(4),
+          fetchedAt: new Date(),
+          validFrom: new Date(),
+          isOfficial: false,
+        })
+        .returning();
 
-    await AuditService.log({
-      tenantId,
-      userId,
-      action: 'EXCHANGE_RATE_MANUAL_OVERRIDE',
-      entity: 'exchange_rate_snapshots',
-      entityId: snapshot.id,
-      payload: {
-        oldRate,
-        newRate,
-        reason,
-        adjustedBy: userId,
-      },
-      result: 'SUCCESS',
-      channel: 'WEB_ADMIN',
+      await AuditService.log({
+        tenantId,
+        userId,
+        action: 'EXCHANGE_RATE_MANUAL_OVERRIDE',
+        entity: 'exchange_rate_snapshots',
+        entityId: created.id,
+        payload: {
+          oldRate,
+          newRate,
+          reason,
+          adjustedBy: userId,
+        },
+        result: 'SUCCESS',
+        channel: 'WEB_ADMIN',
+      }, tx);
+
+      return created;
     });
 
     return {

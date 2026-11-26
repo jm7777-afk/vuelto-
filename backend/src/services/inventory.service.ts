@@ -1,12 +1,12 @@
 import { eq, and, sql } from 'drizzle-orm';
-import { db } from '../db/index.js';
-import { productStock, inventoryMovements, products, warehouses, suppliers } from '../db/schema.js';
+import { withTenant, TenantTransaction } from '../db/tenantDb.js';
+import { productStock, inventoryMovements, products, suppliers } from '../db/schema.js';
 import { AuditService } from './audit.service.js';
 
 export class InventoryService {
   /**
-   * Registra un movimiento de inventario (Entrada, Salida, Ajuste)
-   * Recalcula el costo promedio ponderado si es una entrada (IN)
+   * Registra un movimiento de inventario (Entrada, Salida, Ajuste) con bloqueo de fila y RLS.
+   * Recalcula el costo promedio ponderado si es una entrada (IN).
    */
   static async createMovement(
     tenantId: string,
@@ -21,10 +21,10 @@ export class InventoryService {
       referenceType?: string;
       referenceId?: string;
       channel?: 'POS_MOBILE' | 'MOBILE_ADMIN' | 'WEB_ADMIN';
-    }
+    },
+    externalTx?: TenantTransaction
   ) {
-    return await db.transaction(async (tx) => {
-      // 1. Obtener producto y stock actual
+    const exec = async (tx: TenantTransaction) => {
       const [product] = await tx
         .select()
         .from(products)
@@ -43,7 +43,8 @@ export class InventoryService {
             eq(productStock.warehouseId, data.warehouseId),
             eq(productStock.productId, data.productId)
           )
-        );
+        )
+        .for('update');
 
       const currentQty = currentStockRow ? parseFloat(currentStockRow.quantity) : 0;
       let newQty = currentQty;
@@ -52,7 +53,6 @@ export class InventoryService {
       if (data.movementType === 'IN' || data.movementType === 'RETURN') {
         newQty = currentQty + data.quantity;
 
-        // Recálculo de Costo Promedio Ponderado Móvil
         if (data.unitCostUsd !== undefined && data.unitCostUsd > 0 && newQty > 0) {
           const currentCost = parseFloat(product.costPriceUsd);
           const newAvgCost = (currentQty * currentCost + data.quantity * data.unitCostUsd) / newQty;
@@ -68,10 +68,9 @@ export class InventoryService {
         }
         newQty = currentQty - data.quantity;
       } else if (data.movementType === 'ADJUSTMENT') {
-        newQty = data.quantity; // En ajuste se fija la cantidad física contada
+        newQty = data.quantity;
       }
 
-      // 2. Actualizar o crear fila en product_stock
       if (currentStockRow) {
         await tx
           .update(productStock)
@@ -86,7 +85,6 @@ export class InventoryService {
         });
       }
 
-      // 3. Insertar movimiento en Kardex
       const [movement] = await tx
         .insert(inventoryMovements)
         .values({
@@ -103,7 +101,6 @@ export class InventoryService {
         })
         .returning();
 
-      // 4. Registrar en Auditoría
       await AuditService.log({
         tenantId,
         userId,
@@ -120,52 +117,57 @@ export class InventoryService {
         },
         result: 'SUCCESS',
         channel: data.channel || 'MOBILE_ADMIN',
-      });
+      }, tx);
 
       return { movement, newStock: newQty };
-    });
+    };
+
+    if (externalTx) return exec(externalTx);
+    return withTenant(tenantId, exec);
   }
 
   static async getStock(tenantId: string) {
-    return db
-      .select({
-        productId: products.id,
-        productName: products.name,
-        sku: products.sku,
-        warehouseId: productStock.warehouseId,
-        quantity: productStock.quantity,
-        costPriceUsd: products.costPriceUsd,
-        salePriceUsd: products.salePriceUsd,
-      })
-      .from(products)
-      .leftJoin(productStock, eq(products.id, productStock.productId))
-      .where(eq(products.tenantId, tenantId));
+    return withTenant(tenantId, (tx) =>
+      tx
+        .select({
+          productId: products.id,
+          productName: products.name,
+          sku: products.sku,
+          warehouseId: productStock.warehouseId,
+          quantity: productStock.quantity,
+          costPriceUsd: products.costPriceUsd,
+          salePriceUsd: products.salePriceUsd,
+        })
+        .from(products)
+        .leftJoin(productStock, eq(products.id, productStock.productId))
+        .where(eq(products.tenantId, tenantId))
+    );
   }
 
   static async getKardex(tenantId: string, productId?: string, limit = 50) {
-    let query = db
-      .select({
-        id: inventoryMovements.id,
-        productId: inventoryMovements.productId,
-        productName: products.name,
-        movementType: inventoryMovements.movementType,
-        quantity: inventoryMovements.quantity,
-        unitCostUsd: inventoryMovements.unitCostUsd,
-        referenceType: inventoryMovements.referenceType,
-        reason: inventoryMovements.reason,
-        createdAt: inventoryMovements.createdAt,
-      })
-      .from(inventoryMovements)
-      .innerJoin(products, eq(inventoryMovements.productId, products.id))
-      .where(
-        productId
-          ? and(eq(inventoryMovements.tenantId, tenantId), eq(inventoryMovements.productId, productId))
-          : eq(inventoryMovements.tenantId, tenantId)
-      )
-      .orderBy(sql`${inventoryMovements.createdAt} DESC`)
-      .limit(limit);
-
-    return await query;
+    return withTenant(tenantId, (tx) =>
+      tx
+        .select({
+          id: inventoryMovements.id,
+          productId: inventoryMovements.productId,
+          productName: products.name,
+          movementType: inventoryMovements.movementType,
+          quantity: inventoryMovements.quantity,
+          unitCostUsd: inventoryMovements.unitCostUsd,
+          referenceType: inventoryMovements.referenceType,
+          reason: inventoryMovements.reason,
+          createdAt: inventoryMovements.createdAt,
+        })
+        .from(inventoryMovements)
+        .innerJoin(products, eq(inventoryMovements.productId, products.id))
+        .where(
+          productId
+            ? and(eq(inventoryMovements.tenantId, tenantId), eq(inventoryMovements.productId, productId))
+            : eq(inventoryMovements.tenantId, tenantId)
+        )
+        .orderBy(sql`${inventoryMovements.createdAt} DESC`)
+        .limit(limit)
+    );
   }
 
   static async getLowStock(tenantId: string) {
@@ -173,31 +175,28 @@ export class InventoryService {
     return allStock.filter((s) => parseFloat(s.quantity || '0') <= 5);
   }
 
-  /**
-   * Genera la lista global consolidada de reposición a proveedores
-   * Calcula faltantes según stock mínimo, costos estimados y agrupa por proveedor
-   */
   static async getGlobalReplenishmentList(tenantId: string) {
-    const list = await db
-      .select({
-        productId: products.id,
-        productName: products.name,
-        sku: products.sku,
-        costPriceUsd: products.costPriceUsd,
-        salePriceUsd: products.salePriceUsd,
-        minStockAlert: products.minStockAlert,
-        currentStock: sql<string>`COALESCE(${productStock.quantity}, '0.000')`,
-        supplierId: suppliers.id,
-        supplierName: suppliers.name,
-        supplierPhone: suppliers.phone,
-        supplierRif: sql<string>`CONCAT(${suppliers.documentType}, '-', ${suppliers.documentNumber})`,
-      })
-      .from(products)
-      .leftJoin(productStock, eq(products.id, productStock.productId))
-      .leftJoin(suppliers, eq(products.supplierId, suppliers.id))
-      .where(and(eq(products.tenantId, tenantId), eq(products.isActive, true)));
+    const list = await withTenant(tenantId, (tx) =>
+      tx
+        .select({
+          productId: products.id,
+          productName: products.name,
+          sku: products.sku,
+          costPriceUsd: products.costPriceUsd,
+          salePriceUsd: products.salePriceUsd,
+          minStockAlert: products.minStockAlert,
+          currentStock: sql<string>`COALESCE(${productStock.quantity}, '0.000')`,
+          supplierId: suppliers.id,
+          supplierName: suppliers.name,
+          supplierPhone: suppliers.phone,
+          supplierRif: sql<string>`CONCAT(${suppliers.documentType}, '-', ${suppliers.documentNumber})`,
+        })
+        .from(products)
+        .leftJoin(productStock, eq(products.id, productStock.productId))
+        .leftJoin(suppliers, eq(products.supplierId, suppliers.id))
+        .where(and(eq(products.tenantId, tenantId), eq(products.isActive, true)))
+    );
 
-    // Filtrar solo los que están por debajo o igual al umbral
     const lowStockItems = list
       .map((item) => {
         const current = parseFloat(item.currentStock || '0');
@@ -216,7 +215,6 @@ export class InventoryService {
       })
       .filter((i) => i.isLow);
 
-    // Agrupar por proveedor
     const groupedBySupplier: Record<string, any> = {};
     for (const item of lowStockItems) {
       const supKey = item.supplierId || 'unassigned';

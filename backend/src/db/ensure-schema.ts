@@ -86,6 +86,41 @@ export async function ensureSchema() {
       ALTER TABLE tenant_configurations ADD COLUMN IF NOT EXISTS default_profit_margin NUMERIC(5, 2) NOT NULL DEFAULT 30.00;
       ALTER TABLE tenant_configurations ADD COLUMN IF NOT EXISTS require_admin_for_overdue_debt BOOLEAN NOT NULL DEFAULT true;
 
+      -- Tabla de control de versiones de migración
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        id SERIAL PRIMARY KEY,
+        version VARCHAR(60) NOT NULL UNIQUE,
+        name VARCHAR(200) NOT NULL,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      -- Sesiones de Apertura y Cierre de Caja
+      CREATE TABLE IF NOT EXISTS cash_sessions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+        warehouse_id UUID REFERENCES warehouses(id) ON DELETE SET NULL,
+        status VARCHAR(15) NOT NULL DEFAULT 'OPEN',
+        opening_balance_usd NUMERIC(14, 2) NOT NULL DEFAULT 0.00,
+        opening_balance_bs NUMERIC(14, 2) NOT NULL DEFAULT 0.00,
+        closing_expected_usd NUMERIC(14, 2),
+        closing_expected_bs NUMERIC(14, 2),
+        closing_declared_usd NUMERIC(14, 2),
+        closing_declared_bs NUMERIC(14, 2),
+        discrepancy_usd NUMERIC(14, 2),
+        sales_count INTEGER NOT NULL DEFAULT 0,
+        notes TEXT,
+        opened_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        closed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_cash_sessions_tenant_status ON cash_sessions (tenant_id, status, opened_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_cash_sessions_user ON cash_sessions (tenant_id, user_id, status);
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_open_cash_session_per_user ON cash_sessions (tenant_id, user_id) WHERE status = 'OPEN';
+      CREATE INDEX IF NOT EXISTS idx_sales_tenant_created ON sales (tenant_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_payments_sale ON payments (tenant_id, sale_id);
+
       -- Permitir SUPER_ADMIN global y auditoría de plataforma sin tenant asociado
       ALTER TABLE users ALTER COLUMN tenant_id DROP NOT NULL;
       ALTER TABLE audit_logs ALTER COLUMN tenant_id DROP NOT NULL;

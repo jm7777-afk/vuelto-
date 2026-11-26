@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
+import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import { env } from './config/env.js';
@@ -18,6 +19,27 @@ import { openApiSpec } from './docs/openapi.js';
 // Inicializar Sentry si DSN está provisto
 initBackendSentry();
 
+function normalizeAllowedOrigins(raw: string): Set<string> {
+  const result = new Set<string>();
+  for (const entry of raw.split(',')) {
+    const trimmed = entry.trim();
+    if (!trimmed || trimmed === '*') continue;
+    try {
+      result.add(new URL(trimmed).origin);
+    } catch {
+      // Ignorar entradas malformadas
+    }
+  }
+  return result;
+}
+
+function timingSafeMatch(provided: string, expected: string): boolean {
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
 export const createApp = () => {
   const app = express();
 
@@ -27,7 +49,7 @@ export const createApp = () => {
   // 2. Correlation ID y logging estructurado de observabilidad (Pino + Métricas)
   app.use(correlationAndLoggingMiddleware);
 
-  // 3. Helmet con configuración de Content Security Policy (CSP), HSTS y headers de seguridad
+  // 3. Helmet con configuración de Content Security Policy (CSP), HSTS y Permissions-Policy para cámara POS
   app.use(
     helmet({
       contentSecurityPolicy: {
@@ -43,28 +65,43 @@ export const createApp = () => {
     })
   );
 
-  // 4. CORS con allowlist configurable por env ALLOWED_ORIGINS y soporte para dominios de producción
-  const allowedOriginsList = env.ALLOWED_ORIGINS.split(',').map((o) => o.trim());
+  app.use((_req, res, next) => {
+    res.setHeader('Permissions-Policy', 'camera=(self), microphone=(), geolocation=()');
+    next();
+  });
+
+  // 4. CORS estricto por origen exacto (sin wildcards ni subcadenas en producción)
+  const allowedOrigins = normalizeAllowedOrigins(env.ALLOWED_ORIGINS);
+  const devLocalPattern = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d{1,5})?$/;
+
   app.use(
     cors({
       origin: (origin, callback) => {
-        // Permitir peticiones sin header Origin (curl, apps móviles nativas) o autorizadas
-        if (
-          !origin ||
-          env.NODE_ENV !== 'production' ||
-          allowedOriginsList.includes('*') ||
-          allowedOriginsList.includes(origin) ||
-          origin.includes('onrender.com') ||
-          origin.includes('localhost') ||
-          origin.includes('127.0.0.1')
-        ) {
+        // Permitir peticiones sin header Origin (curl, healthchecks, apps móviles nativas)
+        if (!origin) {
           return callback(null, true);
         }
+
+        let normalizedOrigin: string;
+        try {
+          normalizedOrigin = new URL(origin).origin;
+        } catch {
+          return callback(null, false);
+        }
+
+        if (allowedOrigins.has(normalizedOrigin)) {
+          return callback(null, true);
+        }
+
+        if (env.NODE_ENV !== 'production' && devLocalPattern.test(normalizedOrigin)) {
+          return callback(null, true);
+        }
+
         return callback(null, false);
       },
       credentials: true,
       methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-tenant-id', 'X-Request-Id'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-Request-Id'],
       exposedHeaders: ['X-Request-Id'],
     })
   );
@@ -88,16 +125,32 @@ export const createApp = () => {
   // 8. Endpoints de Diagnóstico y Salud (Liveness / Readiness / Deep)
   app.use('/health', healthRouter);
 
-  // 9. Endpoint de Métricas Prometheus (/metrics)
+  // 9. Endpoint de Métricas Prometheus (/metrics) - Sin secretos en código ni en query string
   app.get('/metrics', async (req, res, next) => {
     try {
-      const token = req.query.token || req.headers['x-metrics-token'] || req.headers.authorization?.replace('Bearer ', '');
-      const configuredToken = process.env.METRICS_TOKEN || 'vuelto-metrics-token-2026';
+      const configuredToken = process.env.METRICS_TOKEN;
 
-      // En producción exigir token de métricas; en dev/test permitir acceso
-      if (env.NODE_ENV === 'production' && token !== configuredToken) {
-        res.status(403).json({ error: 'FORBIDDEN', message: 'Token de métricas inválido o ausente' });
-        return;
+      if (env.NODE_ENV === 'production') {
+        if (!configuredToken) {
+          res.status(503).json({ error: 'METRICS_UNAVAILABLE', message: 'METRICS_TOKEN no configurado en servidor' });
+          return;
+        }
+        const headerToken =
+          (typeof req.headers['x-metrics-token'] === 'string' && req.headers['x-metrics-token']) ||
+          (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : '');
+
+        if (!headerToken || !timingSafeMatch(headerToken, configuredToken)) {
+          res.status(403).json({ error: 'FORBIDDEN', message: 'Token de métricas inválido o ausente' });
+          return;
+        }
+      } else if (configuredToken) {
+        const headerToken =
+          (typeof req.headers['x-metrics-token'] === 'string' && req.headers['x-metrics-token']) ||
+          (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : '');
+        if (headerToken && !timingSafeMatch(headerToken, configuredToken)) {
+          res.status(403).json({ error: 'FORBIDDEN', message: 'Token de métricas inválido' });
+          return;
+        }
       }
 
       res.setHeader('Content-Type', MetricsService.getContentType());

@@ -22,9 +22,15 @@ services:
       - key: ENCRYPTION_KEY
         generateValue: true
       - key: ALLOWED_ORIGINS
-        value: "*"
+        value: "https://vuelto.onrender.com"
       - key: MOCK_PAYMENT_ENABLED
         value: "false"
+      - key: METRICS_TOKEN
+        generateValue: true
+      - key: PAYMENT_WEBHOOK_SECRET
+        generateValue: true
+      - key: INTERNAL_ADMIN_TOKEN
+        generateValue: true
 
   # Frontend Web Admin - React SPA (Vite)
   - type: web

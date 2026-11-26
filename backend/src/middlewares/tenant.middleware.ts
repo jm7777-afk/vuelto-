@@ -11,21 +11,12 @@ export class UnauthorizedError extends Error {
 /**
  * Middleware mandatorio de Aislamiento Multi-Tenant (Hardening OWASP).
  * REGLA ESTRICTA DE SEGURIDAD:
- * El `tenant_id` se extrae EXCLUSIVAMENTE del token JWT verificado criptográficamente por el servidor.
- * Se prohíbe y sanitiza explícitamente cualquier intento de inyección o spoofing desde el body, query o URL.
+ * El `tenant_id` se extrae EXCLUSIVAMENTE del token JWT enviado en Authorization: Bearer.
+ * Nunca se aceptan JWTs en query strings y se sanitiza cualquier intento de spoofing de tenant_id.
  */
 export const requireTenantAuth = (req: Request, res: Response, next: NextFunction): void => {
   const authHeader = req.headers.authorization;
-  const queryToken = typeof req.query.token === 'string' && req.path.includes('/monitoring/stream')
-    ? req.query.token
-    : undefined;
-
-  let token: string | undefined;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    token = authHeader.split(' ')[1];
-  } else if (queryToken) {
-    token = queryToken;
-  }
+  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
 
   if (!token) {
     res.status(401).json({
@@ -48,7 +39,6 @@ export const requireTenantAuth = (req: Request, res: Response, next: NextFunctio
       delete (req.query as any).tenant_id;
     }
 
-    // Inyecta en el contexto de la petición Express desde el token verificado
     req.user = user;
     req.tenantId = user.tenantId ?? undefined;
     next();

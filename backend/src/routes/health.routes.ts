@@ -1,10 +1,17 @@
+import crypto from 'crypto';
 import { Router, Request, Response } from 'express';
 import { pool } from '../db/index.js';
-import { MetricsService } from '../services/metrics.service.js';
 import { env } from '../config/env.js';
 import { JwtService } from '../services/jwt.service.js';
 
 export const healthRouter = Router();
+
+function timingSafeMatch(provided: string, expected: string): boolean {
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
 
 /**
  * GET /health/live
@@ -21,7 +28,6 @@ healthRouter.get('/live', (_req: Request, res: Response) => {
 /**
  * GET /health/ready
  * Readiness probe: verifica conectividad real con PostgreSQL.
- * Retorna 200 si DB responde, o 503 si la DB no está disponible.
  */
 healthRouter.get('/ready', async (_req: Request, res: Response) => {
   const start = Date.now();
@@ -41,7 +47,7 @@ healthRouter.get('/ready', async (_req: Request, res: Response) => {
     res.status(503).json({
       status: 'not_ready',
       database: 'disconnected',
-      error: err.message,
+      error: env.NODE_ENV === 'production' ? 'Database connection unavailable' : err.message,
       timestamp: new Date().toISOString(),
     });
   }
@@ -49,21 +55,25 @@ healthRouter.get('/ready', async (_req: Request, res: Response) => {
 
 /**
  * GET /health/deep
- * Diagnóstico exhaustivo: solo accesible para ADMIN o SUPER_ADMIN vía Bearer token o header X-Admin-Token
+ * Diagnóstico exhaustivo: solo accesible para ADMIN o SUPER_ADMIN vía Bearer JWT o INTERNAL_ADMIN_TOKEN
  */
 healthRouter.get('/deep', async (req: Request, res: Response) => {
-  // Verificación de autorización
   const authHeader = req.headers.authorization;
-  const adminTokenHeader = req.headers['x-admin-token'];
+  const adminTokenHeader = typeof req.headers['x-admin-token'] === 'string' ? req.headers['x-admin-token'] : '';
+  const configuredAdminToken = process.env.INTERNAL_ADMIN_TOKEN;
   let isAuthorized = false;
 
-  if (adminTokenHeader && (adminTokenHeader === process.env.INTERNAL_ADMIN_TOKEN || adminTokenHeader === 'vuelto-deep-check-2026')) {
+  if (configuredAdminToken && adminTokenHeader && timingSafeMatch(adminTokenHeader, configuredAdminToken)) {
     isAuthorized = true;
   } else if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.substring(7);
-    const decoded = JwtService.verifyAccessToken(token);
-    if (decoded && (decoded.roleId === 'ADMIN' || decoded.roleId === 'SUPER_ADMIN')) {
-      isAuthorized = true;
+    try {
+      const decoded = JwtService.verifyAccessToken(token);
+      if (decoded && (decoded.roleId === 'ADMIN' || decoded.roleId === 'SUPER_ADMIN')) {
+        isAuthorized = true;
+      }
+    } catch {
+      isAuthorized = false;
     }
   }
 
@@ -90,7 +100,7 @@ healthRouter.get('/deep', async (req: Request, res: Response) => {
     client.release();
     dbLatencyMs = Date.now() - start;
     tableCount = parseInt(result.rows[0]?.count || '0', 10);
-  } catch (err: any) {
+  } catch {
     dbStatus = 'disconnected';
     dbLatencyMs = Date.now() - start;
   }
@@ -98,7 +108,7 @@ healthRouter.get('/deep', async (req: Request, res: Response) => {
   const memory = process.memoryUsage();
 
   res.status(200).json({
-    status: 'healthy',
+    status: dbStatus === 'connected' ? 'healthy' : 'degraded',
     version: '1.0.0',
     environment: env.NODE_ENV,
     uptimeSeconds: Math.floor(process.uptime()),
@@ -142,7 +152,7 @@ healthRouter.get('/', async (_req: Request, res: Response) => {
       status: 'degraded',
       service: 'vuelto-api',
       database: 'disconnected',
-      error: err.message,
+      error: env.NODE_ENV === 'production' ? 'Database connection unavailable' : err.message,
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
     });

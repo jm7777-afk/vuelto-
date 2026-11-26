@@ -741,3 +741,35 @@ export const creditDebitNotes = pgTable(
     index('idx_notes_sale').on(table.tenantId, table.saleId),
   ]
 );
+
+// 30. Cash Register Sessions (Apertura y Cierre de Caja por Turno/Cajero)
+export const cashSessions = pgTable(
+  'cash_sessions',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict' }),
+    warehouseId: uuid('warehouse_id').references(() => warehouses.id, { onDelete: 'set null' }),
+    status: varchar('status', { length: 15 }).default('OPEN').notNull(), // 'OPEN' | 'CLOSED'
+    openingBalanceUsd: numeric('opening_balance_usd', { precision: 14, scale: 2 }).default('0.00').notNull(),
+    openingBalanceBs: numeric('opening_balance_bs', { precision: 14, scale: 2 }).default('0.00').notNull(),
+    closingExpectedUsd: numeric('closing_expected_usd', { precision: 14, scale: 2 }),
+    closingExpectedBs: numeric('closing_expected_bs', { precision: 14, scale: 2 }),
+    closingDeclaredUsd: numeric('closing_declared_usd', { precision: 14, scale: 2 }),
+    closingDeclaredBs: numeric('closing_declared_bs', { precision: 14, scale: 2 }),
+    discrepancyUsd: numeric('discrepancy_usd', { precision: 14, scale: 2 }),
+    salesCount: integer('sales_count').default(0).notNull(),
+    notes: text('notes'),
+    openedAt: timestamp('opened_at', { withTimezone: true }).defaultNow().notNull(),
+    closedAt: timestamp('closed_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('idx_cash_sessions_tenant_status').on(table.tenantId, table.status, table.openedAt),
+    index('idx_cash_sessions_user').on(table.tenantId, table.userId, table.status),
+  ]
+);

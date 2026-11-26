@@ -8,4 +8,5 @@ monitoringRouter.use(requireRoles('SUPER_ADMIN'));
 
 monitoringRouter.get('/snapshot', MonitoringController.getSnapshot);
 monitoringRouter.get('/logs', MonitoringController.getLogs);
+monitoringRouter.post('/stream-ticket', MonitoringController.issueStreamTicket);
 monitoringRouter.get('/stream', MonitoringController.stream);

@@ -86,6 +86,39 @@ export async function runMigrationAndSeed() {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         CREATE UNIQUE INDEX IF NOT EXISTS uq_tenant_note_number ON credit_debit_notes(tenant_id, note_number);
+
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          id SERIAL PRIMARY KEY,
+          version VARCHAR(60) NOT NULL UNIQUE,
+          name VARCHAR(200) NOT NULL,
+          applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS cash_sessions (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+          warehouse_id UUID REFERENCES warehouses(id) ON DELETE SET NULL,
+          status VARCHAR(15) NOT NULL DEFAULT 'OPEN',
+          opening_balance_usd NUMERIC(14, 2) NOT NULL DEFAULT 0.00,
+          opening_balance_bs NUMERIC(14, 2) NOT NULL DEFAULT 0.00,
+          closing_expected_usd NUMERIC(14, 2),
+          closing_expected_bs NUMERIC(14, 2),
+          closing_declared_usd NUMERIC(14, 2),
+          closing_declared_bs NUMERIC(14, 2),
+          discrepancy_usd NUMERIC(14, 2),
+          sales_count INTEGER NOT NULL DEFAULT 0,
+          notes TEXT,
+          opened_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          closed_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cash_sessions_tenant_status ON cash_sessions(tenant_id, status, opened_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cash_sessions_user ON cash_sessions(tenant_id, user_id, status);
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_open_cash_session_per_user ON cash_sessions(tenant_id, user_id) WHERE status = 'OPEN';
+        CREATE INDEX IF NOT EXISTS idx_sales_tenant_created ON sales(tenant_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_payments_sale ON payments(tenant_id, sale_id);
       `);
       console.log('✓ Tablas y columnas de seguridad verificadas en PostgreSQL');
 
@@ -117,35 +150,41 @@ export async function runMigrationAndSeed() {
         'tax_rates',
         'igtf_rules',
         'credit_debit_notes',
+        'cash_sessions',
       ];
 
       for (const table of rlsTables) {
-        try {
-          await client.query(`
-            ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY;
-            ALTER TABLE ${table} FORCE ROW LEVEL SECURITY;
-            DROP POLICY IF EXISTS tenant_isolation ON ${table};
-            CREATE POLICY tenant_isolation ON ${table}
-              AS PERMISSIVE
-              FOR ALL
-              USING (
-                current_setting('app.is_super_admin', true) = 'true'
-                OR current_setting('app.current_tenant_id', true) IS NULL
-                OR current_setting('app.current_tenant_id', true) = ''
-                OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::uuid
-              )
-              WITH CHECK (
-                current_setting('app.is_super_admin', true) = 'true'
-                OR current_setting('app.current_tenant_id', true) IS NULL
-                OR current_setting('app.current_tenant_id', true) = ''
-                OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::uuid
-              );
-          `);
-        } catch (tableErr: any) {
-          console.warn(`Aviso en configuración RLS para ${table}:`, tableErr.message);
-        }
+        await client.query(`
+          ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE ${table} FORCE ROW LEVEL SECURITY;
+          DROP POLICY IF EXISTS tenant_isolation ON ${table};
+          CREATE POLICY tenant_isolation ON ${table}
+            AS PERMISSIVE
+            FOR ALL
+            USING (
+              current_setting('app.is_super_admin', true) = 'true'
+              OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::uuid
+            )
+            WITH CHECK (
+              current_setting('app.is_super_admin', true) = 'true'
+              OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::uuid
+            );
+        `);
       }
-      console.log('✓ Políticas Row-Level Security (RLS) aplicadas a tablas multi-tenant');
+
+      const appliedMigrations = [
+        { version: '001', name: 'initial_multi_tenant_schema' },
+        { version: '002', name: 'rls_fail_closed_policies' },
+        { version: '003', name: 'cash_sessions_and_performance_indexes' },
+      ];
+      for (const mig of appliedMigrations) {
+        await client.query(
+          `INSERT INTO schema_migrations (version, name) VALUES ($1, $2) ON CONFLICT (version) DO NOTHING`,
+          [mig.version, mig.name]
+        );
+      }
+
+      console.log('✓ Políticas Row-Level Security (RLS fail-closed) y migraciones versionadas aplicadas');
     } finally {
       client.release();
     }
@@ -202,6 +241,8 @@ export async function runMigrationAndSeed() {
     console.log('Migración y sembrado limpio completados con éxito (0 tenants demo).');
   } catch (error) {
     console.error('Error durante la migración o sembrado:', error);
+    process.exitCode = 1;
+    throw error;
   } finally {
     await pool.end();
   }

@@ -1,5 +1,5 @@
 import { eq, and, gte, lte, sql, desc } from 'drizzle-orm';
-import { db } from '../db/index.js';
+import { withTenant } from '../db/tenantDb.js';
 import { sales, customers, tenants, purchaseOrders, suppliers } from '../db/schema.js';
 
 export interface SalesBookRow {
@@ -32,42 +32,46 @@ export class FiscalReportService {
     tenantId: string,
     options: { year?: number; month?: number }
   ): Promise<{ tenant: any; rows: SalesBookRow[]; summary: any }> {
-    const [tenant] = await db.select().from(tenants).where(eq(tenants.id, tenantId));
-    if (!tenant) throw new Error('Tenant no encontrado');
+    const { tenant, salesList } = await withTenant(tenantId, async (tx) => {
+      const [tRow] = await tx.select().from(tenants).where(eq(tenants.id, tenantId));
+      if (!tRow) throw new Error('Tenant no encontrado');
 
-    const conditions = [eq(sales.tenantId, tenantId)];
+      const conditions = [eq(sales.tenantId, tenantId)];
 
-    if (options.year && options.month) {
-      const startDate = new Date(Date.UTC(options.year, options.month - 1, 1, 0, 0, 0));
-      const endDate = new Date(Date.UTC(options.year, options.month, 0, 23, 59, 59));
-      conditions.push(gte(sales.createdAt, startDate));
-      conditions.push(lte(sales.createdAt, endDate));
-    }
+      if (options.year && options.month) {
+        const startDate = new Date(Date.UTC(options.year, options.month - 1, 1, 0, 0, 0));
+        const endDate = new Date(Date.UTC(options.year, options.month, 0, 23, 59, 59));
+        conditions.push(gte(sales.createdAt, startDate));
+        conditions.push(lte(sales.createdAt, endDate));
+      }
 
-    const salesList = await db
-      .select({
-        id: sales.id,
-        invoiceFormattedNumber: sales.invoiceFormattedNumber,
-        invoiceSeries: sales.invoiceSeries,
-        invoiceNumber: sales.invoiceNumber,
-        createdAt: sales.createdAt,
-        rateValue: sales.rateValue,
-        taxableBase16Bs: sales.taxableBase16Bs,
-        taxableBase8Bs: sales.taxableBase8Bs,
-        exemptAmountBs: sales.exemptAmountBs,
-        taxAmount16Bs: sales.taxAmount16Bs,
-        taxAmount8Bs: sales.taxAmount8Bs,
-        igtfAmountBs: sales.igtfAmountBs,
-        totalAmountBs: sales.totalAmountBs,
-        totalAmountUsd: sales.totalAmountUsd,
-        customerName: customers.name,
-        customerDocType: customers.documentType,
-        customerDocNumber: customers.documentNumber,
-      })
-      .from(sales)
-      .innerJoin(customers, eq(sales.customerId, customers.id))
-      .where(and(...conditions))
-      .orderBy(sales.invoiceNumber);
+      const sRows = await tx
+        .select({
+          id: sales.id,
+          invoiceFormattedNumber: sales.invoiceFormattedNumber,
+          invoiceSeries: sales.invoiceSeries,
+          invoiceNumber: sales.invoiceNumber,
+          createdAt: sales.createdAt,
+          rateValue: sales.rateValue,
+          taxableBase16Bs: sales.taxableBase16Bs,
+          taxableBase8Bs: sales.taxableBase8Bs,
+          exemptAmountBs: sales.exemptAmountBs,
+          taxAmount16Bs: sales.taxAmount16Bs,
+          taxAmount8Bs: sales.taxAmount8Bs,
+          igtfAmountBs: sales.igtfAmountBs,
+          totalAmountBs: sales.totalAmountBs,
+          totalAmountUsd: sales.totalAmountUsd,
+          customerName: customers.name,
+          customerDocType: customers.documentType,
+          customerDocNumber: customers.documentNumber,
+        })
+        .from(sales)
+        .innerJoin(customers, eq(sales.customerId, customers.id))
+        .where(and(...conditions))
+        .orderBy(sales.invoiceNumber);
+
+      return { tenant: tRow, salesList: sRows };
+    });
 
     let totalVentasBs = 0;
     let totalExentoBs = 0;
@@ -213,24 +217,28 @@ export class FiscalReportService {
     tenantId: string,
     options: { month?: number; year?: number } = {}
   ): Promise<string> {
-    const [tenant] = await db.select().from(tenants).where(eq(tenants.id, tenantId)).limit(1);
-    if (!tenant) throw new Error('TENANT_NOT_FOUND');
+    const { tenant, orders } = await withTenant(tenantId, async (tx) => {
+      const [tRow] = await tx.select().from(tenants).where(eq(tenants.id, tenantId)).limit(1);
+      if (!tRow) throw new Error('TENANT_NOT_FOUND');
 
-    const orders = await db
-      .select({
-        id: purchaseOrders.id,
-        orderNumber: purchaseOrders.orderNumber,
-        status: purchaseOrders.status,
-        totalEstimatedUsd: purchaseOrders.totalEstimatedUsd,
-        createdAt: purchaseOrders.createdAt,
-        supplierName: suppliers.name,
-        supplierDocType: suppliers.documentType,
-        supplierDocNumber: suppliers.documentNumber,
-      })
-      .from(purchaseOrders)
-      .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
-      .where(eq(purchaseOrders.tenantId, tenantId))
-      .orderBy(desc(purchaseOrders.createdAt));
+      const oRows = await tx
+        .select({
+          id: purchaseOrders.id,
+          orderNumber: purchaseOrders.orderNumber,
+          status: purchaseOrders.status,
+          totalEstimatedUsd: purchaseOrders.totalEstimatedUsd,
+          createdAt: purchaseOrders.createdAt,
+          supplierName: suppliers.name,
+          supplierDocType: suppliers.documentType,
+          supplierDocNumber: suppliers.documentNumber,
+        })
+        .from(purchaseOrders)
+        .innerJoin(suppliers, eq(purchaseOrders.supplierId, suppliers.id))
+        .where(eq(purchaseOrders.tenantId, tenantId))
+        .orderBy(desc(purchaseOrders.createdAt));
+
+      return { tenant: tRow, orders: oRows };
+    });
 
     let csv = '\uFEFF'; // BOM UTF-8 para Excel
     csv += `LIBRO DE COMPRAS FISCAL (PROVIDENCIA SENIAT 0071)\n`;

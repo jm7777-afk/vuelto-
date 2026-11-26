@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { eq, and, sql } from 'drizzle-orm';
-import { db } from '../db/index.js';
+import { withTenant } from '../db/tenantDb.js';
+import { env } from '../config/env.js';
 import {
   sales,
   saleLines,
@@ -21,6 +22,11 @@ import { VoucherService } from './voucher.service.js';
 import { AuditService } from './audit.service.js';
 import { MetricsService } from './metrics.service.js';
 import { MockPaymentGateway } from '../gateways/mock-payment.gateway.js';
+
+const roundMoney = (value: number, decimals = 2): number => {
+  const factor = Math.pow(10, decimals);
+  return Math.round((value + Number.EPSILON) * factor) / factor;
+};
 
 export interface ConfirmSaleLineInput {
   productId: string;
@@ -56,12 +62,12 @@ export interface ConfirmSaleInput {
 
 export class SalesService {
   /**
-   * Confirmación Atómica e Idempotente de Venta (SENIAT Compliant)
-   * - Bloqueo pesimista de correlativo sin saltos
-   * - Recálculo obligatorio de bases imponibles (16%, 8%, 0%) en servidor
-   * - Determinación automática de IGTF (3%) en pagos en efectivo divisas
-   * - Descuento de stock en Kardex
-   * - Gestión de Vueltos (Monedero, Vale Impreso, Pago Móvil o Efectivo)
+   * Confirmación Atómica e Idempotente de Venta (SENIAT Compliant + RLS Fail-Closed)
+   * - Idempotencia dentro de transacción atómica
+   * - Validación de precios de catálogo en servidor (override solo con autorización Admin)
+   * - Bloqueo pesimista de stock (.for('update')) y de correlativo fiscal (pg_advisory_xact_lock + FOR UPDATE)
+   * - Precisión decimal uniforme, validación de suficiencia de pago y vuelto
+   * - Emisión/redención atómica de vales en la misma transacción
    */
   static async confirmSale(
     tenantId: string,
@@ -69,34 +75,38 @@ export class SalesService {
     idempotencyKey: string,
     input: ConfirmSaleInput
   ) {
-    // 1. Verificación de Idempotencia previa
+    if (!input.lines || input.lines.length === 0) {
+      throw new Error('La venta debe incluir al menos un producto');
+    }
+
     const paramsHash = crypto
       .createHash('sha256')
       .update(JSON.stringify(input))
       .digest('hex');
 
-    const [existingIdempotency] = await db
-      .select()
-      .from(idempotencyKeys)
-      .where(
-        and(
-          eq(idempotencyKeys.tenantId, tenantId),
-          eq(idempotencyKeys.userId, userId),
-          eq(idempotencyKeys.key, idempotencyKey)
-        )
-      );
+    return await withTenant(tenantId, async (tx) => {
+      // 0a. Verificación atómica de Idempotencia dentro de la transacción (evita race condition)
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('idemp_' || ${tenantId} || '_' || ${idempotencyKey}));`);
 
-    if (existingIdempotency && existingIdempotency.responseBody) {
-      // Reintento de red: devolver exactamente la misma respuesta sin reprocesar
-      return {
-        ...(existingIdempotency.responseBody as any),
-        isExistingOfflineSync: true,
-      };
-    }
+      const [existingIdempotency] = await tx
+        .select()
+        .from(idempotencyKeys)
+        .where(
+          and(
+            eq(idempotencyKeys.tenantId, tenantId),
+            eq(idempotencyKeys.userId, userId),
+            eq(idempotencyKeys.key, idempotencyKey)
+          )
+        );
 
-    // 2. Ejecutar transacción atómica en PostgreSQL
-    const saleResult = await db.transaction(async (tx) => {
-      // 0. Idempotencia de sincronización offline por clientAssignedUuid
+      if (existingIdempotency && existingIdempotency.responseBody) {
+        return {
+          ...(existingIdempotency.responseBody as any),
+          isExistingOfflineSync: true,
+        };
+      }
+
+      // 0b. Idempotencia de sincronización offline por clientAssignedUuid
       if (input.clientAssignedUuid) {
         const [existing] = await tx
           .select()
@@ -124,9 +134,9 @@ export class SalesService {
         .from(tenants)
         .where(eq(tenants.id, tenantId));
 
-      if (!tenant) throw new Error('Tenant no encontrado');
+      if (!tenant || !tenant.isActive) throw new Error('Tenant no encontrado o suspendido');
 
-      // A2. Obtener Configuración del Tenant (Desafiliación IVA/IGTF, Margen y Reglas de Mora)
+      // A2. Configuración del Tenant
       const [config] = await tx
         .select()
         .from(tenantConfigurations)
@@ -165,12 +175,16 @@ export class SalesService {
       }
 
       const rateValue = parseFloat(rateSnapshot.rate);
+      if (!Number.isFinite(rateValue) || rateValue <= 0) {
+        throw new Error('Tasa de cambio inválida');
+      }
 
       // D. Validar Cliente y verificación de mora/bloqueo de crédito
       const [customer] = await tx
         .select()
         .from(customers)
-        .where(and(eq(customers.tenantId, tenantId), eq(customers.id, input.customerId)));
+        .where(and(eq(customers.tenantId, tenantId), eq(customers.id, input.customerId)))
+        .for('update');
 
       if (!customer) {
         throw new Error('Cliente no encontrado');
@@ -186,7 +200,7 @@ export class SalesService {
         );
       }
 
-      // E. Recalcular Líneas, Precios, Bases Imponibles e IVA
+      // E. Recalcular Líneas, Validar Precios en Servidor, Bases Imponibles e IVA (precisión decimal uniforme)
       let taxableBase16Usd = 0;
       let taxableBase8Usd = 0;
       let exemptAmountUsd = 0;
@@ -196,8 +210,13 @@ export class SalesService {
       let saleStatus = 'COMPLETED';
 
       const processedLines: any[] = [];
+      let priceOverridesCount = 0;
 
       for (const line of input.lines) {
+        if (!Number.isFinite(line.quantity) || line.quantity <= 0) {
+          throw new Error('Cantidad inválida en línea de venta');
+        }
+
         const [prod] = await tx
           .select()
           .from(products)
@@ -207,25 +226,42 @@ export class SalesService {
           throw new Error(`Producto ${line.productId} no encontrado o inactivo`);
         }
 
-        const unitPrice = line.unitPriceUsd;
-        const lineSubtotal = line.quantity * unitPrice;
+        const catalogPrice = parseFloat(prod.salePriceUsd);
+        const requestedPrice = Number.isFinite(line.unitPriceUsd) && line.unitPriceUsd >= 0 ? line.unitPriceUsd : catalogPrice;
+        let unitPrice = catalogPrice;
+
+        // Solo permitir precio distinto al de catálogo si difiere <= $0.01 (redondeo) o existe autorización Admin
+        if (Math.abs(requestedPrice - catalogPrice) > 0.01) {
+          if (input.adminAuthorized) {
+            unitPrice = roundMoney(requestedPrice, 4);
+            priceOverridesCount++;
+          } else if (input.isOfflineSync) {
+            unitPrice = roundMoney(requestedPrice, 4);
+          } else {
+            unitPrice = catalogPrice;
+          }
+        } else {
+          unitPrice = roundMoney(catalogPrice, 4);
+        }
+
+        const lineSubtotal = roundMoney(line.quantity * unitPrice, 2);
         const taxRate = parseFloat(prod.taxRate);
         let lineTax = 0;
 
-        // Si el comercio desafilió el IVA (emprendimiento no registrado) o el producto es exento
         if (!enableIva || prod.isExempt || taxRate === 0) {
-          exemptAmountUsd += lineSubtotal;
+          exemptAmountUsd = roundMoney(exemptAmountUsd + lineSubtotal, 2);
         } else if (taxRate === 16.0) {
-          taxableBase16Usd += lineSubtotal;
-          lineTax = lineSubtotal * 0.16;
-          taxAmount16Usd += lineTax;
+          taxableBase16Usd = roundMoney(taxableBase16Usd + lineSubtotal, 2);
+          lineTax = roundMoney(lineSubtotal * 0.16, 2);
+          taxAmount16Usd = roundMoney(taxAmount16Usd + lineTax, 2);
         } else if (taxRate === 8.0) {
-          taxableBase8Usd += lineSubtotal;
-          lineTax = lineSubtotal * 0.08;
-          taxAmount8Usd += lineTax;
+          taxableBase8Usd = roundMoney(taxableBase8Usd + lineSubtotal, 2);
+          lineTax = roundMoney(lineSubtotal * 0.08, 2);
+          taxAmount8Usd = roundMoney(taxAmount8Usd + lineTax, 2);
         }
 
-        subtotalUsd += lineSubtotal;
+        subtotalUsd = roundMoney(subtotalUsd + lineSubtotal, 2);
+        const lineTotalUsd = roundMoney(lineSubtotal + lineTax, 2);
 
         processedLines.push({
           productId: prod.id,
@@ -237,13 +273,13 @@ export class SalesService {
           isExempt: !enableIva || prod.isExempt,
           subtotalUsd: lineSubtotal,
           taxAmountUsd: lineTax,
-          totalUsd: lineSubtotal + lineTax,
-          subtotalBs: lineSubtotal * rateValue,
-          taxAmountBs: lineTax * rateValue,
-          totalBs: (lineSubtotal + lineTax) * rateValue,
+          totalUsd: lineTotalUsd,
+          subtotalBs: roundMoney(lineSubtotal * rateValue, 2),
+          taxAmountBs: roundMoney(lineTax * rateValue, 2),
+          totalBs: roundMoney(lineTotalUsd * rateValue, 2),
         });
 
-        // Validar y Descontar Stock
+        // Bloqueo pesimista sobre fila de stock para evitar sobreventa concurrente
         const [stock] = await tx
           .select()
           .from(productStock)
@@ -253,7 +289,8 @@ export class SalesService {
               eq(productStock.warehouseId, warehouseId),
               eq(productStock.productId, prod.id)
             )
-          );
+          )
+          .for('update');
 
         const currentQty = stock ? parseFloat(stock.quantity) : 0;
         if (!prod.allowNegativeStock && currentQty < line.quantity) {
@@ -265,7 +302,7 @@ export class SalesService {
           }
         }
 
-        const newQty = currentQty - line.quantity;
+        const newQty = roundMoney(currentQty - line.quantity, 3);
         if (stock) {
           await tx
             .update(productStock)
@@ -283,27 +320,48 @@ export class SalesService {
 
       // F. Cálculo de IGTF (3% sobre divisas en efectivo para Contribuyentes Especiales)
       let cashUsdPayments = 0;
+      let totalPaidUsd = 0;
       for (const p of input.payments) {
+        if (!Number.isFinite(p.amount) || p.amount <= 0) {
+          throw new Error(`Monto de pago inválido para método ${p.paymentMethod}`);
+        }
+        const paidUsd = p.currency === 'USD' ? roundMoney(p.amount, 2) : roundMoney(p.amount / rateValue, 2);
+        totalPaidUsd = roundMoney(totalPaidUsd + paidUsd, 2);
         if (p.paymentMethod === 'CASH_USD') {
-          cashUsdPayments += p.currency === 'USD' ? p.amount : p.amount / rateValue;
+          cashUsdPayments = roundMoney(cashUsdPayments + paidUsd, 2);
         }
       }
 
       let igtfAmountUsd = 0;
       if (enableIgtf && tenant.isSpecialTaxpayer && cashUsdPayments > 0) {
-        igtfAmountUsd = cashUsdPayments * 0.03;
+        igtfAmountUsd = roundMoney(cashUsdPayments * 0.03, 2);
       }
 
-      const totalAmountUsd = subtotalUsd + taxAmount16Usd + taxAmount8Usd + igtfAmountUsd;
-      const totalAmountBs = totalAmountUsd * rateValue;
+      const totalAmountUsd = roundMoney(subtotalUsd + taxAmount16Usd + taxAmount8Usd + igtfAmountUsd, 2);
+      const totalAmountBs = roundMoney(totalAmountUsd * rateValue, 2);
+
+      // Validación estricta de suficiencia de pago en ventas en línea
+      if (!input.isOfflineSync && totalPaidUsd + 0.02 < totalAmountUsd) {
+        throw new Error(
+          `Pago insuficiente: el total facturado es $${totalAmountUsd.toFixed(2)} USD y se recibió $${totalPaidUsd.toFixed(2)} USD.`
+        );
+      }
+
+      // Validación estricta de vuelto contra el excedente recibido
+      if (input.vueltoOption && input.vueltoOption.amountUsd > 0) {
+        const expectedChangeUsd = roundMoney(Math.max(0, totalPaidUsd - totalAmountUsd), 2);
+        if (!input.isOfflineSync && input.vueltoOption.amountUsd > expectedChangeUsd + 0.02) {
+          throw new Error(
+            `Monto de vuelto inválido ($${input.vueltoOption.amountUsd.toFixed(2)} USD excede el cambio disponible de $${expectedChangeUsd.toFixed(2)} USD).`
+          );
+        }
+      }
 
       // G. Asignar Correlativo Consecutivo sin Saltos (Lock Pesimista)
-      // Bloqueo Advisory Lock de PostgreSQL por tenant con timeout estricto de 5s
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('invoice_' || ${tenantId}));`);
       await tx.execute(sql`SET LOCAL lock_timeout = '5000ms';`);
 
       const series = 'A';
-      // Bloqueo SELECT ... FOR UPDATE en la secuencia
       const [seq] = await tx
         .select()
         .from(invoiceSequences)
@@ -311,11 +369,8 @@ export class SalesService {
         .for('update');
 
       let nextNumber = 1;
-      let prefix = 'FACT-';
-
       if (seq) {
         nextNumber = seq.currentNumber + 1;
-        prefix = seq.prefix;
         await tx
           .update(invoiceSequences)
           .set({ currentNumber: nextNumber, updatedAt: new Date() })
@@ -352,12 +407,12 @@ export class SalesService {
           igtfAmountUsd: igtfAmountUsd.toFixed(2),
           totalAmountUsd: totalAmountUsd.toFixed(2),
 
-          taxableBase16Bs: (taxableBase16Usd * rateValue).toFixed(2),
-          taxableBase8Bs: (taxableBase8Usd * rateValue).toFixed(2),
-          exemptAmountBs: (exemptAmountUsd * rateValue).toFixed(2),
-          taxAmount16Bs: (taxAmount16Usd * rateValue).toFixed(2),
-          taxAmount8Bs: (taxAmount8Usd * rateValue).toFixed(2),
-          igtfAmountBs: (igtfAmountUsd * rateValue).toFixed(2),
+          taxableBase16Bs: roundMoney(taxableBase16Usd * rateValue, 2).toFixed(2),
+          taxableBase8Bs: roundMoney(taxableBase8Usd * rateValue, 2).toFixed(2),
+          exemptAmountBs: roundMoney(exemptAmountUsd * rateValue, 2).toFixed(2),
+          taxAmount16Bs: roundMoney(taxAmount16Usd * rateValue, 2).toFixed(2),
+          taxAmount8Bs: roundMoney(taxAmount8Usd * rateValue, 2).toFixed(2),
+          igtfAmountBs: roundMoney(igtfAmountUsd * rateValue, 2).toFixed(2),
           totalAmountBs: totalAmountBs.toFixed(2),
 
           status: saleStatus,
@@ -399,28 +454,36 @@ export class SalesService {
         });
       }
 
-      // J. Persistir Pagos y Validar Métodos de Vuelto / Redención
+      // J. Persistir Pagos y Validar Métodos de Vuelto / Redención dentro de tx
+      let runningCustomerBalance = parseFloat(customer.balanceDue || '0');
+
       for (const p of input.payments) {
         const isUsd = p.currency === 'USD';
-        const amountUsd = isUsd ? p.amount : p.amount / rateValue;
-        const amountBs = isUsd ? p.amount * rateValue : p.amount;
+        const amountUsd = isUsd ? roundMoney(p.amount, 2) : roundMoney(p.amount / rateValue, 2);
+        const amountBs = isUsd ? roundMoney(p.amount * rateValue, 2) : roundMoney(p.amount, 2);
 
-        // Si paga con Monedero (VUELTO_WALLET), deducir del saldo a favor del cliente
         if (p.paymentMethod === 'VUELTO_WALLET') {
-          const currentBalance = parseFloat(customer.balanceDue);
-          // balanceDue negativo indica saldo a favor
+          runningCustomerBalance = roundMoney(runningCustomerBalance + amountUsd, 2);
           await tx
             .update(customers)
             .set({
-              balanceDue: (currentBalance + amountUsd).toFixed(2),
+              balanceDue: runningCustomerBalance.toFixed(2),
+              updatedAt: new Date(),
+            })
+            .where(eq(customers.id, customer.id));
+        } else if (p.paymentMethod === 'CREDIT_DEBT') {
+          runningCustomerBalance = roundMoney(runningCustomerBalance + amountUsd, 2);
+          await tx
+            .update(customers)
+            .set({
+              balanceDue: runningCustomerBalance.toFixed(2),
               updatedAt: new Date(),
             })
             .where(eq(customers.id, customer.id));
         }
 
-        // Si paga con Vale de Cambio Impreso (CHANGE_VOUCHER), redimir
         if (p.paymentMethod === 'CHANGE_VOUCHER' && p.voucherCode) {
-          await VoucherService.redeem(tenantId, userId, p.voucherCode, sale.id);
+          await VoucherService.redeem(tenantId, userId, p.voucherCode, sale.id, tx);
         }
 
         await tx.insert(payments).values({
@@ -440,32 +503,33 @@ export class SalesService {
       // K. Gestión del Vuelto si aplica
       let vueltoIssued: any = null;
       if (input.vueltoOption && input.vueltoOption.amountUsd > 0) {
-        const vAmountUsd = input.vueltoOption.amountUsd;
-        const vAmountBs = vAmountUsd * rateValue;
+        const vAmountUsd = roundMoney(input.vueltoOption.amountUsd, 2);
+        const vAmountBs = roundMoney(vAmountUsd * rateValue, 2);
 
         if (input.vueltoOption.type === 'WALLET_CREDIT') {
-          // Acreditar al monedero del cliente (disminuye balanceDue a saldo a favor negativo)
-          const currentBal = parseFloat(customer.balanceDue);
-          const newBal = currentBal - vAmountUsd;
+          runningCustomerBalance = roundMoney(runningCustomerBalance - vAmountUsd, 2);
           await tx
             .update(customers)
-            .set({ balanceDue: newBal.toFixed(2), updatedAt: new Date() })
+            .set({ balanceDue: runningCustomerBalance.toFixed(2), updatedAt: new Date() })
             .where(eq(customers.id, customer.id));
 
           vueltoIssued = {
             type: 'WALLET_CREDIT',
             amountUsd: vAmountUsd.toFixed(2),
             amountBs: vAmountBs.toFixed(2),
-            newCustomerCredit: Math.abs(newBal).toFixed(2),
+            newCustomerCredit: Math.abs(runningCustomerBalance).toFixed(2),
           };
         } else if (input.vueltoOption.type === 'CHANGE_VOUCHER') {
-          // Emitir Vale de Cambio Impreso
-          const voucher = await VoucherService.createVoucher(tenantId, {
-            saleId: sale.id,
-            customerId: customer.id,
-            amountUsd: vAmountUsd,
-            amountBs: vAmountBs,
-          });
+          const voucher = await VoucherService.createVoucher(
+            tenantId,
+            {
+              saleId: sale.id,
+              customerId: customer.id,
+              amountUsd: vAmountUsd,
+              amountBs: vAmountBs,
+            },
+            tx
+          );
 
           vueltoIssued = {
             type: 'CHANGE_VOUCHER',
@@ -476,6 +540,9 @@ export class SalesService {
             expiresAt: voucher.expiresAt,
           };
         } else if (input.vueltoOption.type === 'PAGO_MOVIL' && input.vueltoOption.pagoMovilPhone) {
+          if (env.NODE_ENV === 'production' || !env.MOCK_PAYMENT_ENABLED) {
+            throw new Error('PAYMENT_GATEWAY_NOT_CONFIGURED: El envío automático de vuelto por Pago Móvil requiere conector bancario activo.');
+          }
           const gateway = new MockPaymentGateway();
           const pmResult = await gateway.sendVueltoPagoMovil({
             tenantId,
@@ -509,6 +576,7 @@ export class SalesService {
           totalBs: totalAmountBs.toFixed(2),
           igtfUsd: igtfAmountUsd.toFixed(2),
           vuelto: vueltoIssued,
+          priceOverridesCount,
         },
         result: 'SUCCESS',
         channel: 'POS_MOBILE',
@@ -563,13 +631,11 @@ _¡Gracias por su compra! Conserve este comprobante digital._`;
 
       return responsePayload;
     });
-
-    return saleResult;
   }
 
   /**
-   * Emite una Nota de Crédito o Débito formal, ajusta IVA, retorna stock al almacén
-   * y marca la factura original como ANNULLED_BY_NC
+   * Emite una Nota de Crédito formal con lock exclusivo para correlativo NC,
+   * retorna stock al almacén si aplica y anula la factura original.
    */
   static async createCreditNote(
     tenantId: string,
@@ -577,11 +643,14 @@ _¡Gracias por su compra! Conserve este comprobante digital._`;
     saleId: string,
     data: { reason: string; returnInventory?: boolean }
   ) {
-    return await db.transaction(async (tx) => {
+    return await withTenant(tenantId, async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('nc_' || ${tenantId}));`);
+
       const [sale] = await tx
         .select()
         .from(sales)
         .where(and(eq(sales.tenantId, tenantId), eq(sales.id, saleId)))
+        .for('update')
         .limit(1);
 
       if (!sale) {
@@ -593,7 +662,7 @@ _¡Gracias por su compra! Conserve este comprobante digital._`;
       }
 
       const [ncCount] = await tx
-        .select({ count: sql<number>`count(*)` })
+        .select({ count: sql<number>`count(*)::int` })
         .from(creditDebitNotes)
         .where(eq(creditDebitNotes.tenantId, tenantId));
 
@@ -617,7 +686,6 @@ _¡Gracias por su compra! Conserve este comprobante digital._`;
         })
         .returning();
 
-      // Reintegrar inventario al almacén si returnInventory es true
       if (data.returnInventory !== false) {
         const lines = await tx
           .select()
@@ -646,7 +714,6 @@ _¡Gracias por su compra! Conserve este comprobante digital._`;
         }
       }
 
-      // Marcar factura original como anulada
       await tx
         .update(sales)
         .set({ status: 'ANNULLED_BY_NC' })
@@ -672,33 +739,29 @@ _¡Gracias por su compra! Conserve este comprobante digital._`;
     });
   }
 
-  /**
-   * Lista ventas con discrepancias o déficit de stock para revisión administrativa
-   */
   static async getDiscrepancies(tenantId: string) {
-    return await db
-      .select({
-        id: sales.id,
-        invoiceFormattedNumber: sales.invoiceFormattedNumber,
-        status: sales.status,
-        totalAmountUsd: sales.totalAmountUsd,
-        totalAmountBs: sales.totalAmountBs,
-        createdAt: sales.createdAt,
-        clientAssignedUuid: sales.clientAssignedUuid,
-      })
-      .from(sales)
-      .where(
-        and(
-          eq(sales.tenantId, tenantId),
-          eq(sales.status, 'SYNCED_WITH_STOCK_DEFICIT')
+    return await withTenant(tenantId, (tx) =>
+      tx
+        .select({
+          id: sales.id,
+          invoiceFormattedNumber: sales.invoiceFormattedNumber,
+          status: sales.status,
+          totalAmountUsd: sales.totalAmountUsd,
+          totalAmountBs: sales.totalAmountBs,
+          createdAt: sales.createdAt,
+          clientAssignedUuid: sales.clientAssignedUuid,
+        })
+        .from(sales)
+        .where(
+          and(
+            eq(sales.tenantId, tenantId),
+            eq(sales.status, 'SYNCED_WITH_STOCK_DEFICIT')
+          )
         )
-      )
-      .orderBy(sql`created_at DESC`);
+        .orderBy(sql`created_at DESC`)
+    );
   }
 
-  /**
-   * Sincroniza un lote de ventas fuera de línea de manera idempotente
-   */
   static async syncOfflineBatch(tenantId: string, userId: string, batch: ConfirmSaleInput[]) {
     const results: any[] = [];
     let syncedCount = 0;

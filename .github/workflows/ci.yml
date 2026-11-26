@@ -7,8 +7,8 @@ on:
     branches: [main]
 
 jobs:
-  lint-and-typecheck:
-    name: Lint & Typecheck (Strict TypeScript)
+  lint-typecheck-security:
+    name: Typecheck & Dependency Security Audit
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -39,8 +39,13 @@ jobs:
       - name: Typecheck Mobile POS
         run: npx --prefix mobile tsc -p mobile/tsconfig.json --noEmit
 
+      - name: Security Audit (High/Critical)
+        run: |
+          npm --prefix backend audit --omit=dev --audit-level=high || true
+          npm --prefix web audit --omit=dev --audit-level=high || true
+
   test-backend:
-    name: Backend Test Suite & Multi-Tenant Isolation
+    name: Backend Test Suite (RLS Fail-Closed, P0 Security & E2E)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -69,23 +74,29 @@ jobs:
       - name: Install Backend Dependencies
         run: npm --prefix backend ci
 
-      - name: Run Database Migrations & Seeds
+      - name: Run Database Migrations & Clean SuperAdmin Seed
         env:
           DATABASE_URL: postgres://postgres:postgrespassword@localhost:5432/vuelto_test
           NODE_ENV: test
+          SEED_SUPERADMIN_PASSWORD: CI_SuperAdmin_Password_2026!
         run: npm --prefix backend run db:migrate
 
-      - name: Run Vitest Suite (RLS & Security Hardened)
+      - name: Run Vitest Suite (RLS, Security P0, E2E & Concurrency)
         env:
           DATABASE_URL: postgres://postgres:postgrespassword@localhost:5432/vuelto_test
           NODE_ENV: test
-          JWT_SECRET: test-super-secret-jwt-key-2026-min-32-chars!
-          JWT_REFRESH_SECRET: test-super-secret-refresh-key-2026-min-32-chars!
-          ENCRYPTION_KEY: test-256-bit-aes-key-for-totp-secrets-32ch!
+          SEED_SUPERADMIN_PASSWORD: CI_SuperAdmin_Password_2026!
+          JWT_SECRET: ci-test-super-secret-jwt-key-2026-min-32ch!
+          JWT_REFRESH_SECRET: ci-test-super-secret-refresh-key-2026-min32!
+          ENCRYPTION_KEY: ci-test-256-bit-aes-key-for-totp-secrets-32!
+          METRICS_TOKEN: ci-test-metrics-token-2026-secure
+          PAYMENT_WEBHOOK_SECRET: ci-test-webhook-secret-2026-secure
+          INTERNAL_ADMIN_TOKEN: ci-test-internal-admin-token-2026
+          MOCK_PAYMENT_ENABLED: 'false'
         run: npm --prefix backend test
 
-  build-web:
-    name: Build Web Admin SPA
+  build-monorepo:
+    name: Build Full Monorepo & Sync Static SPA
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -96,8 +107,8 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install Web Dependencies
-        run: npm --prefix web ci
-
-      - name: Build Web Production Assets
-        run: npm --prefix web run build
+      - name: Install & Build Web + Backend
+        run: |
+          npm --prefix web ci
+          npm --prefix backend ci
+          npm run build

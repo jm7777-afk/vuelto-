@@ -25,6 +25,7 @@ import {
   payments,
   changeVouchers,
   creditDebitNotes,
+  cashSessions,
   taxRates,
   igtfRules,
   idempotencyKeys,
@@ -467,6 +468,7 @@ export class TenantService {
       // Orden seguro respetando todas las Foreign Keys (onDelete: 'restrict')
       await tx.delete(creditDebitNotes).where(eq(creditDebitNotes.tenantId, id));
       await tx.delete(changeVouchers).where(eq(changeVouchers.tenantId, id));
+      await tx.delete(cashSessions).where(eq(cashSessions.tenantId, id));
       await tx.delete(payments).where(eq(payments.tenantId, id));
       await tx.delete(saleLines).where(eq(saleLines.tenantId, id));
       await tx.delete(sales).where(eq(sales.tenantId, id));

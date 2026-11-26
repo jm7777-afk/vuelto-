@@ -27,13 +27,16 @@ import { LateFeeController } from '../controllers/late-fee.controller.js';
 import { FinancesController } from '../controllers/finances.controller.js';
 import { ConfigController } from '../controllers/config.controller.js';
 import { AuditController } from '../controllers/audit.controller.js';
+import { CashSessionController } from '../controllers/cash-session.controller.js';
 import { tenantRouter } from './tenant.routes.js';
 import { monitoringRouter } from './monitoring.routes.js';
+import { MonitoringController } from '../controllers/monitoring.controller.js';
+import { MonitoringService } from '../services/monitoring.service.js';
 import { ExchangeRateService } from '../services/exchange-rate.service.js';
 import { FiscalReportService } from '../services/fiscal-report.service.js';
 import { FiscalService } from '../services/fiscal.service.js';
 import { SalesService } from '../services/sales.service.js';
-import { db } from '../db/index.js';
+import { withTenant } from '../db/tenantDb.js';
 import { users, sales, auditLogs } from '../db/schema.js';
 import { eq, and, gte, desc, sql } from 'drizzle-orm';
 
@@ -86,6 +89,35 @@ apiRouter.get('/exchange-rates/current', async (req, res, next) => {
 // --- WEBHOOK PÚBLICO (Verificación criptográfica con X-Signature-SHA256) ---
 apiRouter.post('/payments/webhooks', PaymentController.handleWebhook);
 
+// --- STREAM SSE CON TICKET EFÍMERO DE UN SOLO USO (SIN JWT EN QUERY STRING) ---
+apiRouter.get('/super-admin/monitoring/stream', (req, res) => {
+  const ticket = typeof req.query.ticket === 'string' ? req.query.ticket : undefined;
+  if (ticket) {
+    const ticketUserId = MonitoringService.consumeStreamTicket(ticket);
+    if (!ticketUserId) {
+      res.status(401).json({ code: 'INVALID_STREAM_TICKET', message: 'Ticket SSE inválido o expirado.' });
+      return;
+    }
+    req.user = {
+      id: ticketUserId,
+      tenantId: null,
+      roleId: 'SUPER_ADMIN',
+      username: 'superadmin',
+      fullName: 'Súper Administrador',
+    };
+    MonitoringController.stream(req, res);
+    return;
+  }
+
+  requireTenantAuth(req, res, () => {
+    if (req.user?.roleId !== 'SUPER_ADMIN') {
+      res.status(403).json({ code: 'FORBIDDEN', message: 'Requiere rol SUPER_ADMIN' });
+      return;
+    }
+    MonitoringController.stream(req, res);
+  });
+});
+
 // Todas las demás rutas de dominio bajo /api/v1 requieren autenticación de tenant
 apiRouter.use(requireTenantAuth);
 
@@ -94,7 +126,7 @@ apiRouter.get('/auth/me', AuthController.me);
 apiRouter.post('/auth/change-password', AuthController.changePassword);
 apiRouter.post('/auth/logout', AuthController.logout);
 
-// --- VENDEDORES EN VIVO (REAL DESDE POSTGRESQL) ---
+// --- VENDEDORES EN VIVO (REAL DESDE POSTGRESQL, SIN N+1 Y CON RLS) ---
 apiRouter.get('/cashiers/live', requireAdmin, async (req, res, next) => {
   try {
     const tenantId = req.tenantId;
@@ -106,38 +138,57 @@ apiRouter.get('/cashiers/live', requireAdmin, async (req, res, next) => {
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
 
-    const tenantUsers = await db
-      .select({
-        id: users.id,
-        name: users.fullName,
-        username: users.username,
-        roleId: users.roleId,
-        isActive: users.isActive,
-        lastLoginAt: users.lastLoginAt,
-      })
-      .from(users)
-      .where(eq(users.tenantId, tenantId));
+    const enriched = await withTenant(tenantId, async (tx) => {
+      const tenantUsers = await tx
+        .select({
+          id: users.id,
+          name: users.fullName,
+          username: users.username,
+          roleId: users.roleId,
+          isActive: users.isActive,
+          lastLoginAt: users.lastLoginAt,
+        })
+        .from(users)
+        .where(eq(users.tenantId, tenantId));
 
-    const enriched = await Promise.all(
-      tenantUsers.map(async (u) => {
-        const [todaySales] = await db
-          .select({
-            count: sql<number>`count(*)::int`,
-            totalUsd: sql<string>`coalesce(sum(${sales.totalAmountUsd}), 0)::text`,
-            totalBs: sql<string>`coalesce(sum(${sales.totalAmountBs}), 0)::text`,
-          })
-          .from(sales)
-          .where(and(eq(sales.tenantId, tenantId), eq(sales.userId, u.id), gte(sales.createdAt, startOfDay)));
+      if (tenantUsers.length === 0) return [];
 
-        const [lastAudit] = await db
-          .select({ action: auditLogs.action, entity: auditLogs.entity, createdAt: auditLogs.createdAt })
-          .from(auditLogs)
-          .where(and(eq(auditLogs.tenantId, tenantId), eq(auditLogs.userId, u.id)))
-          .orderBy(desc(auditLogs.createdAt))
-          .limit(1);
+      const salesAgg = await tx
+        .select({
+          userId: sales.userId,
+          count: sql<number>`count(*)::int`,
+          totalUsd: sql<string>`coalesce(sum(${sales.totalAmountUsd}), 0)::text`,
+          totalBs: sql<string>`coalesce(sum(${sales.totalAmountBs}), 0)::text`,
+        })
+        .from(sales)
+        .where(and(eq(sales.tenantId, tenantId), gte(sales.createdAt, startOfDay)))
+        .groupBy(sales.userId);
 
+      const recentAudits = await tx
+        .select({
+          userId: auditLogs.userId,
+          action: auditLogs.action,
+          entity: auditLogs.entity,
+          createdAt: auditLogs.createdAt,
+        })
+        .from(auditLogs)
+        .where(eq(auditLogs.tenantId, tenantId))
+        .orderBy(desc(auditLogs.createdAt))
+        .limit(100);
+
+      const salesMap = new Map(salesAgg.map((s) => [s.userId, s]));
+      const auditMap = new Map<string, (typeof recentAudits)[0]>();
+      for (const row of recentAudits) {
+        if (row.userId && !auditMap.has(row.userId)) {
+          auditMap.set(row.userId, row);
+        }
+      }
+
+      const recentMs = Date.now() - 30 * 60 * 1000;
+      return tenantUsers.map((u) => {
+        const todaySales = salesMap.get(u.id);
+        const lastAudit = auditMap.get(u.id);
         const lastLoginMs = u.lastLoginAt ? new Date(u.lastLoginAt).getTime() : 0;
-        const recentMs = Date.now() - 30 * 60 * 1000;
         const status = !u.isActive ? 'OFFLINE' : lastLoginMs >= recentMs ? 'ONLINE' : 'IDLE';
 
         return {
@@ -153,8 +204,8 @@ apiRouter.get('/cashiers/live', requireAdmin, async (req, res, next) => {
           lastAction: lastAudit ? `${lastAudit.action} (${lastAudit.entity})` : 'Sin actividad reciente',
           lastActionTime: lastAudit?.createdAt ? new Date(lastAudit.createdAt).toLocaleString('es-VE') : 'Nunca',
         };
-      })
-    );
+      });
+    });
 
     res.json(enriched);
   } catch (err) {
@@ -253,6 +304,12 @@ apiRouter.get('/late-fees/calculate/:customerId', requireAdmin, LateFeeControlle
 apiRouter.get('/finances/metrics', requireAdmin, FinancesController.getMetrics);
 apiRouter.get('/finances/transactions', requireAdmin, FinancesController.listTransactions);
 apiRouter.post('/finances/transactions', requireAdmin, FinancesController.createTransaction);
+
+// --- APERTURA Y CIERRE DE CAJA (TURNOS DE CAJERO) ---
+apiRouter.get('/cash-sessions/current', requireCashierOrAdmin, CashSessionController.getCurrent);
+apiRouter.post('/cash-sessions/open', requireCashierOrAdmin, CashSessionController.open);
+apiRouter.post('/cash-sessions/close', requireCashierOrAdmin, CashSessionController.close);
+apiRouter.get('/cash-sessions/history', requireCashierOrAdmin, CashSessionController.history);
 
 // --- VENTAS Y FACTURACIÓN ATÓMICA ---
 apiRouter.get('/sales', SalesController.list);

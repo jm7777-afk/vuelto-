@@ -15,6 +15,7 @@ export async function resetAndCleanDatabase() {
     const tablesToTruncate = [
       'credit_debit_notes',
       'change_vouchers',
+      'cash_sessions',
       'payments',
       'sale_lines',
       'sales',
