@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 
+const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
+
 export interface CartLine {
   productId: string;
   name: string;
@@ -20,7 +22,7 @@ export interface CustomerSummary {
   documentType: string;
   documentNumber: string;
   phone?: string;
-  balanceDue: number; // Negativo: saldo a favor (monedero)
+  balanceDue: number;
 }
 
 export interface HeldCart {
@@ -35,17 +37,13 @@ export interface HeldCart {
 }
 
 interface CartState {
-  // Carrito Activo
   activeLines: CartLine[];
   activeCustomer: CustomerSummary | null;
   frozenRate: number | null;
   exchangeRateId: string | null;
-
-  // Cuentas Abiertas (Held Carts) - Máx 10
   heldCarts: HeldCart[];
 
-  // Acciones sobre el Carrito Activo
-  setExchangeRate: (rate: number, rateId: string) => void;
+  setExchangeRate: (rate: number, rateId: string, force?: boolean) => void;
   setCustomer: (customer: CustomerSummary | null) => void;
   addProduct: (product: {
     id: string;
@@ -60,12 +58,10 @@ interface CartState {
   removeLine: (productId: string) => void;
   clearActiveCart: () => void;
 
-  // Acciones sobre Cuentas Abiertas
   parkCurrentCart: (label?: string) => { success: boolean; error?: string };
   resumeHeldCart: (heldCartId: string) => void;
   discardHeldCart: (heldCartId: string) => void;
 
-  // Totales Calculados
   getSubtotalUsd: () => number;
   getTaxAmountUsd: () => number;
   getTotalUsd: () => number;
@@ -79,9 +75,8 @@ export const useCartStore = create<CartState>((set, get) => ({
   exchangeRateId: null,
   heldCarts: [],
 
-  setExchangeRate: (rate, rateId) => {
-    // Solo congela si no está ya congelada en el carrito
-    if (!get().frozenRate) {
+  setExchangeRate: (rate, rateId, force = false) => {
+    if (force || !get().frozenRate || !get().exchangeRateId) {
       set({ frozenRate: rate, exchangeRateId: rateId });
     }
   },
@@ -93,14 +88,12 @@ export const useCartStore = create<CartState>((set, get) => ({
     const existingIndex = lines.findIndex((l) => l.productId === product.id);
 
     if (existingIndex >= 0) {
-      // Incrementar cantidad en 1
       const current = lines[existingIndex];
-      const newQty = current.quantity + 1;
-      get().updateQuantity(product.id, newQty);
+      get().updateQuantity(product.id, round2(current.quantity + 1));
     } else {
-      const price = product.salePriceUsd;
+      const price = round2(product.salePriceUsd);
       const taxRate = product.isExempt ? 0 : product.taxRate;
-      const taxAmount = price * (taxRate / 100);
+      const taxAmount = round2(price * (taxRate / 100));
 
       const newLine: CartLine = {
         productId: product.id,
@@ -112,7 +105,7 @@ export const useCartStore = create<CartState>((set, get) => ({
         isExempt: product.isExempt,
         subtotalUsd: price,
         taxAmountUsd: taxAmount,
-        totalUsd: price + taxAmount,
+        totalUsd: round2(price + taxAmount),
         unitOfMeasure: product.unitOfMeasure || 'unidad',
       };
 
@@ -128,14 +121,14 @@ export const useCartStore = create<CartState>((set, get) => ({
 
     const lines = get().activeLines.map((line) => {
       if (line.productId === productId) {
-        const subtotal = quantity * line.unitPriceUsd;
-        const taxAmount = line.isExempt ? 0 : subtotal * (line.taxRate / 100);
+        const subtotal = round2(quantity * line.unitPriceUsd);
+        const taxAmount = line.isExempt ? 0 : round2(subtotal * (line.taxRate / 100));
         return {
           ...line,
           quantity,
           subtotalUsd: subtotal,
           taxAmountUsd: taxAmount,
-          totalUsd: subtotal + taxAmount,
+          totalUsd: round2(subtotal + taxAmount),
         };
       }
       return line;
@@ -152,12 +145,9 @@ export const useCartStore = create<CartState>((set, get) => ({
     set({
       activeLines: [],
       activeCustomer: null,
-      frozenRate: null,
-      exchangeRateId: null,
     });
   },
 
-  // Poner en espera el carrito actual (Held Cart)
   parkCurrentCart: (label) => {
     const lines = get().activeLines;
     if (lines.length === 0) {
@@ -175,7 +165,7 @@ export const useCartStore = create<CartState>((set, get) => ({
       label: autoLabel,
       lines: [...lines],
       customer: get().activeCustomer,
-      frozenRate: get().frozenRate || 52.5,
+      frozenRate: get().frozenRate || 0,
       exchangeRateId: get().exchangeRateId || '',
       createdAt: new Date(),
       totalUsd: get().getTotalUsd(),
@@ -185,19 +175,15 @@ export const useCartStore = create<CartState>((set, get) => ({
       heldCarts: [...heldCarts, newHold],
       activeLines: [],
       activeCustomer: null,
-      frozenRate: null,
-      exchangeRateId: null,
     });
 
     return { success: true };
   },
 
-  // Reanudar una cuenta abierta exactamente como estaba
   resumeHeldCart: (heldCartId) => {
     const target = get().heldCarts.find((h) => h.id === heldCartId);
     if (!target) return;
 
-    // Si había un carrito activo con líneas, se pone en espera automáticamente
     if (get().activeLines.length > 0) {
       get().parkCurrentCart();
     }
@@ -205,8 +191,8 @@ export const useCartStore = create<CartState>((set, get) => ({
     set({
       activeLines: target.lines,
       activeCustomer: target.customer,
-      frozenRate: target.frozenRate,
-      exchangeRateId: target.exchangeRateId,
+      frozenRate: target.frozenRate || get().frozenRate,
+      exchangeRateId: target.exchangeRateId || get().exchangeRateId,
       heldCarts: get().heldCarts.filter((h) => h.id !== heldCartId),
     });
   },
@@ -215,12 +201,11 @@ export const useCartStore = create<CartState>((set, get) => ({
     set({ heldCarts: get().heldCarts.filter((h) => h.id !== heldCartId) });
   },
 
-  // Totales
-  getSubtotalUsd: () => get().activeLines.reduce((acc, l) => acc + l.subtotalUsd, 0),
-  getTaxAmountUsd: () => get().activeLines.reduce((acc, l) => acc + l.taxAmountUsd, 0),
-  getTotalUsd: () => get().getSubtotalUsd() + get().getTaxAmountUsd(),
+  getSubtotalUsd: () => round2(get().activeLines.reduce((acc, l) => acc + l.subtotalUsd, 0)),
+  getTaxAmountUsd: () => round2(get().activeLines.reduce((acc, l) => acc + l.taxAmountUsd, 0)),
+  getTotalUsd: () => round2(get().getSubtotalUsd() + get().getTaxAmountUsd()),
   getTotalBs: () => {
-    const rate = get().frozenRate || 52.5;
-    return get().getTotalUsd() * rate;
+    const rate = get().frozenRate || 0;
+    return round2(get().getTotalUsd() * rate);
   },
 }));

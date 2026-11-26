@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   StyleSheet,
   Text,
@@ -12,17 +12,21 @@ import {
   Linking,
   Image,
   Modal,
+  ActivityIndicator,
 } from 'react-native';
 import { useAuthStore } from '../../stores/auth.store';
 import { BarcodeScannerModal } from '../../components/BarcodeScannerModal';
 import { MobileScaleBarcodeUtils } from '../../utils/scale-barcode';
+import { API_BASE_URL, MobileApiService } from '../../services/api.service';
+import { NativeShareService } from '../../services/share.service';
+import { VUELTO_COLORS } from '../../theme/colors';
 
 export interface TenantEntry {
   id: string;
   slug: string;
   businessName: string;
   tradeName: string;
-  documentType: 'J' | 'V' | 'G';
+  documentType: 'J' | 'V' | 'G' | 'E';
   documentNumber: string;
   phone: string;
   email: string;
@@ -30,177 +34,177 @@ export interface TenantEntry {
   isSpecialTaxpayer: boolean;
 }
 
-export const MobileAdminDashboard: React.FC = () => {
-  const { user, toggleMode, logout } = useAuthStore();
+interface MobileAdminDashboardProps {
+  onShowOnboarding?: () => void;
+}
 
-  const [activeSection, setActiveSection] = useState<'STOCK' | 'ORDERS' | 'DEBTS' | 'SUPPLIERS' | 'SALES' | 'RATES' | 'USERS' | 'TENANTS'>('STOCK');
+function detectBarcodeType(code: string): 'EAN13' | 'EAN8' | 'CODE128' | 'UPC' | 'INTERNAL' {
+  if (/^\d{13}$/.test(code)) return 'EAN13';
+  if (/^\d{8}$/.test(code)) return 'EAN8';
+  if (/^\d{12}$/.test(code)) return 'UPC';
+  if (/^[a-zA-Z0-9\-_]{3,64}$/.test(code)) return 'CODE128';
+  return 'INTERNAL';
+}
 
+export const MobileAdminDashboard: React.FC<MobileAdminDashboardProps> = ({ onShowOnboarding }) => {
+  const { user, accessToken, refreshToken, toggleMode } = useAuthStore();
   const isSuperAdmin = user?.roleId === 'SUPER_ADMIN';
+  const hasTenantContext = Boolean(user?.tenantId);
 
-  // Escáner de inventario y formulario de producto
-  const [showAdminScanner, setShowAdminScanner] = useState(false);
-  const [scannerMode, setScannerMode] = useState<'ADJUST_STOCK' | 'NEW_PRODUCT_BARCODE'>('ADJUST_STOCK');
+  const [activeSection, setActiveSection] = useState<
+    'STOCK' | 'ORDERS' | 'DEBTS' | 'SUPPLIERS' | 'SALES' | 'RATES' | 'USERS' | 'TENANTS' | 'SECURITY'
+  >(isSuperAdmin && !hasTenantContext ? 'TENANTS' : 'STOCK');
 
-  // Modal de Nuevo Producto en Inventario
-  const [showNewProductModal, setShowNewProductModal] = useState(false);
-  const [newProdName, setNewProdName] = useState('');
-  const [newProdBarcode, setNewProdBarcode] = useState('');
-  const [newProdUnit, setNewProdUnit] = useState('unidad');
-  const [newProdCategory, setNewProdCategory] = useState('Alimentos');
-  const [newProdCost, setNewProdCost] = useState('1.00');
-  const [newProdSale, setNewProdSale] = useState('1.40');
-  const [newProdStock, setNewProdStock] = useState('20');
-  const [newProdMinStock, setNewProdMinStock] = useState('5');
-  const [newProdSupplier, setNewProdSupplier] = useState('');
+  const [loadingData, setLoadingData] = useState(false);
 
-  // Modal de Ajuste Rápido de Stock tras escaneo
-  const [scannedProductForAdjustment, setScannedProductForAdjustment] = useState<any | null>(null);
-  const [showQuickAdjustModal, setShowQuickAdjustModal] = useState(false);
-  const [quickStockAmount, setQuickStockAmount] = useState('0');
+  // Datos reales desde PostgreSQL
+  const [adminProducts, setAdminProducts] = useState<any[]>([]);
+  const [tenantsList, setTenantsList] = useState<TenantEntry[]>([]);
+  const [ordersList, setOrdersList] = useState<any[]>([]);
+  const [suppliersList, setSuppliersList] = useState<any[]>([]);
+  const [debtorsList, setDebtorsList] = useState<any[]>([]);
+  const [salesList, setSalesList] = useState<any[]>([]);
+  const [cashiersList, setCashiersList] = useState<any[]>([]);
 
-  // Catálogo de Productos con Costos, Precios y Margen en Dólares
-  const [adminProducts, setAdminProducts] = useState([
-    {
-      id: 'p-1',
-      name: 'Harina PAN Blanca 1kg',
-      barcode: '7591001001019',
-      unit: 'paquete',
-      category: 'Alimentos',
-      costPriceUsd: 0.95,
-      salePriceUsd: 1.25,
-      stock: 145,
-      minStock: 20,
-      supplier: 'Empresas Polar C.A.',
-    },
-    {
-      id: 'p-2',
-      name: 'Arroz Primor Grano Entero 1kg',
-      barcode: '7591003003035',
-      unit: 'kg',
-      category: 'Alimentos',
-      costPriceUsd: 1.10,
-      salePriceUsd: 1.50,
-      stock: 82,
-      minStock: 15,
-      supplier: 'Empresas Polar C.A.',
-    },
-    {
-      id: 'p-3',
-      name: 'Aceite de Maíz Mazeite 1L',
-      barcode: '7591004004048',
-      unit: 'L',
-      category: 'Alimentos',
-      costPriceUsd: 2.80,
-      salePriceUsd: 3.80,
-      stock: 4,
-      minStock: 10,
-      supplier: 'Alimentos Polar',
-    },
-    {
-      id: 'p-4',
-      name: 'Refresco Pepsi Cola 1.5L',
-      barcode: '7591002002026',
-      unit: 'botella',
-      category: 'Bebidas',
-      costPriceUsd: 1.35,
-      salePriceUsd: 1.90,
-      stock: 35,
-      minStock: 12,
-      supplier: 'Pepsico Alimentos',
-    },
-  ]);
-
-  // Directorio de Comercios / Tenants para el Súper Administrador
-  const [tenantsList, setTenantsList] = useState<TenantEntry[]>([
-    {
-      id: 'tenant-demo',
-      slug: 'bodega-central',
-      businessName: 'Inversiones Bodega Central C.A.',
-      tradeName: 'Bodega Central',
-      documentType: 'J',
-      documentNumber: '123456789',
-      phone: '04141234567',
-      email: 'contacto@bodegacentral.ve',
-      isActive: true,
-      isSpecialTaxpayer: true,
-    },
-    {
-      id: 'tenant-2',
-      slug: 'farmacia-vida',
-      businessName: 'Farmacia Vida y Salud C.A.',
-      tradeName: 'Farmacia Vida',
-      documentType: 'J',
-      documentNumber: '298765432',
-      phone: '04128889900',
-      email: 'info@farmaciavida.ve',
-      isActive: true,
-      isSpecialTaxpayer: false,
-    },
-  ]);
-
-  // Formulario de Nuevo Negocio (Tenant)
-  const [showAddTenantModal, setShowAddTenantModal] = useState(false);
-  const [newTenantSlug, setNewTenantSlug] = useState('');
-  const [newTenantBusinessName, setNewTenantBusinessName] = useState('');
-  const [newTenantTradeName, setNewTenantTradeName] = useState('');
-  const [newTenantDocType, setNewTenantDocType] = useState<'J' | 'V' | 'G'>('J');
-  const [newTenantDocNumber, setNewTenantDocNumber] = useState('');
-  const [newTenantPhone, setNewTenantPhone] = useState('');
-  const [newTenantEmail, setNewTenantEmail] = useState('');
-  const [newTenantIsSpecial, setNewTenantIsSpecial] = useState(false);
-
-  // Configuración de Mora Administrativa
-  const [lateFeePercent, setLateFeePercent] = useState('5.0');
-
-  // Configuración de Tasa de Cobro Activa y Régimen Fiscal
+  // Tasas en vivo y configuración
+  const [liveMonitorRates, setLiveMonitorRates] = useState({ bcv: 0, paralelo: 0, euro: 0 });
   const [activeRateSource, setActiveRateSource] = useState<'BCV' | 'PARALELO' | 'EURO' | 'CUSTOM'>('BCV');
-  const [customRate, setCustomRate] = useState('58.50');
+  const [customRate, setCustomRate] = useState('0');
   const [enableIva, setEnableIva] = useState(true);
   const [enableIgtf, setEnableIgtf] = useState(true);
   const [globalMargin, setGlobalMargin] = useState('30');
 
-  // Estado para ajuste rápido de stock
+  // Escáner de inventario y formularios
+  const [showAdminScanner, setShowAdminScanner] = useState(false);
+  const [scannerMode, setScannerMode] = useState<'ADJUST_STOCK' | 'NEW_PRODUCT_BARCODE'>('ADJUST_STOCK');
+  const [showNewProductModal, setShowNewProductModal] = useState(false);
+  const [newProdName, setNewProdName] = useState('');
+  const [newProdBarcode, setNewProdBarcode] = useState('');
+  const [newProdUnit, setNewProdUnit] = useState('UNIDAD');
+  const [newProdCost, setNewProdCost] = useState('1.00');
+  const [newProdSale, setNewProdSale] = useState('1.40');
+  const [newProdStock, setNewProdStock] = useState('20');
+  const [newProdMinStock, setNewProdMinStock] = useState('5');
+
+  const [scannedProductForAdjustment, setScannedProductForAdjustment] = useState<any | null>(null);
+  const [showQuickAdjustModal, setShowQuickAdjustModal] = useState(false);
+  const [quickStockAmount, setQuickStockAmount] = useState('0');
+
+  // Ajuste manual stock
   const [adjustProductId, setAdjustProductId] = useState('');
   const [adjustQty, setAdjustQty] = useState('');
   const [adjustReason, setAdjustReason] = useState('');
 
-  // Estado para nuevo vendedor
-  const [newCashierUsername, setNewCashierUsername] = useState('');
-  const [newCashierName, setNewCashierName] = useState('');
-
-  // Estado para nuevo pedido a proveedor
-  const [newOrderSupName, setNewOrderSupName] = useState('Empresas Polar C.A.');
-  const [newOrderSupPhone, setNewOrderSupPhone] = useState('04141234567');
-  const [newOrderProdName, setNewOrderProdName] = useState('Harina PAN Blanca 1kg');
-  const [newOrderQty, setNewOrderQty] = useState('50');
-  const [newOrderCost, setNewOrderCost] = useState('0.95');
-
-  // Estado para nuevo proveedor
-  const [newSupName, setNewSupName] = useState('');
+  // Nuevo proveedor
+  const [newSupDocType, setNewSupDocType] = useState<'J' | 'G' | 'V' | 'E'>('J');
   const [newSupRif, setNewSupRif] = useState('');
+  const [newSupName, setNewSupName] = useState('');
   const [newSupPhone, setNewSupPhone] = useState('');
 
-  // Lista de Pedidos
-  const [ordersList, setOrdersList] = useState([
-    {
-      id: 'oc-1',
-      number: 'OC-2026-0001',
-      supplier: 'Empresas Polar C.A.',
-      phone: '04141234567',
-      totalUsd: 114.00,
-      status: 'SENT_WHATSAPP',
-      items: '60 unids Harina PAN + 20 unids Aceite Mazeite',
-    },
-  ]);
+  // Nuevo tenant (SUPER_ADMIN)
+  const [showAddTenantModal, setShowAddTenantModal] = useState(false);
+  const [newTenantSlug, setNewTenantSlug] = useState('');
+  const [newTenantBusinessName, setNewTenantBusinessName] = useState('');
+  const [newTenantTradeName, setNewTenantTradeName] = useState('');
+  const [newTenantDocType, setNewTenantDocType] = useState<'J' | 'V' | 'G' | 'E'>('J');
+  const [newTenantDocNumber, setNewTenantDocNumber] = useState('');
+  const [newTenantPhone, setNewTenantPhone] = useState('');
+  const [newTenantEmail, setNewTenantEmail] = useState('');
+  const [newTenantIsSpecial, setNewTenantIsSpecial] = useState(false);
+  const [newTenantAdminUser, setNewTenantAdminUser] = useState('');
+  const [newTenantAdminPass, setNewTenantAdminPass] = useState('');
 
-  // Lista de Proveedores
-  const [suppliersList, setSuppliersList] = useState([
-    { id: 's-1', name: 'Empresas Polar C.A.', rif: 'J-000413129', phone: '04141234567', creditDays: 15 },
-    { id: 's-2', name: 'Pepsico Alimentos Venezuela', rif: 'J-300854128', phone: '04160001122', creditDays: 21 },
-    { id: 's-3', name: 'Distribuidora Lácteos Los Andes', rif: 'G-200055441', phone: '04129876543', creditDays: 7 },
-  ]);
+  // Cambio de contraseña
+  const [curPassword, setCurPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [changingPwd, setChangingPwd] = useState(false);
 
-  // TODO(device-verify): Expo camera scanning, audio beep, torch toggle and haptics require physical Android/iOS device validation.
+  const loadDashboardData = useCallback(async () => {
+    if (!accessToken) return;
+    setLoadingData(true);
+    try {
+      const monitorPromise = MobileApiService.getExchangeRates(accessToken).catch(() => null);
+      if (isSuperAdmin) {
+        MobileApiService.getSuperAdminTenants()
+          .then((list) => setTenantsList(Array.isArray(list) ? list : []))
+          .catch(() => {});
+      }
+
+      const mRates = await monitorPromise;
+      if (mRates) {
+        setLiveMonitorRates({
+          bcv: Number(mRates.bcv) || 0,
+          paralelo: Number(mRates.paralelo) || 0,
+          euro: Number(mRates.euro) || 0,
+        });
+      }
+
+      if (!hasTenantContext) return;
+
+      const [prods, sups, ords, debts, sls, cashiers, cfg] = await Promise.allSettled([
+        MobileApiService.getProducts(accessToken),
+        MobileApiService.getSuppliers(),
+        MobileApiService.getPurchaseOrders(),
+        MobileApiService.getDebtors(),
+        MobileApiService.getSales(),
+        MobileApiService.getCashiersLive(),
+        MobileApiService.getConfig(),
+      ]);
+
+      if (prods.status === 'fulfilled') {
+        const arr = Array.isArray(prods.value) ? prods.value : prods.value?.products || [];
+        setAdminProducts(
+          arr.map((p: any) => ({
+            id: p.id,
+            name: p.name,
+            barcode: p.barcode || p.sku || p.id,
+            unit: p.unitOfMeasure || 'UNIDAD',
+            category: p.categoryName || 'General',
+            costPriceUsd: parseFloat(p.costPriceUsd) || 0,
+            salePriceUsd: parseFloat(p.salePriceUsd) || 0,
+            stock: parseFloat(p.stock || '0') || 0,
+            minStock: parseFloat(p.minStockAlert || '5') || 5,
+            supplier: p.supplierName || 'Sin proveedor',
+            supplierPhone: p.supplierPhone || '',
+          }))
+        );
+      }
+
+      if (sups.status === 'fulfilled') {
+        setSuppliersList(Array.isArray(sups.value) ? sups.value : []);
+      }
+      if (ords.status === 'fulfilled') {
+        setOrdersList(Array.isArray(ords.value) ? ords.value : []);
+      }
+      if (debts.status === 'fulfilled') {
+        setDebtorsList(Array.isArray(debts.value) ? debts.value : []);
+      }
+      if (sls.status === 'fulfilled') {
+        setSalesList(Array.isArray(sls.value) ? sls.value : []);
+      }
+      if (cashiers.status === 'fulfilled') {
+        setCashiersList(Array.isArray(cashiers.value) ? cashiers.value : []);
+      }
+      if (cfg.status === 'fulfilled' && cfg.value) {
+        if (cfg.value.activeExchangeRateSource) {
+          setActiveRateSource(cfg.value.activeExchangeRateSource);
+        }
+        if (cfg.value.customExchangeRate) {
+          setCustomRate(String(cfg.value.customExchangeRate));
+        }
+        if (typeof cfg.value.enableIva === 'boolean') setEnableIva(cfg.value.enableIva);
+        if (typeof cfg.value.enableIgtf === 'boolean') setEnableIgtf(cfg.value.enableIgtf);
+      }
+    } finally {
+      setLoadingData(false);
+    }
+  }, [accessToken, isSuperAdmin, hasTenantContext]);
+
+  useEffect(() => {
+    loadDashboardData();
+  }, [loadDashboardData]);
+
   const handleAdminScanned = (scannedCode: string, _format: string) => {
     const clean = scannedCode.trim();
     if (!clean) return;
@@ -210,23 +214,17 @@ export const MobileAdminDashboard: React.FC = () => {
         (p) => p.barcode === clean || p.barcode.toLowerCase() === clean.toLowerCase()
       );
       if (duplicate) {
-        Alert.alert(
-          '⚠️ Código Duplicado',
-          `El código ${clean} ya está asignado a "${duplicate.name}". Por favor escanee o asigne un código único.`
-        );
+        Alert.alert('Código Duplicado', `El código ${clean} ya pertenece a "${duplicate.name}".`);
         setShowAdminScanner(false);
         return;
       }
       setNewProdBarcode(clean);
       setShowAdminScanner(false);
-      Alert.alert('✅ Código Asignado', `Código de barras: ${clean}`);
       return;
     }
 
-    // Modo Ajuste Rápido de Stock
     const scaleInfo = MobileScaleBarcodeUtils.parseScaleBarcode(clean);
     const lookupCode = scaleInfo.isScaleBarcode && scaleInfo.sku ? scaleInfo.sku : clean;
-
     const found = adminProducts.find(
       (p) => p.barcode === lookupCode || p.barcode === clean || p.id.includes(lookupCode)
     );
@@ -237,256 +235,261 @@ export const MobileAdminDashboard: React.FC = () => {
       setQuickStockAmount(String(found.stock));
       setShowQuickAdjustModal(true);
     } else {
-      Alert.alert(
-        'Producto No Encontrado',
-        `El código ${clean} no está registrado en el inventario.`
-      );
+      Alert.alert('Producto No Encontrado', `El código ${clean} no está registrado.`);
     }
   };
 
-  const handleApplyQuickStockChange = (delta: number) => {
-    const current = parseInt(quickStockAmount, 10) || 0;
-    const updated = Math.max(0, current + delta);
-    setQuickStockAmount(String(updated));
-  };
-
-  const handleSaveQuickStockAdjustment = () => {
+  const handleSaveQuickStockAdjustment = async () => {
     if (!scannedProductForAdjustment) return;
-    const newStockVal = parseInt(quickStockAmount, 10);
+    const newStockVal = parseFloat(quickStockAmount);
     if (isNaN(newStockVal) || newStockVal < 0) {
       Alert.alert('Valor Inválido', 'Ingrese una cantidad válida.');
       return;
     }
-    setAdminProducts((prev) =>
-      prev.map((p) =>
-        p.id === scannedProductForAdjustment.id ? { ...p, stock: newStockVal } : p
-      )
-    );
-    setShowQuickAdjustModal(false);
-    Alert.alert(
-      'Stock Actualizado',
-      `El stock de "${scannedProductForAdjustment.name}" ahora es de ${newStockVal} unidades (Kardex auditado).`
-    );
+    try {
+      await MobileApiService.adjustStock(
+        scannedProductForAdjustment.id,
+        newStockVal,
+        'Ajuste rápido desde escáner móvil'
+      );
+      setShowQuickAdjustModal(false);
+      await loadDashboardData();
+      Alert.alert('✅ Stock Actualizado', `Stock de "${scannedProductForAdjustment.name}" actualizado en Kardex.`);
+    } catch (e: any) {
+      Alert.alert('Error', e.message || 'No se pudo actualizar el stock.');
+    }
   };
 
-  const handleSaveNewAdminProduct = () => {
-    if (!newProdName.trim() || !newProdBarcode.trim()) {
+  const handleSaveNewAdminProduct = async () => {
+    const cleanBarcode = newProdBarcode.trim();
+    const cleanName = newProdName.trim();
+    if (!cleanName || !cleanBarcode) {
       Alert.alert('Datos Incompletos', 'Indique el nombre y código de barras.');
       return;
     }
 
-    const cleanBarcode = newProdBarcode.trim();
-    const duplicate = adminProducts.find(
-      (p) => p.barcode === cleanBarcode || p.barcode.toLowerCase() === cleanBarcode.toLowerCase()
+    try {
+      await MobileApiService.createProduct(accessToken || '', {
+        name: cleanName,
+        unitOfMeasure: newProdUnit || 'UNIDAD',
+        costPriceUsd: parseFloat(newProdCost) || 0,
+        salePriceUsd: parseFloat(newProdSale) || 0,
+        taxRate: enableIva ? 16 : 0,
+        isExempt: !enableIva,
+        minStockAlert: parseFloat(newProdMinStock) || 5,
+        initialStock: parseFloat(newProdStock) || 0,
+        barcodes: [
+          {
+            barcode: cleanBarcode,
+            barcodeType: detectBarcodeType(cleanBarcode),
+            isPrimary: true,
+          },
+        ],
+      });
+      setShowNewProductModal(false);
+      setNewProdName('');
+      setNewProdBarcode('');
+      await loadDashboardData();
+      Alert.alert('✅ Producto Guardado', `"${cleanName}" creado en PostgreSQL.`);
+    } catch (e: any) {
+      Alert.alert('Error', e.message || 'No se pudo guardar el producto.');
+    }
+  };
+
+  const handleAdjustStockManual = async () => {
+    const target = adminProducts.find(
+      (p) => p.barcode === adjustProductId.trim() || p.name.toLowerCase().includes(adjustProductId.trim().toLowerCase())
     );
-    if (duplicate) {
-      Alert.alert('⚠️ Código Duplicado', `El código ${cleanBarcode} ya pertenece a "${duplicate.name}".`);
+    const qty = parseFloat(adjustQty);
+    if (!target || isNaN(qty) || qty < 0 || !adjustReason.trim()) {
+      Alert.alert('Datos Incompletos', 'Indique un producto existente (nombre o código), nueva cantidad y motivo.');
       return;
     }
-
-    const cost = parseFloat(newProdCost) || 1.0;
-    const sale = parseFloat(newProdSale) || 1.4;
-    const stock = parseInt(newProdStock, 10) || 10;
-    const minStock = parseInt(newProdMinStock, 10) || 5;
-
-    const newProdItem = {
-      id: `p-${Date.now()}`,
-      name: newProdName.trim(),
-      barcode: cleanBarcode,
-      unit: newProdUnit,
-      category: newProdCategory,
-      costPriceUsd: cost,
-      salePriceUsd: sale,
-      stock,
-      minStock,
-      supplier: newProdSupplier.trim() || 'Proveedor Local',
-    };
-
-    setAdminProducts([newProdItem, ...adminProducts]);
-    setShowNewProductModal(false);
-    setNewProdName('');
-    setNewProdBarcode('');
-    setNewProdCost('1.00');
-    setNewProdSale('1.40');
-    setNewProdStock('20');
-    setNewProdMinStock('5');
-    setNewProdSupplier('');
-    Alert.alert('✅ Producto Creado', `"${newProdItem.name}" ha sido agregado al inventario.`);
-  };
-
-  const handleAdjustStock = () => {
-    if (!adjustProductId || !adjustQty || !adjustReason) {
-      Alert.alert('Datos Incompletos', 'Indique el producto, la cantidad y el motivo del ajuste.');
-      return;
+    try {
+      await MobileApiService.adjustStock(target.id, qty, adjustReason.trim());
+      setAdjustProductId('');
+      setAdjustQty('');
+      setAdjustReason('');
+      await loadDashboardData();
+      Alert.alert('✅ Kardex Actualizado', `Stock de "${target.name}" ajustado a ${qty}.`);
+    } catch (e: any) {
+      Alert.alert('Error', e.message || 'No se pudo registrar el ajuste.');
     }
-    Alert.alert(
-      'Ajuste Registrado',
-      `Se ajustó el stock a ${adjustQty} unidades. Generado movimiento de Kardex y registro en Auditoría con usuario ${user?.username}.`
-    );
-    setAdjustProductId('');
-    setAdjustQty('');
-    setAdjustReason('');
   };
 
-  const handleCreateCashier = () => {
-    if (!newCashierUsername || !newCashierName) {
-      Alert.alert('Datos Incompletos', 'Indique el usuario y el nombre completo.');
-      return;
-    }
-    Alert.alert('Cajero Creado', `Usuario "${newCashierUsername}" creado exitosamente con rol VENDEDOR.`);
-    setNewCashierUsername('');
-    setNewCashierName('');
-  };
-
-  const handleCreateOrder = () => {
-    const qty = parseFloat(newOrderQty) || 10;
-    const cost = parseFloat(newOrderCost) || 1.0;
-    const total = qty * cost;
-    const newOrd = {
-      id: `oc-${Date.now()}`,
-      number: `OC-2026-${Math.floor(1000 + Math.random() * 9000)}`,
-      supplier: newOrderSupName,
-      phone: newOrderSupPhone,
-      totalUsd: total,
-      status: 'DRAFT',
-      items: `${qty} unids x ${newOrderProdName}`,
-    };
-    setOrdersList([newOrd, ...ordersList]);
-    Alert.alert('Orden Creada', `Orden ${newOrd.number} registrada para ${newOrd.supplier}.`);
-  };
-
-  const handleCreateSupplier = () => {
-    if (!newSupName || !newSupRif || !newSupPhone) {
-      Alert.alert('Datos Incompletos', 'Nombre, RIF y Teléfono son obligatorios.');
-      return;
-    }
-    const newSup = {
-      id: `sup-${Date.now()}`,
-      name: newSupName,
-      rif: newSupRif,
-      phone: newSupPhone,
-      creditDays: 15,
-    };
-    setSuppliersList([...suppliersList, newSup]);
-    Alert.alert('Proveedor Guardado', `Proveedor "${newSup.name}" agregado.`);
-    setNewSupName('');
-    setNewSupRif('');
-    setNewSupPhone('');
-  };
-
-  const handleApplyGlobalMargin = () => {
+  const handleApplyGlobalMargin = async () => {
     const margin = parseFloat(globalMargin);
     if (isNaN(margin) || margin <= 0) {
-      Alert.alert('Margen Inválido', 'Ingrese un porcentaje válido mayor a 0 (ej. 30).');
+      Alert.alert('Margen Inválido', 'Ingrese un porcentaje mayor a 0.');
       return;
     }
-    const factor = 1 + margin / 100;
-    const updated = adminProducts.map((p) => {
-      const newSale = +(p.costPriceUsd * factor).toFixed(2);
-      return { ...p, salePriceUsd: newSale };
-    });
-    setAdminProducts(updated);
-    const avgGain = updated.reduce((a, b) => a + (b.salePriceUsd - b.costPriceUsd), 0) / updated.length;
-    Alert.alert(
-      'Margen Global Aplicado',
-      `Margen del ${margin}% aplicado a todo el inventario.\nGanancia neta promedio estimada: +$${avgGain.toFixed(2)} USD por producto.`
-    );
+    try {
+      await MobileApiService.applyGlobalMargin(margin);
+      await loadDashboardData();
+      Alert.alert('✅ Margen Aplicado', `Margen del ${margin}% aplicado al catálogo en PostgreSQL.`);
+    } catch (e: any) {
+      Alert.alert('Error', e.message || 'No se pudo aplicar el margen.');
+    }
   };
 
-  const handleCreateTenant = () => {
-    if (!newTenantBusinessName || !newTenantDocNumber) {
-      Alert.alert('Datos Incompletos', 'Indique la razón social y número de RIF del negocio.');
+  const handleCreateSupplier = async () => {
+    const cleanDoc = newSupRif.replace(/\D/g, '').trim();
+    if (!newSupName.trim() || cleanDoc.length < 5 || newSupPhone.trim().length < 7) {
+      Alert.alert('Datos Incompletos', 'Razón social, documento (mín. 5 dígitos) y teléfono son obligatorios.');
       return;
     }
-    const slug = newTenantSlug.trim() || newTenantBusinessName.toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 20);
-    const created = {
-      id: `t-${Date.now()}`,
-      slug,
-      businessName: newTenantBusinessName,
-      tradeName: newTenantTradeName || newTenantBusinessName,
-      documentType: newTenantDocType,
-      documentNumber: newTenantDocNumber,
-      phone: newTenantPhone || '04140000000',
-      email: newTenantEmail || `${slug}@vuelto.app`,
-      isActive: true,
-      isSpecialTaxpayer: newTenantIsSpecial,
-    };
-    setTenantsList([created, ...tenantsList]);
-    setShowAddTenantModal(false);
-    setNewTenantBusinessName('');
-    setNewTenantDocNumber('');
-    setNewTenantSlug('');
-    setNewTenantTradeName('');
-    setNewTenantPhone('');
-    setNewTenantEmail('');
-    Alert.alert('Negocio Creado', `El comercio "${created.tradeName}" fue registrado exitosamente en la plataforma.`);
+    try {
+      await MobileApiService.createSupplier({
+        documentType: newSupDocType,
+        documentNumber: cleanDoc,
+        name: newSupName.trim(),
+        phone: newSupPhone.trim(),
+      });
+      setNewSupName('');
+      setNewSupRif('');
+      setNewSupPhone('');
+      await loadDashboardData();
+      Alert.alert('✅ Proveedor Registrado', 'Proveedor guardado en el servidor.');
+    } catch (e: any) {
+      Alert.alert('Error', e.message || 'No se pudo crear el proveedor.');
+    }
   };
 
-  const handleToggleTenant = (id: string) => {
-    setTenantsList(
-      tenantsList.map((t) => (t.id === id ? { ...t, isActive: !t.isActive } : t))
-    );
+  const handleCreateTenant = async () => {
+    if (!newTenantBusinessName.trim() || newTenantDocNumber.trim().length < 5 || !newTenantPhone.trim() || !newTenantEmail.trim()) {
+      Alert.alert('Datos Incompletos', 'Razón social, RIF (mín. 5 dígitos), teléfono y correo son obligatorios.');
+      return;
+    }
+    const slug =
+      newTenantSlug.trim() ||
+      newTenantBusinessName
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '')
+        .slice(0, 30);
+
+    try {
+      await MobileApiService.createTenant({
+        slug,
+        businessName: newTenantBusinessName.trim(),
+        tradeName: newTenantTradeName.trim() || newTenantBusinessName.trim(),
+        documentType: newTenantDocType,
+        documentNumber: newTenantDocNumber.trim(),
+        phone: newTenantPhone.trim(),
+        email: newTenantEmail.trim(),
+        isSpecialTaxpayer: newTenantIsSpecial,
+        ...(newTenantAdminUser.trim() ? { adminUsername: newTenantAdminUser.trim() } : {}),
+        ...(newTenantAdminPass.trim() ? { adminPassword: newTenantAdminPass.trim() } : {}),
+      });
+      setShowAddTenantModal(false);
+      setNewTenantSlug('');
+      setNewTenantBusinessName('');
+      setNewTenantTradeName('');
+      setNewTenantDocNumber('');
+      setNewTenantPhone('');
+      setNewTenantEmail('');
+      setNewTenantAdminUser('');
+      setNewTenantAdminPass('');
+      await loadDashboardData();
+      Alert.alert('✅ Negocio Creado', 'Comercio registrado y habilitado en PostgreSQL.');
+    } catch (e: any) {
+      Alert.alert('Error', e.message || 'No se pudo registrar el negocio.');
+    }
   };
 
-  const handleWhatsAppDebtReminder = (customer: any) => {
-    const surcharge = customer.isOverdue ? (customer.balanceDueUsd * (parseFloat(lateFeePercent) / 100)) : 0;
-    const totalToPay = customer.balanceDueUsd + surcharge;
-    const msg = `Estimado(a) ${customer.name}, le recordamos que presenta un saldo pendiente con ${user?.businessName} por $${customer.balanceDueUsd.toFixed(2)} USD.${customer.isOverdue ? ` Incluye recargo por mora del ${lateFeePercent}% ($${surcharge.toFixed(2)}). Total a cancelar: $${totalToPay.toFixed(2)} USD.` : ''} Agradecemos gestionar su pago.`;
-    const cleanPhone = customer.phone.replace(/\D/g, '');
-    const url = `https://wa.me/${cleanPhone}?text=${encodeURIComponent(msg)}`;
-    Linking.openURL(url).catch(() => {
-      Alert.alert('WhatsApp', `Mensaje generado:\n\n${msg}`);
-    });
+  const handleToggleTenant = async (id: string) => {
+    try {
+      await MobileApiService.toggleTenantActive(id);
+      await loadDashboardData();
+    } catch (e: any) {
+      Alert.alert('Error', e.message || 'No se pudo cambiar el estado.');
+    }
   };
 
-  const handleWhatsAppOrder = (order: any) => {
-    const msg = `*ORDEN DE COMPRA: ${order.number}*\nComercio: ${user?.businessName}\nProveedor: ${order.supplier}\n\n*Pedido:* ${order.items}\n*Total Estimado:* $${order.totalUsd.toFixed(2)} USD\n\nAgradecemos confirmación de despacho.`;
-    const cleanPhone = order.phone.replace(/\D/g, '');
-    const url = `https://wa.me/${cleanPhone}?text=${encodeURIComponent(msg)}`;
-    Linking.openURL(url).catch(() => {
-      Alert.alert('WhatsApp', msg);
-    });
+  const handleChangePassword = async () => {
+    if (!curPassword || !newPassword || newPassword !== confirmPassword) {
+      Alert.alert('Validación', 'Verifica la contraseña actual y asegúrate que las nuevas coincidan.');
+      return;
+    }
+    setChangingPwd(true);
+    try {
+      await MobileApiService.changePassword(curPassword, newPassword, confirmPassword);
+      setCurPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      Alert.alert('✅ Contraseña Actualizada', 'Tu contraseña se cambió de forma segura.');
+    } catch (e: any) {
+      Alert.alert('Error', e.message || 'No se pudo actualizar la contraseña.');
+    } finally {
+      setChangingPwd(false);
+    }
   };
+
+  const totalCostValuation = adminProducts.reduce((acc, p) => acc + p.costPriceUsd * p.stock, 0);
+  const totalRetailValuation = adminProducts.reduce((acc, p) => acc + p.salePriceUsd * p.stock, 0);
+  const avgMarginPct =
+    totalRetailValuation > 0
+      ? (((totalRetailValuation - totalCostValuation) / totalRetailValuation) * 100).toFixed(1)
+      : '0.0';
+  const lowStockItems = adminProducts.filter((p) => p.stock <= p.minStock);
+
+  const navItems = [
+    ...(isSuperAdmin ? [{ id: 'TENANTS', label: '👑 Negocios' }] : []),
+    ...(hasTenantContext
+      ? [
+          { id: 'STOCK', label: 'Stock ($)' },
+          { id: 'SALES', label: 'Ventas' },
+          { id: 'SUPPLIERS', label: 'Proveed.' },
+          { id: 'ORDERS', label: 'Pedidos' },
+          { id: 'DEBTS', label: 'Cobros' },
+          { id: 'RATES', label: 'Tasas/Fiscal' },
+          { id: 'USERS', label: 'Cajeros' },
+        ]
+      : []),
+    { id: 'SECURITY', label: 'Cuenta' },
+  ];
 
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#0B3B49" />
+      <StatusBar barStyle="light-content" backgroundColor={VUELTO_COLORS.deep} />
 
-      {/* Header con Switch a Modo POS y Salir */}
+      {/* Header */}
       <View style={styles.header}>
-        <View>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+        <View style={{ flex: 1 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
             <Image
               source={require('../../../assets/vuelto-icon.jpg')}
-              style={{ width: 26, height: 26, borderRadius: 6 }}
+              style={{ width: 28, height: 28, borderRadius: 7 }}
             />
             <Text style={styles.title}>VUELTO ADMIN</Text>
             <View style={styles.adminPill}>
-              <Text style={styles.adminPillText}>👑 TOTAL</Text>
+              <Text style={styles.adminPillText}>{isSuperAdmin ? 'SUPER ADMIN' : 'ADMIN'}</Text>
             </View>
           </View>
-          <Text style={styles.subtitle}>{user?.businessName} ({user?.fullName})</Text>
+          <Text style={styles.subtitle}>
+            {user?.businessName || 'Plataforma Central'} • {user?.fullName}
+          </Text>
         </View>
 
         <View style={styles.headerRight}>
-          <TouchableOpacity
-            style={styles.posSwitchBtn}
-            onPress={() => toggleMode('POS')}
-          >
-            <Text style={styles.posSwitchBtnText}>Ir a POS</Text>
-          </TouchableOpacity>
+          {hasTenantContext && (
+            <TouchableOpacity style={styles.posSwitchBtn} onPress={() => toggleMode('POS')}>
+              <Text style={styles.posSwitchBtnText}>Ir a POS</Text>
+            </TouchableOpacity>
+          )}
 
           <TouchableOpacity
             style={styles.logoutBtn}
             onPress={() => {
-              Alert.alert(
-                'Cerrar Sesión',
-                '¿Deseas salir del panel administrador?',
-                [
-                  { text: 'Cancelar', style: 'cancel' },
-                  { text: 'Salir', style: 'destructive', onPress: () => logout() },
-                ]
-              );
+              Alert.alert('Cerrar Sesión', '¿Deseas salir de tu cuenta?', [
+                { text: 'Cancelar', style: 'cancel' },
+                {
+                  text: 'Salir',
+                  style: 'destructive',
+                  onPress: () => MobileApiService.logout(refreshToken),
+                },
+              ]);
             }}
           >
             <Text style={styles.logoutBtnText}>Salir</Text>
@@ -494,19 +497,10 @@ export const MobileAdminDashboard: React.FC = () => {
         </View>
       </View>
 
-      {/* Barra de Navegación por Pestañas */}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ maxHeight: 48, backgroundColor: '#062F3B' }}>
+      {/* Navegación */}
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.navBarScroll}>
         <View style={styles.navBar}>
-          {[
-            { id: 'STOCK', label: 'Stock ($)' },
-            { id: 'ORDERS', label: 'Pedidos' },
-            { id: 'DEBTS', label: 'Cobros' },
-            { id: 'SUPPLIERS', label: 'Proveed.' },
-            { id: 'SALES', label: 'Ventas' },
-            { id: 'RATES', label: 'Tasas' },
-            { id: 'USERS', label: 'Cajeros' },
-            ...(isSuperAdmin ? [{ id: 'TENANTS', label: '👑 Negocios' }] : []),
-          ].map((sec) => (
+          {navItems.map((sec) => (
             <TouchableOpacity
               key={sec.id}
               style={[styles.navItem, activeSection === sec.id && styles.navItemActive]}
@@ -520,341 +514,282 @@ export const MobileAdminDashboard: React.FC = () => {
         </View>
       </ScrollView>
 
+      {loadingData && (
+        <View style={{ paddingVertical: 8, alignItems: 'center' }}>
+          <ActivityIndicator color={VUELTO_COLORS.turquoise} size="small" />
+        </View>
+      )}
+
       <ScrollView style={styles.content}>
-        {/* SECCIÓN 1: STOCK E INVENTARIO CON COSTOS Y MÁRGENES (SOLO ADMIN) */}
-        {activeSection === 'STOCK' && (
+        {/* TENANTS (SUPER ADMIN) */}
+        {activeSection === 'TENANTS' && isSuperAdmin && (
           <View>
-            <Text style={styles.sectionTitle}>Control de Inventario & Márgenes</Text>
+            <Text style={styles.sectionTitle}>👑 Súper Administrador Global</Text>
             <Text style={styles.sectionDesc}>
-              Visibilidad exclusiva de costos al mayor, precios de salida y cálculo de rentabilidad.
+              Control multi-tenant en PostgreSQL: crea comercios y habilita o suspende accesos.
             </Text>
 
-            {/* Resumen de Valuación */}
             <View style={styles.kpiRow}>
               <View style={styles.kpiCard}>
-                <Text style={styles.kpiLabel}>Valuación Costo</Text>
-                <Text style={styles.kpiValue}>$368.50</Text>
+                <Text style={styles.kpiLabel}>Total Negocios</Text>
+                <Text style={styles.kpiValue}>{tenantsList.length}</Text>
               </View>
               <View style={styles.kpiCard}>
-                <Text style={styles.kpiLabel}>Margen Promedio</Text>
-                <Text style={[styles.kpiValue, { color: '#10B981' }]}>+36.8%</Text>
+                <Text style={styles.kpiLabel}>Activos</Text>
+                <Text style={[styles.kpiValue, { color: VUELTO_COLORS.turquoise }]}>
+                  {tenantsList.filter((t) => t.isActive).length}
+                </Text>
               </View>
             </View>
 
-            {/* Acciones Rápidas: Escáner para Ajustar Stock & Crear Producto */}
-            <View style={{ flexDirection: 'row', gap: 10, marginVertical: 10 }}>
+            <TouchableOpacity style={styles.primaryBtn} onPress={() => setShowAddTenantModal(true)}>
+              <Text style={styles.primaryBtnText}>➕ Crear Nuevo Negocio (Tenant)</Text>
+            </TouchableOpacity>
+
+            <View style={styles.card}>
+              <Text style={styles.cardHeader}>Directorio de Comercios</Text>
+              {tenantsList.length === 0 ? (
+                <Text style={styles.emptyText}>No hay comercios registrados aún.</Text>
+              ) : (
+                tenantsList.map((tenant) => (
+                  <View key={tenant.id} style={styles.listRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.itemTitle}>{tenant.tradeName || tenant.businessName}</Text>
+                      <Text style={styles.itemSub}>
+                        {tenant.documentType}-{tenant.documentNumber} • {tenant.phone}
+                      </Text>
+                      <Text style={{ color: tenant.isActive ? VUELTO_COLORS.turquoise : '#FCA5A5', fontSize: 10, fontWeight: '800', marginTop: 2 }}>
+                        {tenant.isActive ? '● ACTIVO' : '● SUSPENDIDO'}
+                      </Text>
+                    </View>
+                    <TouchableOpacity
+                      style={[styles.badgeBtn, tenant.isActive ? styles.badgeBtnDanger : styles.badgeBtnOk]}
+                      onPress={() => handleToggleTenant(tenant.id)}
+                    >
+                      <Text style={styles.badgeBtnText}>{tenant.isActive ? 'Suspender' : 'Activar'}</Text>
+                    </TouchableOpacity>
+                  </View>
+                ))
+              )}
+            </View>
+          </View>
+        )}
+
+        {/* STOCK */}
+        {activeSection === 'STOCK' && hasTenantContext && (
+          <View>
+            <Text style={styles.sectionTitle}>Control de Inventario & Márgenes</Text>
+
+            <View style={styles.kpiRow}>
+              <View style={styles.kpiCard}>
+                <Text style={styles.kpiLabel}>Valuación Costo</Text>
+                <Text style={styles.kpiValue}>${totalCostValuation.toFixed(2)}</Text>
+              </View>
+              <View style={styles.kpiCard}>
+                <Text style={styles.kpiLabel}>Margen Promedio</Text>
+                <Text style={[styles.kpiValue, { color: VUELTO_COLORS.turquoise }]}>+{avgMarginPct}%</Text>
+              </View>
+            </View>
+
+            <View style={{ flexDirection: 'row', gap: 10, marginBottom: 12 }}>
               <TouchableOpacity
-                style={[styles.primaryBtn, { flex: 1, backgroundColor: '#0284C7', marginTop: 0 }]}
+                style={[styles.secondaryBtn, { flex: 1 }]}
                 onPress={() => {
                   setScannerMode('ADJUST_STOCK');
                   setShowAdminScanner(true);
                 }}
               >
-                <Text style={styles.primaryBtnText}>📷 Escanear Stock</Text>
+                <Text style={styles.secondaryBtnText}>📷 Escanear Stock</Text>
               </TouchableOpacity>
-
               <TouchableOpacity
-                style={[styles.primaryBtn, { flex: 1, backgroundColor: '#10B981', marginTop: 0 }]}
+                style={[styles.primaryBtn, { flex: 1, marginBottom: 0 }]}
                 onPress={() => setShowNewProductModal(true)}
               >
                 <Text style={styles.primaryBtnText}>➕ Nuevo Producto</Text>
               </TouchableOpacity>
             </View>
 
-            {/* Fijar Margen Global de Ganancia Masivo (%) */}
             <View style={styles.card}>
-              <Text style={styles.cardHeader}>Fijar Margen de Ganancia Masivo (%)</Text>
-              <Text style={{ fontSize: 11, color: '#94A3B8', marginBottom: 8 }}>
-                Establece tu margen sobre el costo al mayor para todo el catálogo sin definirlo uno por uno:
-              </Text>
+              <Text style={styles.cardHeader}>Margen de Ganancia Global (%)</Text>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                 <TextInput
-                  style={[styles.input, { width: 70, marginBottom: 0, textAlign: 'center', color: '#A3E635', fontWeight: 'bold' }]}
+                  style={[styles.input, { width: 72, marginBottom: 0, textAlign: 'center', color: VUELTO_COLORS.turquoise, fontWeight: '800' }]}
                   value={globalMargin}
                   onChangeText={setGlobalMargin}
                   keyboardType="numeric"
                 />
-                <Text style={{ color: '#A3E635', fontWeight: 'bold', fontSize: 14 }}>%</Text>
-                <TouchableOpacity
-                  style={[styles.primaryBtn, { flex: 1 }]}
-                  onPress={handleApplyGlobalMargin}
-                >
-                  <Text style={styles.primaryBtnText}>⚡ Aplicar a Todo el Catálogo</Text>
+                <Text style={{ color: VUELTO_COLORS.turquoise, fontWeight: '800' }}>%</Text>
+                <TouchableOpacity style={[styles.primaryBtn, { flex: 1, marginBottom: 0 }]} onPress={handleApplyGlobalMargin}>
+                  <Text style={styles.primaryBtnText}>⚡ Aplicar a Todo</Text>
                 </TouchableOpacity>
               </View>
             </View>
 
-            {/* Catálogo Valorizado con Margen en Dólares ($) */}
             <View style={styles.card}>
-              <Text style={styles.cardHeader}>Catálogo Valorizado & Margen en Dólares ($)</Text>
-              <Text style={{ fontSize: 11, color: '#94A3B8', marginBottom: 10 }}>
-                Visualización exclusiva para el Administrador del beneficio neto en divisas por unidad:
-              </Text>
-
-              {adminProducts.map((p) => {
-                const profitUsd = p.salePriceUsd - p.costPriceUsd;
-                const marginPercent = ((profitUsd / p.salePriceUsd) * 100).toFixed(1);
-                return (
-                  <View key={p.id} style={styles.productAdminRow}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.productAdminName}>{p.name}</Text>
-                      <Text style={styles.productAdminBarcode}>{p.barcode} • {p.category} ({p.unit})</Text>
-                      <View style={{ flexDirection: 'row', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
-                        <Text style={{ color: '#94A3B8', fontSize: 11 }}>Costo: ${p.costPriceUsd.toFixed(2)}</Text>
-                        <Text style={{ color: '#F8FAFC', fontSize: 11, fontWeight: 'bold' }}>Venta: ${p.salePriceUsd.toFixed(2)}</Text>
-                        <Text style={{ color: '#38BDF8', fontSize: 11 }}>Stock: {p.stock} ud</Text>
+              <Text style={styles.cardHeader}>Catálogo Real ({adminProducts.length})</Text>
+              {adminProducts.length === 0 ? (
+                <Text style={styles.emptyText}>No hay productos cargados todavía.</Text>
+              ) : (
+                adminProducts.map((p) => {
+                  const profitUsd = p.salePriceUsd - p.costPriceUsd;
+                  const marginPct = p.salePriceUsd > 0 ? ((profitUsd / p.salePriceUsd) * 100).toFixed(1) : '0.0';
+                  return (
+                    <View key={p.id} style={styles.listRow}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.itemTitle}>{p.name}</Text>
+                        <Text style={styles.itemSub}>
+                          {p.barcode} • Costo: ${p.costPriceUsd.toFixed(2)} • Venta: ${p.salePriceUsd.toFixed(2)} • Stock: {p.stock}
+                        </Text>
+                      </View>
+                      <View style={styles.profitPill}>
+                        <Text style={styles.profitPillVal}>+${profitUsd.toFixed(2)}</Text>
+                        <Text style={styles.profitPillPct}>+{marginPct}%</Text>
                       </View>
                     </View>
-                    <View style={styles.productAdminProfitBadge}>
-                      <Text style={styles.productAdminProfitVal}>+${profitUsd.toFixed(2)} USD</Text>
-                      <Text style={styles.productAdminProfitPct}>+{marginPercent}%</Text>
+                  );
+                })
+              )}
+            </View>
+
+            {lowStockItems.length > 0 && (
+              <View style={[styles.card, { borderColor: VUELTO_COLORS.danger }]}>
+                <Text style={[styles.cardHeader, { color: '#FCA5A5' }]}>⚠️ Stock Bajo ({lowStockItems.length})</Text>
+                {lowStockItems.map((it) => (
+                  <View key={it.id} style={styles.listRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.itemTitle}>{it.name}</Text>
+                      <Text style={{ color: '#FCA5A5', fontSize: 11 }}>
+                        Stock: {it.stock} (Mín: {it.minStock})
+                      </Text>
                     </View>
+                    {it.supplierPhone ? (
+                      <TouchableOpacity
+                        style={styles.badgeBtnOk}
+                        onPress={() => {
+                          const msg = `Hola ${it.supplier}, necesitamos reposición de ${it.name}.`;
+                          Linking.openURL(`https://wa.me/${it.supplierPhone.replace(/\D/g, '')}?text=${encodeURIComponent(msg)}`);
+                        }}
+                      >
+                        <Text style={styles.badgeBtnText}>WhatsApp</Text>
+                      </TouchableOpacity>
+                    ) : null}
                   </View>
-                );
-              })}
-            </View>
+                ))}
+              </View>
+            )}
 
-            {/* Alertas de Stock Bajo con Proveedores y WhatsApp */}
-            <View style={[styles.card, { borderColor: '#EF4444' }]}>
-              <Text style={[styles.cardHeader, { color: '#EF4444' }]}>⚠️ Alertas de Reposición Urgente</Text>
-              {[
-                { name: 'Aceite de Maíz Mazeite 1L', stock: 4, min: 10, cost: 2.80, supplier: 'Alimentos Polar', phone: '04141234567' },
-              ].map((it, idx) => (
-                <View key={idx} style={{ marginTop: 8, padding: 10, backgroundColor: '#0F172A', borderRadius: 8 }}>
-                  <Text style={{ color: '#F8FAFC', fontWeight: 'bold' }}>{it.name}</Text>
-                  <Text style={{ color: '#EF4444', fontSize: 12 }}>Stock Crítico: {it.stock} unids (Mínimo: {it.min})</Text>
-                  <Text style={{ color: '#94A3B8', fontSize: 11, marginTop: 2 }}>Proveedor: {it.supplier} • Costo Mayor: ${it.cost.toFixed(2)}</Text>
-                  <TouchableOpacity
-                    style={styles.orderWaBtn}
-                    onPress={() => {
-                      const msg = `Hola ${it.supplier}, necesitamos orden de reposición de 20 unids de ${it.name}. Envíenos cotización a ${user?.businessName}.`;
-                      Linking.openURL(`https://wa.me/${it.phone}?text=${encodeURIComponent(msg)}`).catch(() => Alert.alert('WhatsApp', msg));
-                    }}
-                  >
-                    <Text style={styles.orderWaBtnText}>📲 Ordenar Reposición por WhatsApp</Text>
-                  </TouchableOpacity>
-                </View>
-              ))}
-            </View>
-
-            {/* Ajuste de Inventario con Kardex */}
             <View style={styles.card}>
-              <Text style={styles.cardHeader}>Ajuste Físico de Stock (Kardex)</Text>
-              <Text style={styles.fieldLabel}>Producto o Código de Barras:</Text>
+              <Text style={styles.cardHeader}>Ajuste Manual de Kardex</Text>
               <TextInput
                 style={styles.input}
-                placeholder="7591001001019 (Harina PAN)"
-                placeholderTextColor="#64748B"
+                placeholder="Código de barra o nombre del producto"
+                placeholderTextColor={VUELTO_COLORS.subtle}
                 value={adjustProductId}
                 onChangeText={setAdjustProductId}
               />
-
-              <Text style={styles.fieldLabel}>Nueva Cantidad Contada:</Text>
               <TextInput
                 style={styles.input}
-                placeholder="ej. 150"
-                placeholderTextColor="#64748B"
+                placeholder="Nueva cantidad contada"
+                placeholderTextColor={VUELTO_COLORS.subtle}
                 keyboardType="numeric"
                 value={adjustQty}
                 onChangeText={setAdjustQty}
               />
-
-              <Text style={styles.fieldLabel}>Motivo del Ajuste (Auditoría SENIAT):</Text>
               <TextInput
                 style={styles.input}
-                placeholder="Conteo de inventario físico mensual"
-                placeholderTextColor="#64748B"
+                placeholder="Motivo del ajuste (auditoría)"
+                placeholderTextColor={VUELTO_COLORS.subtle}
                 value={adjustReason}
                 onChangeText={setAdjustReason}
               />
-
-              <TouchableOpacity style={styles.primaryBtn} onPress={handleAdjustStock}>
+              <TouchableOpacity style={styles.primaryBtn} onPress={handleAdjustStockManual}>
                 <Text style={styles.primaryBtnText}>Registrar Ajuste en Kardex</Text>
               </TouchableOpacity>
             </View>
           </View>
         )}
 
-        {/* SECCIÓN 2: PEDIDOS A PROVEEDORES (PURCHASE ORDERS) */}
-        {activeSection === 'ORDERS' && (
+        {/* VENTAS */}
+        {activeSection === 'SALES' && hasTenantContext && (
           <View>
-            <Text style={styles.sectionTitle}>Órdenes de Compra a Proveedores</Text>
-            <Text style={styles.sectionDesc}>
-              Crea pedidos de reposición, envíalos por WhatsApp y cárgalos a stock al recibirlos.
-            </Text>
-
-            {/* Crear Pedido */}
-            <View style={styles.card}>
-              <Text style={styles.cardHeader}>Crear Nueva Orden de Compra</Text>
-              <Text style={styles.fieldLabel}>Proveedor:</Text>
-              <TextInput
-                style={styles.input}
-                value={newOrderSupName}
-                onChangeText={setNewOrderSupName}
-              />
-              <Text style={styles.fieldLabel}>Teléfono WhatsApp:</Text>
-              <TextInput
-                style={styles.input}
-                value={newOrderSupPhone}
-                onChangeText={setNewOrderSupPhone}
-              />
-              <Text style={styles.fieldLabel}>Producto a Solicitar:</Text>
-              <TextInput
-                style={styles.input}
-                value={newOrderProdName}
-                onChangeText={setNewOrderProdName}
-              />
-              <View style={{ flexDirection: 'row', gap: 10 }}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.fieldLabel}>Cantidad:</Text>
-                  <TextInput
-                    style={styles.input}
-                    value={newOrderQty}
-                    onChangeText={setNewOrderQty}
-                    keyboardType="numeric"
-                  />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.fieldLabel}>Costo Pactado ($):</Text>
-                  <TextInput
-                    style={styles.input}
-                    value={newOrderCost}
-                    onChangeText={setNewOrderCost}
-                    keyboardType="numeric"
-                  />
-                </View>
+            <Text style={styles.sectionTitle}>Facturas Emitidas</Text>
+            {salesList.length === 0 ? (
+              <View style={styles.card}>
+                <Text style={styles.emptyText}>No hay facturas registradas aún.</Text>
               </View>
-              <TouchableOpacity style={styles.primaryBtn} onPress={handleCreateOrder}>
-                <Text style={styles.primaryBtnText}>Guardar Orden de Compra</Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Listado de Pedidos */}
-            <View style={styles.card}>
-              <Text style={styles.cardHeader}>Órdenes Emitidas</Text>
-              {ordersList.map((ord) => (
-                <View key={ord.id} style={styles.debtCard}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.customerName}>{ord.number}</Text>
-                    <Text style={styles.customerDoc}>{ord.supplier} ({ord.items})</Text>
-                    <Text style={[styles.debtAmount, { color: '#10B981' }]}>Total: ${ord.totalUsd.toFixed(2)} USD</Text>
-                    <Text style={{ fontSize: 10, color: ord.status === 'RECEIVED' ? '#10B981' : '#38BDF8', fontWeight: 'bold', marginTop: 2 }}>
-                      Estatus: {ord.status}
+            ) : (
+              salesList.map((s: any) => (
+                <View key={s.id} style={styles.card}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <Text style={{ color: VUELTO_COLORS.turquoise, fontWeight: '800', fontSize: 15 }}>
+                      {s.invoiceFormattedNumber || s.invoiceNumber}
+                    </Text>
+                    <Text style={{ color: VUELTO_COLORS.muted, fontSize: 11 }}>
+                      {s.createdAt ? new Date(s.createdAt).toLocaleString('es-VE') : ''}
                     </Text>
                   </View>
-                  <View style={{ gap: 6 }}>
-                    <TouchableOpacity style={styles.waCobroBtn} onPress={() => handleWhatsAppOrder(ord)}>
-                      <Text style={styles.waCobroBtnText}>📲 WhatsApp</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={[styles.waCobroBtn, { backgroundColor: '#0284C7' }]}
-                      onPress={() => {
-                        Alert.alert('Mercancía Recibida', `Stock de ${ord.number} ingresado a almacén.`);
-                        setOrdersList(ordersList.map((o) => (o.id === ord.id ? { ...o, status: 'RECEIVED' } : o)));
-                      }}
-                    >
-                      <Text style={styles.waCobroBtnText}>Recibir</Text>
-                    </TouchableOpacity>
-                  </View>
+                  <Text style={styles.itemSub}>Cliente: {s.customerName || 'Consumidor Final'}</Text>
+                  <Text style={{ color: VUELTO_COLORS.white, fontSize: 16, fontWeight: '800', marginVertical: 4 }}>
+                    ${parseFloat(s.totalAmountUsd || '0').toFixed(2)} USD ({parseFloat(s.totalAmountBs || '0').toFixed(2)} Bs)
+                  </Text>
+                  <TouchableOpacity
+                    style={styles.secondaryBtn}
+                    onPress={async () => {
+                      if (!accessToken || !s.id) return;
+                      await NativeShareService.shareInvoice({
+                        saleId: s.id,
+                        invoiceNumber: s.invoiceFormattedNumber || 'FACT',
+                        businessName: user?.businessName || 'Vuelto',
+                        pdfDownloadUrl: `${API_BASE_URL}/sales/${s.id}/receipt/pdf`,
+                        jwtToken: accessToken,
+                      });
+                    }}
+                  >
+                    <Text style={styles.secondaryBtnText}>📲 Compartir PDF</Text>
+                  </TouchableOpacity>
                 </View>
-              ))}
-            </View>
+              ))
+            )}
           </View>
         )}
 
-        {/* SECCIÓN 3: CUENTAS POR COBRAR & MORA CONFIGURABLE */}
-        {activeSection === 'DEBTS' && (
+        {/* PROVEEDORES */}
+        {activeSection === 'SUPPLIERS' && hasTenantContext && (
           <View>
-            <Text style={styles.sectionTitle}>Cobranzas & Recargo por Mora</Text>
-            <Text style={styles.sectionDesc}>
-              Configura el recargo por retraso y envía recordatorios de cobro automáticos por WhatsApp.
-            </Text>
-
-            {/* Configuración de Recargo por Mora */}
+            <Text style={styles.sectionTitle}>Proveedores</Text>
             <View style={styles.card}>
-              <Text style={styles.cardHeader}>Configuración de Recargo por Mora</Text>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                <Text style={{ color: '#CBD5E1', fontSize: 13 }}>Recargo por retraso:</Text>
+              <Text style={styles.cardHeader}>Nuevo Proveedor</Text>
+              <View style={{ flexDirection: 'row', gap: 6, marginBottom: 10 }}>
+                {(['J', 'G', 'V', 'E'] as const).map((dt) => (
+                  <TouchableOpacity
+                    key={dt}
+                    style={[styles.chipBtn, newSupDocType === dt && styles.chipBtnActive]}
+                    onPress={() => setNewSupDocType(dt)}
+                  >
+                    <Text style={[styles.chipText, newSupDocType === dt && styles.chipTextActive]}>{dt}</Text>
+                  </TouchableOpacity>
+                ))}
                 <TextInput
-                  style={[styles.input, { width: 70, marginBottom: 0, textAlign: 'center', fontWeight: 'bold', color: '#EF4444' }]}
-                  value={lateFeePercent}
-                  onChangeText={setLateFeePercent}
+                  style={[styles.input, { flex: 1, marginBottom: 0 }]}
+                  placeholder="RIF / C.I."
+                  placeholderTextColor={VUELTO_COLORS.subtle}
                   keyboardType="numeric"
+                  value={newSupRif}
+                  onChangeText={setNewSupRif}
                 />
-                <Text style={{ color: '#CBD5E1', fontSize: 13, fontWeight: 'bold' }}>%</Text>
               </View>
-            </View>
-
-            {/* Lista de Deudores */}
-            <View style={styles.card}>
-              <Text style={styles.cardHeader}>Cartera de Clientes con Saldo</Text>
-              {[
-                { name: 'Inversiones Los Chaguaramos C.A.', doc: 'J-309876541', phone: '04141234567', balanceDueUsd: 145.0, isOverdue: true, dueDate: '2026-11-20' },
-                { name: 'Automercado San Antonio', doc: 'J-401122334', phone: '04129876543', balanceDueUsd: 82.50, isOverdue: false, dueDate: '2026-11-30' },
-              ].map((c, i) => {
-                const surcharge = c.isOverdue ? (c.balanceDueUsd * (parseFloat(lateFeePercent) / 100)) : 0;
-                const total = c.balanceDueUsd + surcharge;
-
-                return (
-                  <View key={i} style={styles.debtCard}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.customerName}>{c.name}</Text>
-                      <Text style={styles.customerDoc}>{c.doc} • Límite: {c.dueDate}</Text>
-                      <Text style={[styles.debtAmount, { color: c.isOverdue ? '#EF4444' : '#F59E0B' }]}>
-                        Deuda: ${c.balanceDueUsd.toFixed(2)} USD
-                        {c.isOverdue && ` (+${lateFeePercent}% mora: $${total.toFixed(2)})`}
-                      </Text>
-                      {c.isOverdue && (
-                        <Text style={{ color: '#EF4444', fontSize: 11, fontWeight: 'bold', marginTop: 2 }}>
-                          ⚠️ VENCIDO (Aplica recargo configurable)
-                        </Text>
-                      )}
-                    </View>
-
-                    <TouchableOpacity
-                      style={styles.waCobroBtn}
-                      onPress={() => handleWhatsAppDebtReminder(c)}
-                    >
-                      <Text style={styles.waCobroBtnText}>📲 Cobrar</Text>
-                    </TouchableOpacity>
-                  </View>
-                );
-              })}
-            </View>
-          </View>
-        )}
-
-        {/* SECCIÓN 4: PROVEEDORES (CRUD) */}
-        {activeSection === 'SUPPLIERS' && (
-          <View>
-            <Text style={styles.sectionTitle}>Directorio de Proveedores</Text>
-            <Text style={styles.sectionDesc}>
-              Consulta y contacta directamente a las empresas distribuidoras por WhatsApp.
-            </Text>
-
-            <View style={styles.card}>
-              <Text style={styles.cardHeader}>Registrar Nuevo Proveedor</Text>
-              <Text style={styles.fieldLabel}>Razón Social:</Text>
               <TextInput
                 style={styles.input}
-                placeholder="ej. Distribuidora El Sol C.A."
-                placeholderTextColor="#64748B"
+                placeholder="Razón Social"
+                placeholderTextColor={VUELTO_COLORS.subtle}
                 value={newSupName}
                 onChangeText={setNewSupName}
               />
-              <Text style={styles.fieldLabel}>RIF:</Text>
               <TextInput
                 style={styles.input}
-                placeholder="J-123456789"
-                placeholderTextColor="#64748B"
-                value={newSupRif}
-                onChangeText={setNewSupRif}
-              />
-              <Text style={styles.fieldLabel}>Teléfono WhatsApp:</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="04141234567"
-                placeholderTextColor="#64748B"
+                placeholder="Teléfono WhatsApp"
+                placeholderTextColor={VUELTO_COLORS.subtle}
+                keyboardType="phone-pad"
                 value={newSupPhone}
                 onChangeText={setNewSupPhone}
               />
@@ -864,618 +799,484 @@ export const MobileAdminDashboard: React.FC = () => {
             </View>
 
             <View style={styles.card}>
-              <Text style={styles.cardHeader}>Proveedores Activos</Text>
-              {suppliersList.map((sup) => (
-                <View key={sup.id} style={styles.debtCard}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.customerName}>{sup.name}</Text>
-                    <Text style={styles.customerDoc}>RIF: {sup.rif} • Plazo: {sup.creditDays} días</Text>
-                    <Text style={{ fontSize: 12, color: '#38BDF8', marginTop: 2 }}>{sup.phone}</Text>
+              <Text style={styles.cardHeader}>Directorio ({suppliersList.length})</Text>
+              {suppliersList.length === 0 ? (
+                <Text style={styles.emptyText}>Sin proveedores registrados.</Text>
+              ) : (
+                suppliersList.map((sup: any) => (
+                  <View key={sup.id} style={styles.listRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.itemTitle}>{sup.name}</Text>
+                      <Text style={styles.itemSub}>
+                        {sup.documentType}-{sup.documentNumber} • {sup.phone}
+                      </Text>
+                    </View>
+                    {sup.phone ? (
+                      <TouchableOpacity
+                        style={styles.badgeBtnOk}
+                        onPress={() => Linking.openURL(`https://wa.me/${String(sup.phone).replace(/\D/g, '')}`)}
+                      >
+                        <Text style={styles.badgeBtnText}>Chat</Text>
+                      </TouchableOpacity>
+                    ) : null}
                   </View>
-                  <TouchableOpacity
-                    style={styles.waCobroBtn}
-                    onPress={() => {
-                      const url = `https://wa.me/${sup.phone.replace(/\D/g, '')}?text=Hola+${encodeURIComponent(sup.name)}`;
-                      Linking.openURL(url).catch(() => Alert.alert('WhatsApp', sup.phone));
-                    }}
-                  >
-                    <Text style={styles.waCobroBtnText}>📲 Chat</Text>
-                  </TouchableOpacity>
-                </View>
-              ))}
+                ))
+              )}
             </View>
           </View>
         )}
 
-        {/* SECCIÓN 5: VENTAS Y REIMPRESIÓN */}
-        {activeSection === 'SALES' && (
+        {/* PEDIDOS */}
+        {activeSection === 'ORDERS' && hasTenantContext && (
           <View>
-            <Text style={styles.sectionTitle}>Últimas Facturas Fiscales</Text>
-            {[
-              { invoice: 'A-00000042', customer: 'Consumidor Final', total: '$18.88', bs: '991.20 Bs', igtf: '$0.57', time: 'Hoy 18:30' },
-              { invoice: 'A-00000041', customer: 'Inversiones Los Chaguaramos', total: '$45.00', bs: '2,362.50 Bs', igtf: '$1.35', time: 'Hoy 17:15' },
-            ].map((s) => (
-              <View key={s.invoice} style={styles.card}>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 }}>
-                  <Text style={{ fontWeight: 'bold', color: '#38BDF8', fontSize: 15 }}>{s.invoice}</Text>
-                  <Text style={{ color: '#94A3B8', fontSize: 12 }}>{s.time}</Text>
-                </View>
-                <Text style={{ fontSize: 13, color: '#CBD5E1' }}>Cliente: {s.customer}</Text>
-                <Text style={{ fontSize: 16, fontWeight: 'bold', color: '#10B981', marginVertical: 4 }}>
-                  {s.total} ({s.bs})
-                </Text>
-                <Text style={{ fontSize: 11, color: '#F59E0B' }}>IGTF 3% percibido: {s.igtf}</Text>
-
-                <TouchableOpacity
-                  style={styles.shareAgainBtn}
-                  onPress={() => Alert.alert('Reenviar Factura', `Enviando factura ${s.invoice} vía WhatsApp...`)}
-                >
-                  <Text style={styles.shareAgainBtnText}>📲 Reenviar Factura al Cliente</Text>
-                </TouchableOpacity>
-              </View>
-            ))}
+            <Text style={styles.sectionTitle}>Órdenes de Compra</Text>
+            <View style={styles.card}>
+              {ordersList.length === 0 ? (
+                <Text style={styles.emptyText}>No hay órdenes de compra registradas.</Text>
+              ) : (
+                ordersList.map((ord: any) => (
+                  <View key={ord.id} style={styles.listRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.itemTitle}>{ord.orderNumber || ord.id}</Text>
+                      <Text style={styles.itemSub}>
+                        Estado: {ord.status} • Total: ${parseFloat(ord.totalUsd || '0').toFixed(2)}
+                      </Text>
+                    </View>
+                  </View>
+                ))
+              )}
+            </View>
           </View>
         )}
 
-        {/* SECCIÓN 6: TASAS, RÉGIMEN FISCAL Y CONFIGURACIÓN */}
-        {activeSection === 'RATES' && (
+        {/* COBROS */}
+        {activeSection === 'DEBTS' && hasTenantContext && (
+          <View>
+            <Text style={styles.sectionTitle}>Cuentas por Cobrar</Text>
+            <View style={styles.card}>
+              {debtorsList.length === 0 ? (
+                <Text style={styles.emptyText}>No hay clientes con saldo pendiente.</Text>
+              ) : (
+                debtorsList.map((d: any) => (
+                  <View key={d.id} style={styles.listRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.itemTitle}>{d.name}</Text>
+                      <Text style={styles.itemSub}>
+                        Deuda: ${parseFloat(d.balanceDueUsd || d.balanceDue || '0').toFixed(2)} USD
+                      </Text>
+                    </View>
+                    {d.phone ? (
+                      <TouchableOpacity
+                        style={styles.badgeBtnOk}
+                        onPress={() => {
+                          const msg = `Estimado(a) ${d.name}, le recordamos su saldo pendiente en ${user?.businessName}.`;
+                          Linking.openURL(`https://wa.me/${String(d.phone).replace(/\D/g, '')}?text=${encodeURIComponent(msg)}`);
+                        }}
+                      >
+                        <Text style={styles.badgeBtnText}>Cobrar</Text>
+                      </TouchableOpacity>
+                    ) : null}
+                  </View>
+                ))
+              )}
+            </View>
+          </View>
+        )}
+
+        {/* TASAS & FISCAL */}
+        {activeSection === 'RATES' && hasTenantContext && (
           <View>
             <Text style={styles.sectionTitle}>Tasas de Cambio & Régimen Fiscal</Text>
-
-            {/* Selector de Tasa de Cobro Activa */}
             <View style={styles.card}>
-              <Text style={styles.cardHeader}>Tasa de Cobro Activa en Tienda</Text>
-              <Text style={{ fontSize: 12, color: '#94A3B8', marginBottom: 8 }}>
-                Selecciona cuál tasa de cambio se aplicará para cobrar tus productos en caja:
-              </Text>
-
-              <View style={{ gap: 6, marginBottom: 10 }}>
-                {[
-                  { id: 'BCV', label: 'BCV Oficial (52.50 Bs)', val: '52.50' },
-                  { id: 'PARALELO', label: 'Monitor Paralelo (59.75 Bs)', val: '59.75' },
-                  { id: 'EURO', label: 'Euro BCV (55.39 Bs)', val: '55.39' },
-                  { id: 'CUSTOM', label: 'Tasa Personalizada', val: customRate },
-                ].map((opt) => (
-                  <TouchableOpacity
-                    key={opt.id}
-                    style={{
-                      flexDirection: 'row',
-                      justifyContent: 'space-between',
-                      padding: 10,
-                      borderRadius: 8,
-                      borderWidth: 1,
-                      borderColor: activeRateSource === opt.id ? '#10B981' : '#334155',
-                      backgroundColor: activeRateSource === opt.id ? '#10B98122' : '#0F172A',
-                    }}
-                    onPress={() => {
-                      setActiveRateSource(opt.id as any);
-                      Alert.alert('Tasa Seleccionada', `Se cobrará a tasa ${opt.label}.`);
-                    }}
-                  >
-                    <Text style={{ color: activeRateSource === opt.id ? '#A3E635' : '#F8FAFC', fontWeight: 'bold', fontSize: 13 }}>
-                      {opt.label}
-                    </Text>
-                    <Text style={{ color: '#10B981', fontWeight: 'bold' }}>{opt.val} Bs</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
+              <Text style={styles.cardHeader}>Tasa de Cobro Activa</Text>
+              {[
+                { id: 'BCV', label: 'BCV Oficial', val: liveMonitorRates.bcv.toFixed(2) },
+                { id: 'PARALELO', label: 'Monitor Paralelo', val: liveMonitorRates.paralelo.toFixed(2) },
+                { id: 'EURO', label: 'Euro BCV', val: liveMonitorRates.euro.toFixed(2) },
+                { id: 'CUSTOM', label: 'Tasa Personalizada', val: customRate },
+              ].map((opt) => (
+                <TouchableOpacity
+                  key={opt.id}
+                  style={[
+                    styles.rateOption,
+                    activeRateSource === opt.id && styles.rateOptionActive,
+                  ]}
+                  onPress={async () => {
+                    setActiveRateSource(opt.id as any);
+                    if (opt.id !== 'CUSTOM') {
+                      try {
+                        await MobileApiService.selectActiveRate(opt.id as any);
+                        Alert.alert('✅ Tasa Actualizada', `Tasa activa fijada en ${opt.label}.`);
+                      } catch (e: any) {
+                        Alert.alert('Error', e.message);
+                      }
+                    }
+                  }}
+                >
+                  <Text style={styles.itemTitle}>{opt.label}</Text>
+                  <Text style={{ color: VUELTO_COLORS.turquoise, fontWeight: '800' }}>{opt.val} Bs</Text>
+                </TouchableOpacity>
+              ))}
 
               {activeRateSource === 'CUSTOM' && (
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                  <Text style={{ color: '#CBD5E1', fontSize: 12 }}>Valor Tasa (Bs):</Text>
+                <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
                   <TextInput
-                    style={[styles.input, { width: 90, marginBottom: 0, color: '#10B981', fontWeight: 'bold' }]}
+                    style={[styles.input, { flex: 1, marginBottom: 0 }]}
+                    keyboardType="numeric"
                     value={customRate}
                     onChangeText={setCustomRate}
-                    keyboardType="numeric"
                   />
+                  <TouchableOpacity
+                    style={[styles.primaryBtn, { marginBottom: 0, paddingHorizontal: 14 }]}
+                    onPress={async () => {
+                      try {
+                        await MobileApiService.setManualRate(parseFloat(customRate) || 0);
+                        Alert.alert('✅ Tasa Manual Guardada', `Tasa fijada en ${customRate} Bs.`);
+                      } catch (e: any) {
+                        Alert.alert('Error', e.message);
+                      }
+                    }}
+                  >
+                    <Text style={styles.primaryBtnText}>Guardar</Text>
+                  </TouchableOpacity>
                 </View>
               )}
             </View>
 
-            {/* Régimen Fiscal Flexible (Emprendimientos / No Registrados) */}
             <View style={styles.card}>
-              <Text style={styles.cardHeader}>Régimen Fiscal (Emprendimientos)</Text>
-              <Text style={{ fontSize: 12, color: '#94A3B8', marginBottom: 10 }}>
-                Desafilia el IVA e IGTF si eres un negocio que no está registrado ante el SENIAT.
-              </Text>
-
-              <View style={{ gap: 8 }}>
-                <TouchableOpacity
-                  style={{
-                    flexDirection: 'row',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    padding: 10,
-                    borderRadius: 8,
-                    backgroundColor: '#0F172A',
-                    borderWidth: 1,
-                    borderColor: '#334155',
-                  }}
-                  onPress={() => setEnableIva(!enableIva)}
-                >
-                  <View>
-                    <Text style={{ color: '#F8FAFC', fontWeight: 'bold', fontSize: 13 }}>Cobro de IVA (16%)</Text>
-                    <Text style={{ color: '#94A3B8', fontSize: 10 }}>{enableIva ? 'Contribuyente Formal' : '0% IVA (Emprendimiento)'}</Text>
-                  </View>
-                  <Text style={{ color: enableIva ? '#10B981' : '#64748B', fontWeight: 'bold', fontSize: 12 }}>
-                    {enableIva ? '✓ ACTIVO' : '✕ DESAFILIADO'}
-                  </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={{
-                    flexDirection: 'row',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    padding: 10,
-                    borderRadius: 8,
-                    backgroundColor: '#0F172A',
-                    borderWidth: 1,
-                    borderColor: '#334155',
-                  }}
-                  onPress={() => setEnableIgtf(!enableIgtf)}
-                >
-                  <View>
-                    <Text style={{ color: '#F8FAFC', fontWeight: 'bold', fontSize: 13 }}>Cobro de IGTF (3% Divisas)</Text>
-                    <Text style={{ color: '#94A3B8', fontSize: 10 }}>{enableIgtf ? 'Sujeto Pasivo Especial' : '0% IGTF (Exento)'}</Text>
-                  </View>
-                  <Text style={{ color: enableIgtf ? '#F59E0B' : '#64748B', fontWeight: 'bold', fontSize: 12 }}>
-                    {enableIgtf ? '✓ ACTIVO' : '✕ DESAFILIADO'}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-
-            {/* Margen Global de Ganancia */}
-            <View style={styles.card}>
-              <Text style={styles.cardHeader}>Fijar Margen de Ganancia Masivo (%)</Text>
-              <Text style={{ fontSize: 12, color: '#94A3B8', marginBottom: 8 }}>
-                Establece cuánto quieres ganar por producto sin tener que definirlo uno por uno:
-              </Text>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                <TextInput
-                  style={[styles.input, { width: 70, marginBottom: 0, textAlign: 'center', color: '#A3E635', fontWeight: 'bold' }]}
-                  value={globalMargin}
-                  onChangeText={setGlobalMargin}
-                  keyboardType="numeric"
-                />
-                <Text style={{ color: '#A3E635', fontWeight: 'bold', fontSize: 14 }}>%</Text>
-                <TouchableOpacity
-                  style={[styles.primaryBtn, { flex: 1 }]}
-                  onPress={() => Alert.alert('Margen Aplicado', `Margen del ${globalMargin}% aplicado masivamente a todos los productos.`)}
-                >
-                  <Text style={styles.primaryBtnText}>⚡ Aplicar a Todos</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-
-            {/* Copia de Seguridad / Backup JSON */}
-            <View style={styles.card}>
-              <Text style={styles.cardHeader}>Respaldo y Seguridad de Datos</Text>
+              <Text style={styles.cardHeader}>Régimen Fiscal</Text>
               <TouchableOpacity
-                style={[styles.primaryBtn, { backgroundColor: '#0284C7' }]}
-                onPress={() => Alert.alert('Backup Generado', 'Copia de seguridad cifrada (JSON) lista para exportar.')}
+                style={styles.rateOption}
+                onPress={async () => {
+                  const nextVal = !enableIva;
+                  setEnableIva(nextVal);
+                  await MobileApiService.updateConfig({ enableIva: nextVal }).catch(() => {});
+                }}
               >
-                <Text style={styles.primaryBtnText}>💾 Generar Backup de la BD</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        )}
-
-        {/* SECCIÓN 7: GESTIÓN DE CAJEROS EN VIVO */}
-        {activeSection === 'USERS' && (
-          <View>
-            <Text style={styles.sectionTitle}>Supervisión de Vendedores</Text>
-            <Text style={styles.sectionDesc}>
-              Monitorea las ventas y actividades de tus cajeros en tiempo real.
-            </Text>
-
-            <View style={styles.card}>
-              <Text style={styles.cardHeader}>Cajeros Activos en Turno</Text>
-              <View style={styles.cashierRow}>
-                <View>
-                  <Text style={{ color: '#F8FAFC', fontWeight: 'bold' }}>cajero1 (Carlos Mendoza)</Text>
-                  <Text style={{ color: '#10B981', fontSize: 11 }}>● Conectado • Turno Abierto</Text>
-                  <Text style={{ color: '#94A3B8', fontSize: 11, marginTop: 2 }}>Ventas: 18 facturas ($412.50 USD)</Text>
-                </View>
-              </View>
-            </View>
-
-            <View style={styles.card}>
-              <Text style={styles.cardHeader}>Crear Nuevo Vendedor</Text>
-              <Text style={styles.fieldLabel}>Usuario:</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="ej. cajero2"
-                placeholderTextColor="#64748B"
-                value={newCashierUsername}
-                onChangeText={setNewCashierUsername}
-              />
-
-              <Text style={styles.fieldLabel}>Nombre Completo:</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="ej. Luis Ramírez"
-                placeholderTextColor="#64748B"
-                value={newCashierName}
-                onChangeText={setNewCashierName}
-              />
-
-              <TouchableOpacity style={styles.primaryBtn} onPress={handleCreateCashier}>
-                <Text style={styles.primaryBtnText}>Registrar Vendedor</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        )}
-
-        {/* SECCIÓN 8: SÚPER ADMINISTRADOR GLOBAL (CRUD DE TODOS LOS NEGOCIOS / TENANTS) */}
-        {activeSection === 'TENANTS' && isSuperAdmin && (
-          <View>
-            <Text style={[styles.sectionTitle, { color: '#C084FC' }]}>👑 Súper Administrador Global (Tenants)</Text>
-            <Text style={styles.sectionDesc}>
-              Control multi-tenant: crea comercios, suspende/activa tiendas y administra la plataforma.
-            </Text>
-
-            {/* KPIs de la Plataforma Global */}
-            <View style={styles.kpiRow}>
-              <View style={[styles.kpiCard, { borderColor: '#8B5CF6' }]}>
-                <Text style={styles.kpiLabel}>Total Negocios</Text>
-                <Text style={[styles.kpiValue, { color: '#C084FC' }]}>{tenantsList.length}</Text>
-              </View>
-              <View style={[styles.kpiCard, { borderColor: '#10B981' }]}>
-                <Text style={styles.kpiLabel}>Activos</Text>
-                <Text style={[styles.kpiValue, { color: '#10B981' }]}>
-                  {tenantsList.filter((t) => t.isActive).length}
+                <Text style={styles.itemTitle}>Cobro de IVA (16%)</Text>
+                <Text style={{ color: enableIva ? VUELTO_COLORS.turquoise : VUELTO_COLORS.muted, fontWeight: '800' }}>
+                  {enableIva ? 'ACTIVO' : 'INACTIVO'}
                 </Text>
-              </View>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.rateOption}
+                onPress={async () => {
+                  const nextVal = !enableIgtf;
+                  setEnableIgtf(nextVal);
+                  await MobileApiService.updateConfig({ enableIgtf: nextVal }).catch(() => {});
+                }}
+              >
+                <Text style={styles.itemTitle}>Cobro de IGTF (3%)</Text>
+                <Text style={{ color: enableIgtf ? VUELTO_COLORS.warning : VUELTO_COLORS.muted, fontWeight: '800' }}>
+                  {enableIgtf ? 'ACTIVO' : 'INACTIVO'}
+                </Text>
+              </TouchableOpacity>
             </View>
+          </View>
+        )}
 
-            {/* Botón para Crear Nuevo Negocio */}
-            <TouchableOpacity
-              style={[styles.primaryBtn, { backgroundColor: '#8B5CF6', marginBottom: 14 }]}
-              onPress={() => setShowAddTenantModal(true)}
-            >
-              <Text style={styles.primaryBtnText}>➕ Crear Nuevo Negocio (Tenant)</Text>
-            </TouchableOpacity>
-
-            {/* Directorio de Negocios */}
+        {/* CAJEROS */}
+        {activeSection === 'USERS' && hasTenantContext && (
+          <View>
+            <Text style={styles.sectionTitle}>Supervisión de Vendedores en Vivo</Text>
             <View style={styles.card}>
-              <Text style={styles.cardHeader}>Directorio de Comercios en Plataforma</Text>
-              {tenantsList.map((tenant) => (
-                <View key={tenant.id} style={styles.tenantAdminRow}>
-                  <View style={{ flex: 1 }}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                      <Text style={styles.tenantAdminName}>{tenant.tradeName}</Text>
-                      <View style={[styles.tenantStatusBadge, tenant.isActive ? styles.tenantStatusActive : styles.tenantStatusSuspended]}>
-                        <Text style={styles.tenantStatusText}>{tenant.isActive ? 'ACTIVO' : 'SUSPENDIDO'}</Text>
-                      </View>
+              {cashiersList.length === 0 ? (
+                <Text style={styles.emptyText}>No hay usuarios registrados en este comercio.</Text>
+              ) : (
+                cashiersList.map((c: any) => (
+                  <View key={c.id} style={styles.listRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.itemTitle}>
+                        {c.username} ({c.name})
+                      </Text>
+                      <Text style={styles.itemSub}>
+                        {c.roleId} • {c.status} • Ventas hoy: {c.salesTodayCount} (${Number(c.salesTodayUsd || 0).toFixed(2)})
+                      </Text>
                     </View>
-                    <Text style={styles.tenantAdminSub}>{tenant.businessName}</Text>
-                    <Text style={styles.tenantAdminRif}>{tenant.documentType}-{tenant.documentNumber} • {tenant.phone}</Text>
-                    {tenant.isSpecialTaxpayer && (
-                      <Text style={{ color: '#EAB308', fontSize: 10, marginTop: 2 }}>★ Contribuyente Especial (IGTF 3%)</Text>
-                    )}
                   </View>
-
-                  <TouchableOpacity
-                    style={[styles.tenantToggleBtn, tenant.isActive ? styles.tenantSuspendBtn : styles.tenantActivateBtn]}
-                    onPress={() => handleToggleTenant(tenant.id)}
-                  >
-                    <Text style={styles.tenantToggleBtnText}>
-                      {tenant.isActive ? 'Suspender' : 'Activar'}
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-              ))}
+                ))
+              )}
             </View>
+          </View>
+        )}
+
+        {/* CUENTA Y SEGURIDAD */}
+        {activeSection === 'SECURITY' && (
+          <View>
+            <Text style={styles.sectionTitle}>Mi Cuenta & Seguridad</Text>
+            <View style={styles.card}>
+              <Text style={styles.cardHeader}>Cambiar Contraseña</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="Contraseña actual"
+                placeholderTextColor={VUELTO_COLORS.subtle}
+                secureTextEntry
+                value={curPassword}
+                onChangeText={setCurPassword}
+              />
+              <TextInput
+                style={styles.input}
+                placeholder="Nueva contraseña (mín. 8 caracteres, mayús/minús/núm)"
+                placeholderTextColor={VUELTO_COLORS.subtle}
+                secureTextEntry
+                value={newPassword}
+                onChangeText={setNewPassword}
+              />
+              <TextInput
+                style={styles.input}
+                placeholder="Confirmar nueva contraseña"
+                placeholderTextColor={VUELTO_COLORS.subtle}
+                secureTextEntry
+                value={confirmPassword}
+                onChangeText={setConfirmPassword}
+              />
+              <TouchableOpacity style={styles.primaryBtn} disabled={changingPwd} onPress={handleChangePassword}>
+                <Text style={styles.primaryBtnText}>
+                  {changingPwd ? 'Actualizando...' : 'Actualizar Contraseña'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {onShowOnboarding && (
+              <View style={styles.card}>
+                <Text style={styles.cardHeader}>Ayuda e Introducción</Text>
+                <TouchableOpacity style={styles.secondaryBtn} onPress={onShowOnboarding}>
+                  <Text style={styles.secondaryBtnText}>❓ Ver Presentación Inicial (Onboarding)</Text>
+                </TouchableOpacity>
+              </View>
+            )}
           </View>
         )}
       </ScrollView>
 
-      {/* MODAL CREAR NUEVO NEGOCIO (SÚPER ADMIN) */}
+      {/* MODAL CREAR TENANT */}
       <Modal visible={showAddTenantModal} animationType="slide" transparent>
         <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { maxHeight: '90%' }]}>
-            <Text style={[styles.modalTitle, { color: '#C084FC' }]}>👑 Registrar Nuevo Negocio (Tenant)</Text>
-            <Text style={{ color: '#94A3B8', fontSize: 11, marginBottom: 14 }}>
-              Alta de un comercio nuevo en la arquitectura SaaS de Vuelto:
-            </Text>
-
-            <ScrollView style={{ maxHeight: 380 }}>
-              <Text style={styles.fieldLabel}>Razón Social Fiscal:</Text>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>👑 Registrar Nuevo Negocio</Text>
+            <ScrollView style={{ maxHeight: 400 }}>
               <TextInput
                 style={styles.input}
-                placeholder="ej. Distribuidora El Sol C.A."
-                placeholderTextColor="#64748B"
+                placeholder="Razón Social *"
+                placeholderTextColor={VUELTO_COLORS.subtle}
                 value={newTenantBusinessName}
                 onChangeText={setNewTenantBusinessName}
               />
-
-              <Text style={styles.fieldLabel}>Nombre Comercial (Tienda):</Text>
               <TextInput
                 style={styles.input}
-                placeholder="ej. Bodegón El Sol"
-                placeholderTextColor="#64748B"
+                placeholder="Nombre Comercial"
+                placeholderTextColor={VUELTO_COLORS.subtle}
                 value={newTenantTradeName}
                 onChangeText={setNewTenantTradeName}
               />
-
-              <Text style={styles.fieldLabel}>RIF / Documento Fiscal:</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="Slug (opcional, ej. bodega-sol)"
+                placeholderTextColor={VUELTO_COLORS.subtle}
+                autoCapitalize="none"
+                value={newTenantSlug}
+                onChangeText={setNewTenantSlug}
+              />
               <View style={{ flexDirection: 'row', gap: 6, marginBottom: 10 }}>
-                {(['J', 'V', 'G'] as const).map((dt) => (
+                {(['J', 'V', 'G', 'E'] as const).map((dt) => (
                   <TouchableOpacity
                     key={dt}
-                    style={[styles.docTypeBtn, newTenantDocType === dt && styles.docTypeBtnActive]}
+                    style={[styles.chipBtn, newTenantDocType === dt && styles.chipBtnActive]}
                     onPress={() => setNewTenantDocType(dt)}
                   >
-                    <Text style={[styles.docTypeBtnText, newTenantDocType === dt && styles.docTypeBtnTextActive]}>
-                      {dt}
-                    </Text>
+                    <Text style={[styles.chipText, newTenantDocType === dt && styles.chipTextActive]}>{dt}</Text>
                   </TouchableOpacity>
                 ))}
                 <TextInput
                   style={[styles.input, { flex: 1, marginBottom: 0 }]}
-                  placeholder="301234567"
-                  placeholderTextColor="#64748B"
+                  placeholder="RIF *"
+                  placeholderTextColor={VUELTO_COLORS.subtle}
+                  keyboardType="numeric"
                   value={newTenantDocNumber}
                   onChangeText={setNewTenantDocNumber}
-                  keyboardType="numeric"
                 />
               </View>
-
-              <Text style={styles.fieldLabel}>Teléfono de Contacto:</Text>
               <TextInput
                 style={styles.input}
-                placeholder="ej. 04141234567"
-                placeholderTextColor="#64748B"
+                placeholder="Teléfono *"
+                placeholderTextColor={VUELTO_COLORS.subtle}
+                keyboardType="phone-pad"
                 value={newTenantPhone}
                 onChangeText={setNewTenantPhone}
-                keyboardType="phone-pad"
               />
-
-              <Text style={styles.fieldLabel}>Correo Electrónico:</Text>
               <TextInput
                 style={styles.input}
-                placeholder="ej. contacto@elsol.ve"
-                placeholderTextColor="#64748B"
+                placeholder="Correo *"
+                placeholderTextColor={VUELTO_COLORS.subtle}
+                autoCapitalize="none"
                 value={newTenantEmail}
                 onChangeText={setNewTenantEmail}
-                autoCapitalize="none"
               />
-
+              <TextInput
+                style={styles.input}
+                placeholder="Usuario admin inicial (opcional)"
+                placeholderTextColor={VUELTO_COLORS.subtle}
+                autoCapitalize="none"
+                value={newTenantAdminUser}
+                onChangeText={setNewTenantAdminUser}
+              />
+              <TextInput
+                style={styles.input}
+                placeholder="Clave admin inicial (mín. 8 chars, opcional)"
+                placeholderTextColor={VUELTO_COLORS.subtle}
+                secureTextEntry
+                value={newTenantAdminPass}
+                onChangeText={setNewTenantAdminPass}
+              />
               <TouchableOpacity
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: 8,
-                  marginVertical: 10,
-                  padding: 10,
-                  backgroundColor: '#0F172A',
-                  borderRadius: 8,
-                }}
+                style={styles.rateOption}
                 onPress={() => setNewTenantIsSpecial(!newTenantIsSpecial)}
               >
-                <Text style={{ color: newTenantIsSpecial ? '#10B981' : '#64748B', fontSize: 16 }}>
-                  {newTenantIsSpecial ? '☑' : '☐'}
-                </Text>
-                <Text style={{ color: '#F8FAFC', fontSize: 12 }}>
-                  Es Contribuyente Especial SENIAT (Aplica IGTF 3%)
+                <Text style={styles.itemTitle}>Contribuyente Especial (IGTF 3%)</Text>
+                <Text style={{ color: VUELTO_COLORS.turquoise, fontWeight: '800' }}>
+                  {newTenantIsSpecial ? 'SÍ' : 'NO'}
                 </Text>
               </TouchableOpacity>
             </ScrollView>
 
-            <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#8B5CF6' }]} onPress={handleCreateTenant}>
-              <Text style={styles.primaryBtnText}>✓ Crear y Habilitar Negocio</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity style={styles.cancelModalBtn} onPress={() => setShowAddTenantModal(false)}>
-              <Text style={styles.cancelModalBtnText}>Cancelar</Text>
-            </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
+              <TouchableOpacity
+                style={[styles.cancelModalBtn, { flex: 1 }]}
+                onPress={() => setShowAddTenantModal(false)}
+              >
+                <Text style={styles.cancelModalBtnText}>Cancelar</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.primaryBtn, { flex: 1, marginBottom: 0 }]}
+                onPress={handleCreateTenant}
+              >
+                <Text style={styles.primaryBtnText}>Crear Negocio</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       </Modal>
 
-      {/* ESCÁNER DE CÁMARA (ADMIN: AJUSTAR STOCK O VINCULAR CÓDIGO) */}
+      {/* ESCÁNER ADMIN */}
       <BarcodeScannerModal
         visible={showAdminScanner}
         onClose={() => setShowAdminScanner(false)}
         onScanned={handleAdminScanned}
         continuous={false}
-        title={scannerMode === 'ADJUST_STOCK' ? '📷 Escanear para Ajustar Stock' : '📷 Escanear Código de Barras'}
+        title={scannerMode === 'ADJUST_STOCK' ? 'Escanear para Ajustar Stock' : 'Escanear Código de Barras'}
       />
 
-      {/* MODAL: AJUSTE RÁPIDO DE STOCK TRAS ESCANEO */}
+      {/* MODAL AJUSTE RÁPIDO STOCK */}
       <Modal visible={showQuickAdjustModal} animationType="slide" transparent>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
-            <Text style={[styles.modalTitle, { color: '#38BDF8' }]}>📦 Ajustar Stock de Producto</Text>
+            <Text style={styles.modalTitle}>📦 Ajustar Stock</Text>
             {scannedProductForAdjustment && (
-              <View style={{ marginBottom: 16 }}>
-                <Text style={{ color: '#F8FAFC', fontSize: 16, fontWeight: 'bold' }}>
-                  {scannedProductForAdjustment.name}
-                </Text>
-                <Text style={{ color: '#94A3B8', fontSize: 12 }}>
-                  Código: {scannedProductForAdjustment.barcode} • Costo: ${scannedProductForAdjustment.costPriceUsd.toFixed(2)} • Venta: ${scannedProductForAdjustment.salePriceUsd.toFixed(2)}
-                </Text>
-                <Text style={{ color: '#10B981', fontSize: 13, marginTop: 4 }}>
-                  Stock actual en sistema: {scannedProductForAdjustment.stock} unids
-                </Text>
-              </View>
+              <Text style={styles.sectionDesc}>
+                {scannedProductForAdjustment.name} (Actual: {scannedProductForAdjustment.stock})
+              </Text>
             )}
-
-            <Text style={styles.fieldLabel}>Nuevo Conteo Físico:</Text>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginVertical: 8 }}>
-              <TouchableOpacity
-                style={[styles.primaryBtn, { flex: 1, backgroundColor: '#EF4444', marginTop: 0 }]}
-                onPress={() => handleApplyQuickStockChange(-1)}
-              >
-                <Text style={styles.primaryBtnText}>- 1</Text>
+            <TextInput
+              style={[styles.input, { textAlign: 'center', fontSize: 18, fontWeight: '800' }]}
+              keyboardType="numeric"
+              value={quickStockAmount}
+              onChangeText={setQuickStockAmount}
+            />
+            <View style={{ flexDirection: 'row', gap: 10 }}>
+              <TouchableOpacity style={[styles.cancelModalBtn, { flex: 1 }]} onPress={() => setShowQuickAdjustModal(false)}>
+                <Text style={styles.cancelModalBtnText}>Cancelar</Text>
               </TouchableOpacity>
-
-              <TextInput
-                style={[styles.input, { flex: 2, marginBottom: 0, textAlign: 'center', fontSize: 18, fontWeight: 'bold' }]}
-                keyboardType="numeric"
-                value={quickStockAmount}
-                onChangeText={setQuickStockAmount}
-              />
-
-              <TouchableOpacity
-                style={[styles.primaryBtn, { flex: 1, backgroundColor: '#10B981', marginTop: 0 }]}
-                onPress={() => handleApplyQuickStockChange(1)}
-              >
-                <Text style={styles.primaryBtnText}>+ 1</Text>
+              <TouchableOpacity style={[styles.primaryBtn, { flex: 1, marginBottom: 0 }]} onPress={handleSaveQuickStockAdjustment}>
+                <Text style={styles.primaryBtnText}>Confirmar</Text>
               </TouchableOpacity>
             </View>
-
-            <View style={{ flexDirection: 'row', gap: 8, marginVertical: 8 }}>
-              <TouchableOpacity
-                style={[styles.primaryBtn, { flex: 1, backgroundColor: '#334155', marginTop: 0 }]}
-                onPress={() => handleApplyQuickStockChange(5)}
-              >
-                <Text style={styles.primaryBtnText}>+ 5 unids</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.primaryBtn, { flex: 1, backgroundColor: '#334155', marginTop: 0 }]}
-                onPress={() => handleApplyQuickStockChange(10)}
-              >
-                <Text style={styles.primaryBtnText}>+ 10 unids</Text>
-              </TouchableOpacity>
-            </View>
-
-            <TouchableOpacity style={styles.primaryBtn} onPress={handleSaveQuickStockAdjustment}>
-              <Text style={styles.primaryBtnText}>✓ Confirmar Ajuste en Kardex</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity style={styles.cancelModalBtn} onPress={() => setShowQuickAdjustModal(false)}>
-              <Text style={styles.cancelModalBtnText}>Cancelar</Text>
-            </TouchableOpacity>
           </View>
         </View>
       </Modal>
 
-      {/* MODAL: REGISTRAR NUEVO PRODUCTO EN INVENTARIO CON BOTÓN DE CÁMARA */}
+      {/* MODAL NUEVO PRODUCTO */}
       <Modal visible={showNewProductModal} animationType="slide" transparent>
         <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { maxHeight: '90%' }]}>
-            <Text style={[styles.modalTitle, { color: '#10B981' }]}>➕ Nuevo Producto en Inventario</Text>
-            <Text style={{ color: '#94A3B8', fontSize: 11, marginBottom: 12 }}>
-              Registre un producto con costos, márgenes y código escaneado con la cámara:
-            </Text>
-
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>➕ Nuevo Producto</Text>
             <ScrollView style={{ maxHeight: 380 }}>
-              <Text style={styles.fieldLabel}>Código de Barras (*):</Text>
               <View style={{ flexDirection: 'row', gap: 8 }}>
                 <TextInput
-                  style={[styles.input, { flex: 1, backgroundColor: '#0F172A', color: '#38BDF8' }]}
-                  placeholder="Escanee o escriba código"
-                  placeholderTextColor="#64748B"
+                  style={[styles.input, { flex: 1 }]}
+                  placeholder="Código de barras *"
+                  placeholderTextColor={VUELTO_COLORS.subtle}
                   value={newProdBarcode}
                   onChangeText={setNewProdBarcode}
                 />
                 <TouchableOpacity
-                  style={{
-                    backgroundColor: '#0284C7',
-                    paddingHorizontal: 14,
-                    borderRadius: 8,
-                    justifyContent: 'center',
-                    alignItems: 'center',
-                    marginBottom: 10,
-                  }}
+                  style={[styles.secondaryBtn, { marginBottom: 10, justifyContent: 'center' }]}
                   onPress={() => {
                     setScannerMode('NEW_PRODUCT_BARCODE');
                     setShowAdminScanner(true);
                   }}
                 >
-                  <Text style={{ fontSize: 18 }}>📷</Text>
+                  <Text style={styles.secondaryBtnText}>📷</Text>
                 </TouchableOpacity>
               </View>
-
-              <Text style={styles.fieldLabel}>Nombre del Producto (*):</Text>
               <TextInput
                 style={styles.input}
-                placeholder="ej. Pasta Primor 1kg"
-                placeholderTextColor="#64748B"
+                placeholder="Nombre del producto *"
+                placeholderTextColor={VUELTO_COLORS.subtle}
                 value={newProdName}
                 onChangeText={setNewProdName}
               />
-
-              <View style={{ flexDirection: 'row', gap: 10 }}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.fieldLabel}>Costo Mayor ($):</Text>
-                  <TextInput
-                    style={styles.input}
-                    placeholder="1.00"
-                    placeholderTextColor="#64748B"
-                    keyboardType="numeric"
-                    value={newProdCost}
-                    onChangeText={setNewProdCost}
-                  />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.fieldLabel}>Precio Venta ($):</Text>
-                  <TextInput
-                    style={styles.input}
-                    placeholder="1.40"
-                    placeholderTextColor="#64748B"
-                    keyboardType="numeric"
-                    value={newProdSale}
-                    onChangeText={setNewProdSale}
-                  />
-                </View>
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                <TextInput
+                  style={[styles.input, { flex: 1 }]}
+                  placeholder="Costo $"
+                  placeholderTextColor={VUELTO_COLORS.subtle}
+                  keyboardType="numeric"
+                  value={newProdCost}
+                  onChangeText={setNewProdCost}
+                />
+                <TextInput
+                  style={[styles.input, { flex: 1 }]}
+                  placeholder="Venta $"
+                  placeholderTextColor={VUELTO_COLORS.subtle}
+                  keyboardType="numeric"
+                  value={newProdSale}
+                  onChangeText={setNewProdSale}
+                />
               </View>
-
-              <View style={{ flexDirection: 'row', gap: 10 }}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.fieldLabel}>Stock Inicial:</Text>
-                  <TextInput
-                    style={styles.input}
-                    placeholder="20"
-                    placeholderTextColor="#64748B"
-                    keyboardType="numeric"
-                    value={newProdStock}
-                    onChangeText={setNewProdStock}
-                  />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.fieldLabel}>Stock Mínimo:</Text>
-                  <TextInput
-                    style={styles.input}
-                    placeholder="5"
-                    placeholderTextColor="#64748B"
-                    keyboardType="numeric"
-                    value={newProdMinStock}
-                    onChangeText={setNewProdMinStock}
-                  />
-                </View>
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                <TextInput
+                  style={[styles.input, { flex: 1 }]}
+                  placeholder="Stock inicial"
+                  placeholderTextColor={VUELTO_COLORS.subtle}
+                  keyboardType="numeric"
+                  value={newProdStock}
+                  onChangeText={setNewProdStock}
+                />
+                <TextInput
+                  style={[styles.input, { flex: 1 }]}
+                  placeholder="Stock mínimo"
+                  placeholderTextColor={VUELTO_COLORS.subtle}
+                  keyboardType="numeric"
+                  value={newProdMinStock}
+                  onChangeText={setNewProdMinStock}
+                />
               </View>
-
-              <Text style={styles.fieldLabel}>Categoría:</Text>
               <TextInput
                 style={styles.input}
-                placeholder="Alimentos, Bebidas, Charcutería..."
-                placeholderTextColor="#64748B"
-                value={newProdCategory}
-                onChangeText={setNewProdCategory}
-              />
-
-              <Text style={styles.fieldLabel}>Proveedor:</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="ej. Empresas Polar C.A."
-                placeholderTextColor="#64748B"
-                value={newProdSupplier}
-                onChangeText={setNewProdSupplier}
+                placeholder="Unidad (UNIDAD, KG, PAQUETE...)"
+                placeholderTextColor={VUELTO_COLORS.subtle}
+                value={newProdUnit}
+                onChangeText={setNewProdUnit}
               />
             </ScrollView>
-
-            <TouchableOpacity style={styles.primaryBtn} onPress={handleSaveNewAdminProduct}>
-              <Text style={styles.primaryBtnText}>✓ Guardar Producto en Catálogo</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity style={styles.cancelModalBtn} onPress={() => setShowNewProductModal(false)}>
-              <Text style={styles.cancelModalBtnText}>Cancelar</Text>
-            </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: 10, marginTop: 10 }}>
+              <TouchableOpacity style={[styles.cancelModalBtn, { flex: 1 }]} onPress={() => setShowNewProductModal(false)}>
+                <Text style={styles.cancelModalBtnText}>Cancelar</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.primaryBtn, { flex: 1, marginBottom: 0 }]} onPress={handleSaveNewAdminProduct}>
+                <Text style={styles.primaryBtnText}>Guardar</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       </Modal>
@@ -1484,300 +1285,197 @@ export const MobileAdminDashboard: React.FC = () => {
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#071F27' },
+  container: { flex: 1, backgroundColor: VUELTO_COLORS.night },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     padding: 14,
-    backgroundColor: '#0B3B49',
+    backgroundColor: VUELTO_COLORS.deep,
     borderBottomWidth: 1,
-    borderBottomColor: '#155E75',
+    borderBottomColor: VUELTO_COLORS.border,
   },
-  title: { color: '#F59E0B', fontSize: 18, fontWeight: 'bold' },
-  subtitle: { color: '#94A3B8', fontSize: 11, marginTop: 2 },
-  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  title: { color: VUELTO_COLORS.white, fontSize: 17, fontWeight: '800', letterSpacing: 0.6 },
+  subtitle: { color: VUELTO_COLORS.muted, fontSize: 11, marginTop: 2 },
   adminPill: {
-    backgroundColor: '#0284C722',
+    backgroundColor: 'rgba(0, 230, 195, 0.14)',
     borderWidth: 1,
-    borderColor: '#0284C755',
+    borderColor: VUELTO_COLORS.turquoise,
+    borderRadius: 6,
     paddingHorizontal: 6,
     paddingVertical: 2,
-    borderRadius: 4,
   },
-  adminPillText: { color: '#38BDF8', fontSize: 10, fontWeight: 'bold' },
+  adminPillText: { color: VUELTO_COLORS.turquoise, fontSize: 9, fontWeight: '800' },
+  headerRight: { flexDirection: 'row', gap: 8, alignItems: 'center' },
   posSwitchBtn: {
-    backgroundColor: '#10B981',
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 6,
-  },
-  posSwitchBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: 'bold' },
-  logoutBtn: {
-    backgroundColor: '#1E293B',
-    borderWidth: 1,
-    borderColor: '#334155',
-    paddingVertical: 6,
+    backgroundColor: VUELTO_COLORS.turquoise,
     paddingHorizontal: 10,
-    borderRadius: 6,
-  },
-  logoutBtnText: { color: '#94A3B8', fontSize: 12, fontWeight: '600' },
-
-  navBar: {
-    flexDirection: 'row',
-    backgroundColor: '#0F172A',
     paddingVertical: 6,
-    paddingHorizontal: 4,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1E293B',
+    borderRadius: 8,
   },
-  navItem: { flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: 4 },
-  navItemActive: { backgroundColor: '#1E293B' },
-  navText: { color: '#94A3B8', fontSize: 11, fontWeight: '600' },
-  navTextActive: { color: '#38BDF8', fontWeight: 'bold' },
+  posSwitchBtnText: { color: VUELTO_COLORS.night, fontWeight: '800', fontSize: 11 },
+  logoutBtn: {
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    borderWidth: 1,
+    borderColor: VUELTO_COLORS.borderMuted,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  logoutBtnText: { color: VUELTO_COLORS.muted, fontWeight: '700', fontSize: 11 },
+
+  navBarScroll: { maxHeight: 48, backgroundColor: '#08182E', borderBottomWidth: 1, borderBottomColor: VUELTO_COLORS.borderMuted },
+  navBar: { flexDirection: 'row', paddingHorizontal: 10, alignItems: 'center', gap: 8, paddingVertical: 6 },
+  navItem: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 10,
+    backgroundColor: VUELTO_COLORS.deep,
+    borderWidth: 1,
+    borderColor: VUELTO_COLORS.borderMuted,
+  },
+  navItemActive: { backgroundColor: VUELTO_COLORS.turquoise, borderColor: VUELTO_COLORS.turquoise },
+  navText: { color: VUELTO_COLORS.muted, fontSize: 12, fontWeight: '700' },
+  navTextActive: { color: VUELTO_COLORS.night, fontWeight: '800' },
 
   content: { flex: 1, padding: 14 },
-  sectionTitle: { fontSize: 18, fontWeight: 'bold', color: '#F8FAFC', marginBottom: 4 },
-  sectionDesc: { fontSize: 12, color: '#94A3B8', marginBottom: 14, lineHeight: 18 },
-
-  kpiRow: { flexDirection: 'row', gap: 10, marginBottom: 14 },
+  sectionTitle: { color: VUELTO_COLORS.white, fontSize: 18, fontWeight: '800', marginBottom: 4 },
+  sectionDesc: { color: VUELTO_COLORS.muted, fontSize: 12, marginBottom: 12, lineHeight: 17 },
+  kpiRow: { flexDirection: 'row', gap: 10, marginBottom: 12 },
   kpiCard: {
     flex: 1,
-    backgroundColor: '#1E293B',
+    backgroundColor: VUELTO_COLORS.deep,
+    borderRadius: 14,
     padding: 14,
-    borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#334155',
+    borderColor: VUELTO_COLORS.border,
   },
-  kpiLabel: { color: '#94A3B8', fontSize: 11 },
-  kpiValue: { color: '#F8FAFC', fontSize: 20, fontWeight: 'bold', marginTop: 4 },
+  kpiLabel: { color: VUELTO_COLORS.muted, fontSize: 11, fontWeight: '700' },
+  kpiValue: { color: VUELTO_COLORS.white, fontSize: 20, fontWeight: '800', marginTop: 4 },
 
   card: {
-    backgroundColor: '#1E293B',
-    borderRadius: 12,
-    padding: 16,
+    backgroundColor: VUELTO_COLORS.deep,
+    borderRadius: 16,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: VUELTO_COLORS.borderMuted,
     marginBottom: 14,
-    borderWidth: 1,
-    borderColor: '#334155',
   },
-  cardHeader: { fontSize: 14, fontWeight: 'bold', color: '#F8FAFC', marginBottom: 10 },
-  fieldLabel: { fontSize: 12, fontWeight: '600', color: '#CBD5E1', marginBottom: 4 },
-  input: {
-    backgroundColor: '#0F172A',
-    borderWidth: 1,
-    borderColor: '#334155',
-    borderRadius: 8,
-    color: '#FFFFFF',
-    padding: 10,
-    fontSize: 13,
-    marginBottom: 10,
-  },
-  primaryBtn: {
-    backgroundColor: '#0284C7',
-    padding: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-    marginTop: 4,
-  },
-  primaryBtnText: { color: '#FFFFFF', fontWeight: 'bold', fontSize: 13 },
-
-  orderWaBtn: {
-    backgroundColor: '#10B981',
-    padding: 10,
-    borderRadius: 6,
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  orderWaBtnText: { color: '#FFFFFF', fontWeight: 'bold', fontSize: 12 },
-
-  debtCard: {
+  cardHeader: { color: VUELTO_COLORS.white, fontSize: 14, fontWeight: '800', marginBottom: 10 },
+  emptyText: { color: VUELTO_COLORS.muted, fontSize: 12, textAlign: 'center', paddingVertical: 12 },
+  listRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingVertical: 10,
     borderBottomWidth: 1,
-    borderBottomColor: '#334155',
+    borderBottomColor: VUELTO_COLORS.borderMuted,
+    gap: 8,
   },
-  customerName: { fontSize: 13, fontWeight: 'bold', color: '#F8FAFC' },
-  customerDoc: { fontSize: 11, color: '#64748B', marginTop: 2 },
-  debtAmount: { fontSize: 12, fontWeight: 'bold', marginTop: 2 },
-  waCobroBtn: {
-    backgroundColor: '#10B981',
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderRadius: 6,
-  },
-  waCobroBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: 'bold' },
-
-  shareAgainBtn: {
-    backgroundColor: '#10B981',
-    padding: 10,
-    borderRadius: 6,
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  shareAgainBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: 'bold' },
-
-  cashierRow: {
-    padding: 10,
-    backgroundColor: '#0F172A',
+  itemTitle: { color: VUELTO_COLORS.white, fontSize: 13, fontWeight: '700' },
+  itemSub: { color: VUELTO_COLORS.muted, fontSize: 11, marginTop: 2 },
+  profitPill: {
+    backgroundColor: 'rgba(0, 230, 195, 0.12)',
     borderRadius: 8,
-  },
-
-  // Estilos de Productos con Margen en Dólares ($)
-  productAdminRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#334155',
-  },
-  productAdminName: {
-    color: '#F8FAFC',
-    fontWeight: 'bold',
-    fontSize: 13,
-  },
-  productAdminBarcode: {
-    color: '#64748B',
-    fontSize: 10,
-    marginTop: 2,
-    fontFamily: 'monospace',
-  },
-  productAdminProfitBadge: {
-    backgroundColor: '#10B98118',
-    borderWidth: 1,
-    borderColor: '#10B98155',
     paddingHorizontal: 8,
     paddingVertical: 4,
-    borderRadius: 6,
     alignItems: 'flex-end',
   },
-  productAdminProfitVal: {
-    color: '#A3E635',
-    fontWeight: 'bold',
-    fontSize: 12,
-  },
-  productAdminProfitPct: {
-    color: '#10B981',
-    fontSize: 10,
-    fontWeight: 'bold',
-  },
+  profitPillVal: { color: VUELTO_COLORS.turquoise, fontSize: 11, fontWeight: '800' },
+  profitPillPct: { color: VUELTO_COLORS.teal, fontSize: 10, fontWeight: '700' },
 
-  // Estilos de Súper Administrador Global (Tenants)
-  tenantAdminRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+  primaryBtn: {
+    backgroundColor: VUELTO_COLORS.turquoise,
     paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#334155',
+    borderRadius: 10,
+    alignItems: 'center',
+    marginBottom: 12,
   },
-  tenantAdminName: {
-    color: '#F8FAFC',
-    fontWeight: 'bold',
-    fontSize: 14,
+  primaryBtnText: { color: VUELTO_COLORS.night, fontWeight: '800', fontSize: 13 },
+  secondaryBtn: {
+    backgroundColor: VUELTO_COLORS.night,
+    borderWidth: 1,
+    borderColor: VUELTO_COLORS.border,
+    paddingVertical: 11,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    alignItems: 'center',
   },
-  tenantAdminSub: {
-    color: '#94A3B8',
-    fontSize: 11,
-    marginTop: 2,
+  secondaryBtnText: { color: VUELTO_COLORS.turquoise, fontWeight: '800', fontSize: 12 },
+  input: {
+    backgroundColor: VUELTO_COLORS.night,
+    borderWidth: 1,
+    borderColor: VUELTO_COLORS.borderMuted,
+    color: VUELTO_COLORS.white,
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 10,
+    fontSize: 13,
   },
-  tenantAdminRif: {
-    color: '#64748B',
-    fontSize: 10,
-    marginTop: 2,
-    fontFamily: 'monospace',
-  },
-  tenantStatusBadge: {
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  tenantStatusActive: {
-    backgroundColor: '#10B98122',
-  },
-  tenantStatusSuspended: {
-    backgroundColor: '#EF444422',
-  },
-  tenantStatusText: {
-    fontSize: 9,
-    fontWeight: 'bold',
-    color: '#A3E635',
-  },
-  tenantToggleBtn: {
+  chipBtn: {
     paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 8,
+    backgroundColor: VUELTO_COLORS.night,
+    borderWidth: 1,
+    borderColor: VUELTO_COLORS.borderMuted,
+  },
+  chipBtnActive: { backgroundColor: VUELTO_COLORS.turquoise, borderColor: VUELTO_COLORS.turquoise },
+  chipText: { color: VUELTO_COLORS.muted, fontWeight: '800' },
+  chipTextActive: { color: VUELTO_COLORS.night },
+  badgeBtn: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8 },
+  badgeBtnOk: {
+    backgroundColor: 'rgba(0, 230, 195, 0.16)',
+    borderWidth: 1,
+    borderColor: VUELTO_COLORS.turquoise,
+    paddingHorizontal: 10,
     paddingVertical: 6,
-    borderRadius: 6,
+    borderRadius: 8,
   },
-  tenantSuspendBtn: {
-    backgroundColor: '#EF444422',
+  badgeBtnDanger: {
+    backgroundColor: VUELTO_COLORS.dangerBg,
     borderWidth: 1,
-    borderColor: '#EF4444',
+    borderColor: VUELTO_COLORS.danger,
   },
-  tenantActivateBtn: {
-    backgroundColor: '#10B98122',
-    borderWidth: 1,
-    borderColor: '#10B981',
-  },
-  tenantToggleBtnText: {
-    fontSize: 11,
-    fontWeight: 'bold',
-    color: '#F8FAFC',
-  },
+  badgeBtnText: { color: VUELTO_COLORS.white, fontSize: 11, fontWeight: '700' },
 
-  // Modal Súper Admin
+  rateOption: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 12,
+    borderRadius: 10,
+    backgroundColor: VUELTO_COLORS.night,
+    borderWidth: 1,
+    borderColor: VUELTO_COLORS.borderMuted,
+    marginBottom: 8,
+  },
+  rateOptionActive: { borderColor: VUELTO_COLORS.turquoise, backgroundColor: 'rgba(0, 230, 195, 0.1)' },
+
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.75)',
+    backgroundColor: 'rgba(3, 10, 20, 0.84)',
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 20,
+    padding: 16,
   },
   modalContent: {
-    width: '100%',
-    backgroundColor: '#0B3B49',
-    borderRadius: 16,
+    backgroundColor: VUELTO_COLORS.deep,
+    borderRadius: 20,
     padding: 20,
+    width: '100%',
+    maxWidth: 420,
     borderWidth: 1,
-    borderColor: '#155E75',
+    borderColor: VUELTO_COLORS.border,
   },
-  modalTitle: {
-    fontSize: 17,
-    fontWeight: 'bold',
-    marginBottom: 4,
-  },
+  modalTitle: { color: VUELTO_COLORS.white, fontSize: 18, fontWeight: '800', marginBottom: 12 },
   cancelModalBtn: {
-    marginTop: 8,
-    padding: 10,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  cancelModalBtnText: {
-    color: '#94A3B8',
-    fontWeight: '600',
-    fontSize: 12,
-  },
-  docTypeBtn: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 6,
-    backgroundColor: '#0F172A',
+    paddingVertical: 12,
+    borderRadius: 10,
+    backgroundColor: VUELTO_COLORS.night,
     borderWidth: 1,
-    borderColor: '#334155',
-    justifyContent: 'center',
+    borderColor: VUELTO_COLORS.borderMuted,
     alignItems: 'center',
   },
-  docTypeBtnActive: {
-    backgroundColor: '#8B5CF6',
-    borderColor: '#8B5CF6',
-  },
-  docTypeBtnText: {
-    color: '#94A3B8',
-    fontWeight: 'bold',
-    fontSize: 12,
-  },
-  docTypeBtnTextActive: {
-    color: '#FFFFFF',
-  },
+  cancelModalBtnText: { color: VUELTO_COLORS.muted, fontWeight: '700' },
 });

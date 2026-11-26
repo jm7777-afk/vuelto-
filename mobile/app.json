@@ -2,15 +2,22 @@
   "expo": {
     "name": "Vuelto",
     "slug": "vuelto-pos",
-    "version": "1.0.0",
+    "version": "1.4.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
+    "icon": "./assets/vuelto-icon.jpg",
     "splash": {
-      "backgroundColor": "#0F172A"
+      "image": "./assets/vuelto-logo.jpg",
+      "resizeMode": "contain",
+      "backgroundColor": "#061426"
     },
     "android": {
       "package": "ve.vuelto.pos",
-      "versionCode": 1,
+      "versionCode": 5,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/vuelto-icon.jpg",
+        "backgroundColor": "#061426"
+      },
       "permissions": [
         "CAMERA",
         "BLUETOOTH",

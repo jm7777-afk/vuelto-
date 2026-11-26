@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   StyleSheet,
   Text,
@@ -13,87 +13,50 @@ import {
   ScrollView,
   Image,
   Vibration,
+  ActivityIndicator,
 } from 'react-native';
-import { useCartStore, CartLine } from '../../stores/cart.store';
+import { useCartStore } from '../../stores/cart.store';
 import { useAuthStore } from '../../stores/auth.store';
 import { NativeShareService } from '../../services/share.service';
-import { MobileApiService } from '../../services/api.service';
+import { API_BASE_URL, MobileApiService } from '../../services/api.service';
 import { BarcodeScannerModal } from '../../components/BarcodeScannerModal';
 import { ProductCacheService } from '../../services/product-cache.service';
 import { MobileScaleBarcodeUtils } from '../../utils/scale-barcode';
+import { VUELTO_COLORS } from '../../theme/colors';
 
-// Clientes registrados en el sistema para consulta por C.I.
-interface CustomerEntry {
+interface PosCatalogProduct {
   id: string;
   name: string;
-  documentType: 'V' | 'E' | 'J' | 'G';
-  documentNumber: string;
-  phone?: string;
-  balanceDue: number;
+  barcode: string;
+  unitOfMeasure: string;
+  category: string;
+  salePriceUsd: number;
+  taxRate: number;
+  isExempt: boolean;
+  stock: number;
 }
 
-const KNOWN_CUSTOMERS: CustomerEntry[] = [
-  { id: 'c0', name: 'Consumidor Final', documentType: 'V', documentNumber: '00000000', phone: '', balanceDue: 0 },
-  { id: 'c1', name: 'Automercado Miranda C.A.', documentType: 'J', documentNumber: '401234567', phone: '+584121112233', balanceDue: 145.50 },
-  { id: 'c2', name: 'Distribuidora Los Próceres', documentType: 'J', documentNumber: '309876543', phone: '+584149998877', balanceDue: 280.00 },
-  { id: 'c3', name: 'María Corina Machado', documentType: 'V', documentNumber: '14523988', phone: '+584145556677', balanceDue: 0 },
-];
+interface PosCheckoutScreenProps {
+  onShowOnboarding?: () => void;
+}
 
-// Catálogo base con unidad de medida según categoría
-const DEFAULT_PRODUCTS = [
-  {
-    id: 'prod_harina_pan',
-    name: 'Harina PAN Blanca 1kg',
-    barcode: '7591001001019',
-    unitOfMeasure: 'paquete',
-    category: 'Alimentos',
-    salePriceUsd: 1.25,
-    taxRate: 0.0,
-    isExempt: true,
-    stock: 145,
-  },
-  {
-    id: 'prod_arroz_primor',
-    name: 'Arroz Primor Grano Entero 1kg',
-    barcode: '7591003003035',
-    unitOfMeasure: 'kg',
-    category: 'Alimentos',
-    salePriceUsd: 1.50,
-    taxRate: 0.0,
-    isExempt: true,
-    stock: 82,
-  },
-  {
-    id: 'prod_aceite_mazeite',
-    name: 'Aceite de Maíz Mazeite 1L',
-    barcode: '7591004004048',
-    unitOfMeasure: 'L',
-    category: 'Alimentos',
-    salePriceUsd: 3.80,
-    taxRate: 16.0,
-    isExempt: false,
-    stock: 4,
-  },
-  {
-    id: 'prod_pepsi_cola',
-    name: 'Refresco Pepsi Cola 1.5L',
-    barcode: '7591002002026',
-    unitOfMeasure: 'botella',
-    category: 'Bebidas',
-    salePriceUsd: 1.90,
-    taxRate: 16.0,
-    isExempt: false,
-    stock: 35,
-  },
-];
+function detectBarcodeType(code: string): 'EAN13' | 'EAN8' | 'CODE128' | 'UPC' | 'INTERNAL' {
+  if (/^\d{13}$/.test(code)) return 'EAN13';
+  if (/^\d{8}$/.test(code)) return 'EAN8';
+  if (/^\d{12}$/.test(code)) return 'UPC';
+  if (/^[a-zA-Z0-9\-_]{3,64}$/.test(code)) return 'CODE128';
+  return 'INTERNAL';
+}
 
-export const PosCheckoutScreen: React.FC = () => {
-  const { user, toggleMode, logout } = useAuthStore();
+export const PosCheckoutScreen: React.FC<PosCheckoutScreenProps> = ({ onShowOnboarding }) => {
+  const { user, accessToken, refreshToken, toggleMode } = useAuthStore();
   const {
     activeLines,
     activeCustomer,
     frozenRate,
+    exchangeRateId,
     heldCarts,
+    setExchangeRate,
     addProduct,
     updateQuantity,
     clearActiveCart,
@@ -105,24 +68,36 @@ export const PosCheckoutScreen: React.FC = () => {
     getTotalBs,
   } = useCartStore();
 
-  // Estados de Modales
   const [showCatalogModal, setShowCatalogModal] = useState(false);
   const [showQuickCustomerModal, setShowQuickCustomerModal] = useState(false);
   const [showHeldCartsModal, setShowHeldCartsModal] = useState(false);
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
   const [showPostSaleModal, setShowPostSaleModal] = useState(false);
+  const [showCashModal, setShowCashModal] = useState(false);
   const [confirmedInvoice, setConfirmedInvoice] = useState<any>(null);
 
-  // Catálogo y Búsqueda
   const [catalogSearch, setCatalogSearch] = useState('');
-  const [catalogProducts, setCatalogProducts] = useState(DEFAULT_PRODUCTS);
+  const [catalogProducts, setCatalogProducts] = useState<PosCatalogProduct[]>([]);
+  const [customersList, setCustomersList] = useState<any[]>([]);
   const [quickBarcodeInput, setQuickBarcodeInput] = useState('');
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [isSubmittingSale, setIsSubmittingSale] = useState(false);
+  const [pendingIdempotencyKey, setPendingIdempotencyKey] = useState<string | null>(null);
 
-  // Escáner Físico con Cámara del Celular (expo-camera & BarcodeScannerModal)
+  // Caja actual (Apertura y Cierre)
+  const [cashSession, setCashSession] = useState<any | null>(null);
+  const [cashOpeningUsd, setCashOpeningUsd] = useState('0');
+  const [cashOpeningBs, setCashOpeningBs] = useState('0');
+  const [cashClosingUsd, setCashClosingUsd] = useState('0');
+  const [cashClosingBs, setCashClosingBs] = useState('0');
+  const [cashNotes, setCashNotes] = useState('');
+  const [cashLoading, setCashLoading] = useState(false);
+
+  // Escáner Físico
   const [showCameraScanner, setShowCameraScanner] = useState(false);
   const [scanFeedbackMsg, setScanFeedbackMsg] = useState<string | null>(null);
 
-  // Modal de Creación Rápida de Producto (si el escaneo da 404)
+  // Modal de Creación Rápida de Producto (404)
   const [showCreateProductModal, setShowCreateProductModal] = useState(false);
   const [newProductBarcode, setNewProductBarcode] = useState('');
   const [newProductName, setNewProductName] = useState('');
@@ -131,43 +106,158 @@ export const PosCheckoutScreen: React.FC = () => {
   const [newProductUnit, setNewProductUnit] = useState('unidad');
   const [isSavingProduct, setIsSavingProduct] = useState(false);
 
-  const handleOpenPhysicalCamera = () => {
-    setShowCameraScanner(true);
+  // Cliente Rápido por C.I.
+  const [docType, setDocType] = useState<'V' | 'E' | 'J' | 'G'>('V');
+  const [docNumber, setDocNumber] = useState('');
+  const [customerFirstName, setCustomerFirstName] = useState('');
+  const [customerLastName, setCustomerLastName] = useState('');
+  const [customerPhone, setCustomerPhone] = useState('');
+  const [customerSearchMsg, setCustomerSearchMsg] = useState<{ type: 'success' | 'warning' | null; text: string }>({
+    type: null,
+    text: '',
+  });
+  const [lookingUpCustomer, setLookingUpCustomer] = useState(false);
+
+  // Pago y Vuelto
+  const [paymentCurrency, setPaymentCurrency] = useState<'USD_CASH' | 'BS_PAGO_MOVIL' | 'BS_BIOPAGO'>('USD_CASH');
+  const [pagoMovilRef, setPagoMovilRef] = useState('');
+  const [vueltoType, setVueltoType] = useState<'WALLET_CREDIT' | 'CHANGE_VOUCHER' | 'PAGO_MOVIL' | 'CASH'>('CASH');
+
+  const rate = frozenRate || 0;
+  const isVendedor = user?.roleId === 'VENDEDOR';
+  const isAdmin = user?.roleId === 'ADMIN' || user?.roleId === 'SUPER_ADMIN';
+
+  const syncPosResources = useCallback(async () => {
+    if (!accessToken || !user?.tenantId) return;
+    setIsSyncing(true);
+    try {
+      const [prodsRes, custRes, rateRes, cashRes] = await Promise.allSettled([
+        MobileApiService.getProducts(accessToken),
+        MobileApiService.getCustomers(),
+        MobileApiService.getActiveRate(),
+        MobileApiService.getCurrentCashSession(),
+      ]);
+
+      if (prodsRes.status === 'fulfilled') {
+        const rawList = Array.isArray(prodsRes.value)
+          ? prodsRes.value
+          : Array.isArray(prodsRes.value?.products)
+          ? prodsRes.value.products
+          : [];
+        const mapped: PosCatalogProduct[] = rawList.map((p: any) => ({
+          id: p.id,
+          name: p.name,
+          barcode: p.barcode || p.sku || p.id,
+          unitOfMeasure: (p.unitOfMeasure || 'unidad').toLowerCase(),
+          category: p.categoryName || 'General',
+          salePriceUsd: parseFloat(p.salePriceUsd) || 0,
+          taxRate: parseFloat(p.taxRate) || 0,
+          isExempt: Boolean(p.isExempt || parseFloat(p.taxRate) === 0),
+          stock: parseFloat(p.stock || '0') || 0,
+        }));
+        setCatalogProducts(mapped);
+        ProductCacheService.syncCatalog(
+          user.tenantId,
+          mapped.map((m) => ({
+            id: m.id,
+            name: m.name,
+            barcode: m.barcode,
+            price: m.salePriceUsd,
+            taxRate: m.taxRate,
+            stock: m.stock,
+            unit: m.unitOfMeasure,
+            isBulk: m.unitOfMeasure === 'kg',
+          }))
+        );
+      }
+
+      if (custRes.status === 'fulfilled') {
+        const list = Array.isArray(custRes.value) ? custRes.value : [];
+        setCustomersList(list);
+      }
+
+      if (rateRes.status === 'fulfilled') {
+        const val = Number(rateRes.value?.activeRate ?? rateRes.value?.rate ?? 0);
+        const snapId = rateRes.value?.exchangeRateSnapshotId || '';
+        if (val > 0 && snapId) {
+          setExchangeRate(val, snapId, true);
+        }
+      }
+
+      if (cashRes.status === 'fulfilled') {
+        const sess = cashRes.value?.session || null;
+        setCashSession(sess);
+        if (sess?.liveMetrics) {
+          setCashClosingUsd(String(sess.liveMetrics.expectedTotalUsd || '0.00'));
+          setCashClosingBs(String(sess.liveMetrics.expectedTotalBs || '0.00'));
+        }
+      }
+    } finally {
+      setIsSyncing(false);
+    }
+  }, [accessToken, user?.tenantId, setExchangeRate]);
+
+  useEffect(() => {
+    syncPosResources();
+  }, [syncPosResources]);
+
+  const handleOpenCashSession = async () => {
+    setCashLoading(true);
+    try {
+      await MobileApiService.openCashSession(
+        parseFloat(cashOpeningUsd) || 0,
+        parseFloat(cashOpeningBs) || 0,
+        cashNotes.trim() || undefined
+      );
+      setCashNotes('');
+      setShowCashModal(false);
+      await syncPosResources();
+      Alert.alert('✅ Caja Abierta', 'Turno de caja iniciado correctamente.');
+    } catch (e: any) {
+      Alert.alert('Error', e.message || 'No se pudo abrir la caja.');
+    } finally {
+      setCashLoading(false);
+    }
   };
 
-  // TODO(device-verify): Expo camera scanning, audio beep, torch toggle and haptics require physical Android/iOS device validation.
+  const handleCloseCashSession = async () => {
+    setCashLoading(true);
+    try {
+      const res = await MobileApiService.closeCashSession(
+        parseFloat(cashClosingUsd) || 0,
+        parseFloat(cashClosingBs) || 0,
+        cashNotes.trim() || undefined
+      );
+      setCashSession(null);
+      setCashNotes('');
+      setShowCashModal(false);
+      const disc = parseFloat(res?.session?.discrepancyUsd || '0');
+      Alert.alert(
+        '✅ Caja Cerrada',
+        `Esperado: $${res?.session?.closingExpectedUsd || '0.00'} USD\nDeclarado: $${res?.session?.closingDeclaredUsd || '0.00'} USD\nDiferencia: $${disc.toFixed(2)} USD`
+      );
+    } catch (e: any) {
+      Alert.alert('Error', e.message || 'No se pudo cerrar la caja.');
+    } finally {
+      setCashLoading(false);
+    }
+  };
+
   const handleScannerBarcodeResult = async (scannedCode: string, _format: string) => {
     const clean = scannedCode.trim();
     if (!clean) return;
 
-    const tenantId = user?.tenantId || 'tenant_default';
-    const token = useAuthStore.getState().accessToken || 'system_token';
+    const tenantId = user?.tenantId || 'default';
+    const token = useAuthStore.getState().accessToken || '';
 
-    // 1. Revisar si es código de balanza (prefijo 20, 21 o 22)
+    // 1. Código de balanza (prefijo 20, 21 o 22)
     const scaleInfo = MobileScaleBarcodeUtils.parseScaleBarcode(clean);
     if (scaleInfo.isScaleBarcode && scaleInfo.sku) {
       let foundScaleProd = catalogProducts.find(
         (p) => p.barcode === scaleInfo.sku || p.barcode === clean || p.id.includes(scaleInfo.sku!)
       );
 
-      if (!foundScaleProd) {
-        const cached = ProductCacheService.findByBarcode(tenantId, scaleInfo.sku);
-        if (cached) {
-          foundScaleProd = {
-            id: cached.id,
-            name: cached.name,
-            barcode: cached.barcode,
-            salePriceUsd: cached.price,
-            taxRate: cached.taxRate,
-            isExempt: cached.taxRate === 0,
-            stock: cached.stock,
-            unitOfMeasure: cached.unit,
-            category: 'Balanza',
-          };
-        }
-      }
-
-      if (!foundScaleProd) {
+      if (!foundScaleProd && token) {
         try {
           const apiProd = await MobileApiService.findByBarcode(token, scaleInfo.sku);
           if (apiProd && apiProd.id) {
@@ -177,37 +267,19 @@ export const PosCheckoutScreen: React.FC = () => {
               barcode: apiProd.barcode || scaleInfo.sku,
               salePriceUsd: parseFloat(apiProd.price) || 1.0,
               taxRate: parseFloat(apiProd.taxRate) || 0,
-              isExempt: (apiProd.taxRate === 0),
-              stock: apiProd.stock || 50,
+              isExempt: apiProd.taxRate === 0,
+              stock: apiProd.stock || 0,
               unitOfMeasure: apiProd.unit || 'kg',
               category: 'Balanza',
             };
-            ProductCacheService.upsertProduct(tenantId, {
-              id: apiProd.id,
-              name: apiProd.name,
-              barcode: apiProd.barcode || scaleInfo.sku,
-              price: parseFloat(apiProd.price) || 1.0,
-              taxRate: parseFloat(apiProd.taxRate) || 0,
-              stock: apiProd.stock || 50,
-              unit: apiProd.unit || 'kg',
-              isBulk: true,
-            });
           }
         } catch {
-          // Fallback offline
+          // Fallback caché
         }
       }
 
       if (foundScaleProd) {
-        addProduct({
-          id: foundScaleProd.id,
-          name: foundScaleProd.name,
-          barcode: clean,
-          salePriceUsd: foundScaleProd.salePriceUsd,
-          taxRate: foundScaleProd.taxRate,
-          isExempt: foundScaleProd.isExempt,
-          unitOfMeasure: (foundScaleProd as any).unitOfMeasure || 'kg',
-        });
+        addProduct(foundScaleProd);
         if (scaleInfo.weightKg && scaleInfo.weightKg > 0) {
           updateQuantity(foundScaleProd.id, scaleInfo.weightKg);
         }
@@ -217,7 +289,7 @@ export const PosCheckoutScreen: React.FC = () => {
       }
     }
 
-    // 2. Producto estándar: Buscar en Caché Local
+    // 2. Búsqueda local en catálogo cargado / caché
     let target = catalogProducts.find(
       (p) => p.barcode === clean || p.barcode.toLowerCase() === clean.toLowerCase()
     );
@@ -234,208 +306,130 @@ export const PosCheckoutScreen: React.FC = () => {
           isExempt: cached.taxRate === 0,
           stock: cached.stock,
           unitOfMeasure: cached.unit,
-          category: 'Alimentos',
+          category: 'General',
         };
       }
     }
 
     if (target) {
-      addProduct({
-        id: target.id,
-        name: target.name,
-        barcode: target.barcode,
-        salePriceUsd: target.salePriceUsd,
-        taxRate: target.taxRate,
-        isExempt: target.isExempt,
-        unitOfMeasure: (target as any).unitOfMeasure || 'unidad',
-      });
+      addProduct(target);
       setScanFeedbackMsg(`✅ ${target.name} agregado ($${target.salePriceUsd.toFixed(2)})`);
       try { Vibration.vibrate(80); } catch {}
       return;
     }
 
-    // 3. Si no está en caché local -> Consultar API
-    try {
-      const liveProd = await MobileApiService.findByBarcode(token, clean);
-      if (liveProd && liveProd.id) {
-        const mapped = {
-          id: liveProd.id,
-          name: liveProd.name,
-          barcode: liveProd.barcode || clean,
-          salePriceUsd: parseFloat(liveProd.price) || 1.0,
-          taxRate: parseFloat(liveProd.taxRate) || 0,
-          isExempt: liveProd.taxRate === 0,
-          stock: liveProd.stock || 50,
-          unitOfMeasure: liveProd.unit || 'unidad',
-          category: 'Alimentos',
-        };
-        setCatalogProducts((prev) => [...prev, mapped]);
-        ProductCacheService.upsertProduct(tenantId, {
-          id: liveProd.id,
-          name: liveProd.name,
-          barcode: liveProd.barcode || clean,
-          price: parseFloat(liveProd.price) || 1.0,
-          taxRate: parseFloat(liveProd.taxRate) || 0,
-          stock: liveProd.stock || 50,
-          unit: liveProd.unit || 'unidad',
-          isBulk: liveProd.isBulk || false,
-        });
-        addProduct({
-          id: mapped.id,
-          name: mapped.name,
-          barcode: mapped.barcode,
-          salePriceUsd: mapped.salePriceUsd,
-          taxRate: mapped.taxRate,
-          isExempt: mapped.isExempt,
-          unitOfMeasure: mapped.unitOfMeasure,
-        });
-        setScanFeedbackMsg(`🌐 ${mapped.name} cargado vía API ($${mapped.salePriceUsd.toFixed(2)})`);
-        try { Vibration.vibrate(80); } catch {}
-        return;
+    // 3. Consultar API en vivo
+    if (token) {
+      try {
+        const liveProd = await MobileApiService.findByBarcode(token, clean);
+        if (liveProd && liveProd.id) {
+          const mapped: PosCatalogProduct = {
+            id: liveProd.id,
+            name: liveProd.name,
+            barcode: liveProd.barcode || clean,
+            salePriceUsd: parseFloat(liveProd.price) || 1.0,
+            taxRate: parseFloat(liveProd.taxRate) || 0,
+            isExempt: liveProd.taxRate === 0,
+            stock: liveProd.stock || 0,
+            unitOfMeasure: liveProd.unit || 'unidad',
+            category: 'General',
+          };
+          setCatalogProducts((prev) => [...prev, mapped]);
+          addProduct(mapped);
+          setScanFeedbackMsg(`🌐 ${mapped.name} agregado ($${mapped.salePriceUsd.toFixed(2)})`);
+          try { Vibration.vibrate(80); } catch {}
+          return;
+        }
+      } catch {
+        setScanFeedbackMsg('⚠️ Error consultando código en el servidor');
       }
-    } catch {
-      setScanFeedbackMsg('⚠️ Modo offline: buscando solo en caché local');
     }
 
-    // 4. Si no se encontró (404) -> Pausar escáner y Alert con opciones
+    // 4. 404 -> Permitir crear si es admin
     setShowCameraScanner(false);
     Alert.alert(
-      '⚠️ Producto No Encontrado',
-      `El código "${clean}" no está registrado en el inventario de ${user?.businessName || 'la tienda'}.`,
+      'Producto No Encontrado',
+      `El código "${clean}" no está registrado en ${user?.businessName || 'la tienda'}.`,
       [
-        {
-          text: 'Continuar Escaneando',
-          style: 'cancel',
-          onPress: () => setShowCameraScanner(true),
-        },
-        {
-          text: 'Crear Producto Nuevo',
-          style: 'default',
-          onPress: () => {
-            setNewProductBarcode(clean);
-            setNewProductName('');
-            setNewProductPrice('1.00');
-            setNewProductStock('10');
-            setNewProductUnit('unidad');
-            setShowCreateProductModal(true);
-          },
-        },
+        { text: 'Continuar Escaneando', style: 'cancel', onPress: () => setShowCameraScanner(true) },
+        ...(isAdmin
+          ? [
+              {
+                text: 'Crear Producto Nuevo',
+                onPress: () => {
+                  setNewProductBarcode(clean);
+                  setNewProductName('');
+                  setNewProductPrice('1.00');
+                  setNewProductStock('10');
+                  setNewProductUnit('unidad');
+                  setShowCreateProductModal(true);
+                },
+              },
+            ]
+          : []),
       ]
     );
   };
 
   const handleSaveQuickProduct = async () => {
-    if (!newProductName.trim() || !newProductBarcode.trim()) {
+    const cleanBarcode = newProductBarcode.trim();
+    const cleanName = newProductName.trim();
+    if (!cleanName || !cleanBarcode) {
       Alert.alert('Datos Incompletos', 'Indique el nombre y código de barras.');
       return;
     }
 
-    setIsSavingProduct(true);
-    const tenantId = user?.tenantId || 'tenant_default';
-    const token = useAuthStore.getState().accessToken || 'system_token';
-    const priceNum = parseFloat(newProductPrice) || 1.0;
-    const stockNum = parseInt(newProductStock, 10) || 10;
-
-    const prodId = `prod_${Date.now()}`;
-    const newProd = {
-      id: prodId,
-      name: newProductName.trim(),
-      barcode: newProductBarcode.trim(),
-      salePriceUsd: priceNum,
-      taxRate: 0,
-      isExempt: true,
-      stock: stockNum,
-      unitOfMeasure: newProductUnit,
-      category: 'General',
-    };
-
-    try {
-      await MobileApiService.createProduct(token, {
-        name: newProd.name,
-        barcode: newProd.barcode,
-        salePriceUsd: newProd.salePriceUsd,
-        costPriceUsd: newProd.salePriceUsd * 0.7,
-        stock: newProd.stock,
-        unitOfMeasure: newProd.unitOfMeasure,
-        category: 'General',
-      });
-    } catch {
-      // Guardado local si el servidor no responde
+    const token = useAuthStore.getState().accessToken || '';
+    const priceNum = parseFloat(newProductPrice);
+    const stockNum = parseInt(newProductStock, 10);
+    if (isNaN(priceNum) || priceNum < 0) {
+      Alert.alert('Precio Inválido', 'Ingrese un precio de venta válido.');
+      return;
     }
 
-    setCatalogProducts((prev) => [...prev, newProd]);
-    ProductCacheService.upsertProduct(tenantId, {
-      id: prodId,
-      name: newProd.name,
-      barcode: newProd.barcode,
-      price: priceNum,
-      taxRate: 0,
-      stock: stockNum,
-      unit: newProductUnit,
-      isBulk: false,
-    });
+    setIsSavingProduct(true);
+    try {
+      const created = await MobileApiService.createProduct(token, {
+        name: cleanName,
+        unitOfMeasure: newProductUnit.toUpperCase(),
+        costPriceUsd: +(priceNum * 0.7).toFixed(2),
+        salePriceUsd: +priceNum.toFixed(2),
+        taxRate: 16,
+        isExempt: false,
+        minStockAlert: 5,
+        initialStock: isNaN(stockNum) ? 0 : stockNum,
+        barcodes: [
+          {
+            barcode: cleanBarcode,
+            barcodeType: detectBarcodeType(cleanBarcode),
+            isPrimary: true,
+          },
+        ],
+      });
 
-    addProduct({
-      id: newProd.id,
-      name: newProd.name,
-      barcode: newProd.barcode,
-      salePriceUsd: newProd.salePriceUsd,
-      taxRate: 0,
-      isExempt: true,
-      unitOfMeasure: newProd.unitOfMeasure,
-    });
+      const mapped: PosCatalogProduct = {
+        id: created.id,
+        name: created.name || cleanName,
+        barcode: cleanBarcode,
+        salePriceUsd: parseFloat(created.salePriceUsd) || priceNum,
+        taxRate: parseFloat(created.taxRate) || 16,
+        isExempt: Boolean(created.isExempt),
+        stock: isNaN(stockNum) ? 0 : stockNum,
+        unitOfMeasure: newProductUnit,
+        category: 'General',
+      };
 
-    setIsSavingProduct(false);
-    setShowCreateProductModal(false);
-    Alert.alert('✅ Producto Creado', `"${newProd.name}" se registró y se añadió al carrito.`);
+      setCatalogProducts((prev) => [mapped, ...prev]);
+      addProduct(mapped);
+      setShowCreateProductModal(false);
+      Alert.alert('✅ Producto Registrado', `"${mapped.name}" guardado en PostgreSQL y agregado al carrito.`);
+    } catch (e: any) {
+      Alert.alert('Error', e.message || 'No se pudo registrar el producto.');
+    } finally {
+      setIsSavingProduct(false);
+    }
   };
 
-  // Formulario de Cliente Rápido con Búsqueda por C.I.
-  const [docType, setDocType] = useState<'V' | 'E' | 'J' | 'G'>('V');
-  const [docNumber, setDocNumber] = useState('');
-  const [customerFirstName, setCustomerFirstName] = useState('');
-  const [customerLastName, setCustomerLastName] = useState('');
-  const [customerPhone, setCustomerPhone] = useState('');
-  const [customerSearchMsg, setCustomerSearchMsg] = useState<{ type: 'success' | 'warning' | null; text: string }>({
-    type: null,
-    text: '',
-  });
-
-  // Selector de Vuelto y Pago
-  const [paymentCurrency, setPaymentCurrency] = useState<'USD_CASH' | 'BS_PAGO_MOVIL' | 'BS_BIOPAGO'>('USD_CASH');
-  const [vueltoType, setVueltoType] = useState<'WALLET_CREDIT' | 'CHANGE_VOUCHER' | 'PAGO_MOVIL' | 'CASH'>('WALLET_CREDIT');
-  const [vueltoAmount, setVueltoAmount] = useState('0');
-
-  const rate = frozenRate || 52.50;
-  const isVendedor = user?.roleId === 'VENDEDOR';
-  const isAdmin = user?.roleId === 'ADMIN' || user?.roleId === 'SUPER_ADMIN';
-
-  // Intentar cargar productos desde la API en vivo
-  useEffect(() => {
-    async function loadLiveProducts() {
-      try {
-        const token = 'system_token';
-        const res = await MobileApiService.getProducts(token);
-        if (res && Array.isArray(res.products) && res.products.length > 0) {
-          const mapped = res.products.map((p: any) => ({
-            id: p.id,
-            name: p.name,
-            barcode: p.barcode,
-            salePriceUsd: parseFloat(p.salePriceUsd) || 1.0,
-            taxRate: parseFloat(p.taxRate) || 0,
-            isExempt: p.isExempt ?? false,
-            stock: p.stock ?? 50,
-          }));
-          setCatalogProducts(mapped);
-        }
-      } catch {
-        // Mantiene DEFAULT_PRODUCTS locales
-      }
-    }
-    loadLiveProducts();
-  }, []);
-
-  // Escaneo de código de barra con fallback inteligente por nombre / SKU
   const handleScanOrSearch = () => {
     const query = quickBarcodeInput.trim();
     if (!query) {
@@ -443,24 +437,14 @@ export const PosCheckoutScreen: React.FC = () => {
       return;
     }
 
-    // 1. Coincidencia exacta por código de barra
     const exactBarcode = catalogProducts.find((p) => p.barcode === query);
     if (exactBarcode) {
-      addProduct({
-        id: exactBarcode.id,
-        name: exactBarcode.name,
-        barcode: exactBarcode.barcode,
-        salePriceUsd: exactBarcode.salePriceUsd,
-        taxRate: exactBarcode.taxRate,
-        isExempt: exactBarcode.isExempt,
-        unitOfMeasure: (exactBarcode as any).unitOfMeasure,
-      });
+      addProduct(exactBarcode);
       setQuickBarcodeInput('');
-      Alert.alert('✅ Producto Escaneado', `${exactBarcode.name} agregado al carrito.`);
+      setScanFeedbackMsg(`✅ ${exactBarcode.name} agregado`);
       return;
     }
 
-    // 2. Fallback: búsqueda por SKU o coincidencia en el nombre
     const lower = query.toLowerCase();
     const matches = catalogProducts.filter(
       (p) =>
@@ -470,98 +454,113 @@ export const PosCheckoutScreen: React.FC = () => {
     );
 
     if (matches.length === 1) {
-      const match = matches[0];
-      addProduct({
-        id: match.id,
-        name: match.name,
-        barcode: match.barcode,
-        salePriceUsd: match.salePriceUsd,
-        taxRate: match.taxRate,
-        isExempt: match.isExempt,
-        unitOfMeasure: (match as any).unitOfMeasure,
-      });
+      addProduct(matches[0]);
       setQuickBarcodeInput('');
-      Alert.alert('🔍 Coincidencia Encontrada', `${match.name} agregado al carrito.`);
+      setScanFeedbackMsg(`🔍 ${matches[0].name} agregado`);
     } else if (matches.length > 1) {
-      // Múltiples coincidencias: abrir catálogo pre-filtrado
       setCatalogSearch(query);
       setShowCatalogModal(true);
       setQuickBarcodeInput('');
     } else {
-      Alert.alert(
-        '⚠️ No Encontrado',
-        `No se encontró ningún producto con código "${query}". Verifique el código o abra el catálogo manual.`
-      );
+      handleScannerBarcodeResult(query, 'MANUAL');
+      setQuickBarcodeInput('');
     }
   };
 
-  // Consultar Cliente Registrado por Cédula / RIF
-  const handleSearchCustomerByCi = () => {
+  const handleSearchCustomerByCi = async () => {
     const cleanNum = docNumber.trim();
-    if (!cleanNum) {
-      Alert.alert('Cédula Requerida', 'Por favor ingrese el número de cédula o RIF a consultar.');
+    if (!cleanNum || cleanNum.length < 5) {
+      Alert.alert('Documento Requerido', 'Ingrese un número de cédula o RIF válido (mínimo 5 dígitos).');
       return;
     }
 
-    const found = KNOWN_CUSTOMERS.find(
-      (c) => c.documentType === docType && c.documentNumber === cleanNum
-    );
-
-    if (found) {
-      const nameParts = found.name.split(' ');
-      setCustomerFirstName(nameParts[0] || '');
-      setCustomerLastName(nameParts.slice(1).join(' ') || '');
-      setCustomerPhone(found.phone || '');
-      setCustomerSearchMsg({
-        type: 'success',
-        text: `✅ Cliente registrado: ${found.name}`,
-      });
-    } else {
-      setCustomerFirstName('');
-      setCustomerLastName('');
-      setCustomerPhone('');
+    setLookingUpCustomer(true);
+    try {
+      const res = await MobileApiService.lookupCustomer(docType, cleanNum);
+      if (res && res.id) {
+        const nameParts = String(res.name || '').split(' ');
+        setCustomerFirstName(nameParts[0] || '');
+        setCustomerLastName(nameParts.slice(1).join(' ') || '');
+        setCustomerPhone(res.phone || '');
+        setCustomer({
+          id: res.id,
+          name: res.name,
+          documentType: res.documentType || docType,
+          documentNumber: res.documentNumber || cleanNum,
+          phone: res.phone || '',
+          balanceDue: parseFloat(res.balanceDue || '0') || 0,
+        });
+        setCustomerSearchMsg({
+          type: 'success',
+          text: `✅ Cliente encontrado en PostgreSQL: ${res.name}`,
+        });
+      } else {
+        setCustomerFirstName('');
+        setCustomerLastName('');
+        setCustomerPhone('');
+        setCustomerSearchMsg({
+          type: 'warning',
+          text: `⚠️ Documento ${docType}-${cleanNum} no registrado. Complete Nombre y Teléfono para registrarlo:`,
+        });
+      }
+    } catch (e: any) {
       setCustomerSearchMsg({
         type: 'warning',
-        text: `⚠️ Cédula no registrada (${docType}-${cleanNum}). Ingrese Nombre, Apellido y Teléfono para afiliar:`,
+        text: e.message || 'No se pudo consultar el cliente.',
       });
+    } finally {
+      setLookingUpCustomer(false);
     }
   };
 
-  // Registrar cliente rápido (Nombre, Apellido, Teléfono) y asignar al carrito
-  const handleSaveQuickCustomer = () => {
+  const handleSaveQuickCustomer = async () => {
     const cleanNum = docNumber.trim();
     const cleanFirst = customerFirstName.trim();
     const cleanLast = customerLastName.trim();
 
-    if (!cleanNum || !cleanFirst) {
-      Alert.alert('Datos Incompletos', 'El documento y al menos el primer nombre son obligatorios.');
+    if (cleanNum.length < 5 || !cleanFirst) {
+      Alert.alert('Datos Incompletos', 'El documento (mín. 5 dígitos) y nombre son obligatorios.');
       return;
     }
 
     const fullName = cleanLast ? `${cleanFirst} ${cleanLast}` : cleanFirst;
+    setLookingUpCustomer(true);
+    try {
+      const existing = await MobileApiService.lookupCustomer(docType, cleanNum).catch(() => null);
+      const saved =
+        existing && existing.id
+          ? existing
+          : await MobileApiService.createQuickCustomer({
+              documentType: docType,
+              documentNumber: cleanNum,
+              name: fullName,
+              phone: customerPhone.trim() || undefined,
+            });
 
-    const newCustomer = {
-      id: `c_${Date.now()}`,
-      name: fullName,
-      documentType: docType,
-      documentNumber: cleanNum,
-      phone: customerPhone.trim(),
-      balanceDue: 0,
-    };
+      const mapped = {
+        id: saved.id,
+        name: saved.name || fullName,
+        documentType: saved.documentType || docType,
+        documentNumber: saved.documentNumber || cleanNum,
+        phone: saved.phone || customerPhone.trim(),
+        balanceDue: parseFloat(saved.balanceDue || '0') || 0,
+      };
 
-    // Agregar a clientes conocidos para futuras consultas en la sesión
-    KNOWN_CUSTOMERS.push(newCustomer);
-
-    setCustomer(newCustomer);
-    setShowQuickCustomerModal(false);
-    setDocNumber('');
-    setCustomerFirstName('');
-    setCustomerLastName('');
-    setCustomerPhone('');
-    setCustomerSearchMsg({ type: null, text: '' });
+      setCustomer(mapped);
+      setCustomersList((prev) => [mapped, ...prev.filter((c) => c.id !== mapped.id)]);
+      setShowQuickCustomerModal(false);
+      setDocNumber('');
+      setCustomerFirstName('');
+      setCustomerLastName('');
+      setCustomerPhone('');
+      setCustomerSearchMsg({ type: null, text: '' });
+    } catch (e: any) {
+      Alert.alert('Error', e.message || 'No se pudo registrar el cliente en el servidor.');
+    } finally {
+      setLookingUpCustomer(false);
+    }
   };
 
-  // Agregar otra venta paralela (+ Otra Venta) sin perder la actual
   const handleCreateAnotherSale = () => {
     if (activeLines.length > 0) {
       const label = activeCustomer
@@ -569,96 +568,195 @@ export const PosCheckoutScreen: React.FC = () => {
         : `Venta #${heldCarts.length + 1}`;
       const res = parkCurrentCart(label);
       if (res.success) {
-        Alert.alert(
-          'Venta Pausada en Fichero',
-          `La venta de ${label} fue guardada en el fichero superior. Carrito listo para el nuevo cliente.`
-        );
+        Alert.alert('Venta Pausada', `La venta de ${label} quedó guardada en el fichero superior.`);
       } else {
         Alert.alert('Aviso', res.error || 'No se pudo pausar la venta.');
       }
     } else {
       clearActiveCart();
-      Alert.alert('Nueva Venta', 'Venta limpia lista para registrar productos.');
     }
   };
 
-  // Confirmar Venta Atómica con Reglas SENIAT
-  const handleConfirmSale = () => {
-    const totalUsd = getTotalUsd();
-    // IGTF 3% solo sobre divisas en efectivo
-    const igtf3 = paymentCurrency === 'USD_CASH' ? totalUsd * 0.03 : 0;
-    const finalTotalUsd = totalUsd + igtf3;
-    const finalTotalBs = finalTotalUsd * rate;
-    const invoiceNum = `A-${Math.floor(100000 + Math.random() * 900000)}`;
+  const resolveCustomerForSale = async (): Promise<string> => {
+    if (activeCustomer?.id) return activeCustomer.id;
 
-    const result = {
-      invoiceNumber: invoiceNum,
-      customerName: activeCustomer ? activeCustomer.name : 'Consumidor Final',
-      customerDoc: activeCustomer ? `${activeCustomer.documentType}-${activeCustomer.documentNumber}` : 'V-00000000',
-      totalUsd: finalTotalUsd.toFixed(2),
-      totalBs: finalTotalBs.toFixed(2),
-      subtotalUsd: totalUsd.toFixed(2),
-      igtf3Usd: igtf3.toFixed(2),
-      vueltoType,
-      vueltoAmount,
-      rate,
-    };
+    const existingDefault = customersList.find((c) => c.documentNumber === '00000000');
+    if (existingDefault?.id) return existingDefault.id;
 
-    setConfirmedInvoice(result);
-    setShowCheckoutModal(false);
-    setShowPostSaleModal(true);
-    clearActiveCart();
+    const lookedUp = await MobileApiService.lookupCustomer('V', '00000000').catch(() => null);
+    if (lookedUp?.id) return lookedUp.id;
+
+    const created = await MobileApiService.createQuickCustomer({
+      documentType: 'V',
+      documentNumber: '00000000',
+      name: 'Consumidor Final',
+    });
+    return created.id;
+  };
+
+  const handleConfirmSale = async () => {
+    if (activeLines.length === 0) return;
+
+    if (!cashSession) {
+      Alert.alert('Caja Cerrada', 'Debes abrir turno de caja antes de facturar.', [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Abrir Caja',
+          onPress: () => {
+            setShowCheckoutModal(false);
+            setShowCashModal(true);
+          },
+        },
+      ]);
+      return;
+    }
+
+    setIsSubmittingSale(true);
+    const idempKey =
+      pendingIdempotencyKey || `mob-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setPendingIdempotencyKey(idempKey);
+
+    try {
+      let rateIdToUse = exchangeRateId;
+      let rateValueToUse = rate;
+      if (!rateIdToUse || rateValueToUse <= 0) {
+        const activeR = await MobileApiService.getActiveRate();
+        rateIdToUse = activeR?.exchangeRateSnapshotId || '';
+        rateValueToUse = Number(activeR?.activeRate ?? activeR?.rate ?? 0);
+        if (rateValueToUse > 0 && rateIdToUse) {
+          setExchangeRate(rateValueToUse, rateIdToUse, true);
+        }
+      }
+
+      if (!rateIdToUse) {
+        throw new Error('No hay snapshot de tasa de cambio activo en la base de datos.');
+      }
+
+      const customerId = await resolveCustomerForSale();
+      const baseTotalUsd = getTotalUsd();
+      const igtfUsd = paymentCurrency === 'USD_CASH' ? +(baseTotalUsd * 0.03).toFixed(2) : 0;
+      const finalTotalUsd = +(baseTotalUsd + igtfUsd).toFixed(2);
+      const finalTotalBs = +(finalTotalUsd * rateValueToUse).toFixed(2);
+
+      const backendPaymentMethod =
+        paymentCurrency === 'USD_CASH'
+          ? 'CASH_USD'
+          : paymentCurrency === 'BS_PAGO_MOVIL'
+          ? 'PAGO_MOVIL'
+          : 'DEBIT_CARD';
+      const isVes = paymentCurrency !== 'USD_CASH';
+
+      const token = useAuthStore.getState().accessToken || '';
+      const saleResult = await MobileApiService.confirmSale(
+        token,
+        {
+          customerId,
+          exchangeRateId: rateIdToUse,
+          lines: activeLines.map((l) => ({
+            productId: l.productId,
+            quantity: l.quantity,
+            unitPriceUsd: l.unitPriceUsd,
+          })),
+          payments: [
+            {
+              paymentMethod: backendPaymentMethod,
+              currency: isVes ? 'VES' : 'USD',
+              amount: isVes ? finalTotalBs : finalTotalUsd,
+              ...(paymentCurrency === 'BS_PAGO_MOVIL' && pagoMovilRef.trim()
+                ? { referenceNumber: pagoMovilRef.trim() }
+                : {}),
+            },
+          ],
+        },
+        idempKey
+      );
+
+      setConfirmedInvoice({
+        id: saleResult.id,
+        invoiceNumber: saleResult.invoiceFormattedNumber || saleResult.invoiceNumber,
+        customerName: activeCustomer ? activeCustomer.name : 'Consumidor Final',
+        customerDoc: activeCustomer
+          ? `${activeCustomer.documentType}-${activeCustomer.documentNumber}`
+          : 'V-00000000',
+        totalUsd: parseFloat(saleResult.totalAmountUsd || String(finalTotalUsd)).toFixed(2),
+        totalBs: parseFloat(saleResult.totalAmountBs || String(finalTotalBs)).toFixed(2),
+        subtotalUsd: baseTotalUsd.toFixed(2),
+        igtf3Usd: igtfUsd.toFixed(2),
+        vueltoType,
+        rate: rateValueToUse,
+      });
+
+      setPendingIdempotencyKey(null);
+      setPagoMovilRef('');
+      setShowCheckoutModal(false);
+      setShowPostSaleModal(true);
+      clearActiveCart();
+      syncPosResources();
+    } catch (e: any) {
+      Alert.alert('Error al Facturar', e.message || 'No se pudo registrar la factura en el servidor.');
+    } finally {
+      setIsSubmittingSale(false);
+    }
   };
 
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#0B3B49" />
+      <StatusBar barStyle="light-content" backgroundColor={VUELTO_COLORS.deep} />
 
-      {/* 1. Header con Información de Rol y Tasa Oficial */}
+      {/* 1. Header Oficial */}
       <View style={styles.header}>
-        <View>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+        <View style={{ flex: 1 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
             <Image
               source={require('../../../assets/vuelto-icon.jpg')}
-              style={{ width: 26, height: 26, borderRadius: 6 }}
+              style={{ width: 28, height: 28, borderRadius: 7 }}
             />
             <Text style={styles.title}>VUELTO POS</Text>
-            {isVendedor ? (
-              <View style={styles.roleBadgeVendedor}>
-                <Text style={styles.roleBadgeVendedorText}>🛒 CAJERO</Text>
-              </View>
-            ) : (
-              <View style={styles.roleBadgeAdmin}>
-                <Text style={styles.roleBadgeAdminText}>👑 ADMIN</Text>
-              </View>
-            )}
+            <View style={isVendedor ? styles.roleBadgeVendedor : styles.roleBadgeAdmin}>
+              <Text style={isVendedor ? styles.roleBadgeVendedorText : styles.roleBadgeAdminText}>
+                {isVendedor ? 'CAJERO' : 'ADMIN'}
+              </Text>
+            </View>
           </View>
-          <Text style={styles.subtitle}>Tasa Oficial BCV: {rate.toFixed(2)} Bs/$</Text>
+          <Text style={styles.subtitle}>
+            {rate > 0 ? `Tasa Activa: ${rate.toFixed(2)} Bs/$` : 'Sin tasa sincronizada'}
+            {isSyncing ? ' • Sincronizando...' : ''}
+          </Text>
         </View>
 
         <View style={styles.headerRight}>
-          {/* Switch a Modo Administrador: SOLO visible para ADMIN */}
+          <TouchableOpacity
+            style={[
+              styles.cashBadgeBtn,
+              cashSession ? styles.cashBadgeOpen : styles.cashBadgeClosed,
+            ]}
+            onPress={() => setShowCashModal(true)}
+          >
+            <Text style={styles.cashBadgeText}>
+              {cashSession ? '🟢 Caja' : '🔴 Abrir Caja'}
+            </Text>
+          </TouchableOpacity>
+
           {isAdmin && (
             <TouchableOpacity
               style={styles.adminSwitchButton}
               onPress={() => toggleMode('ADMIN')}
             >
-              <Text style={styles.adminSwitchText}>Modo Admin</Text>
+              <Text style={styles.adminSwitchText}>Admin</Text>
             </TouchableOpacity>
           )}
 
-          {/* Botón Salir / Cambiar Usuario */}
           <TouchableOpacity
             style={styles.logoutButton}
             onPress={() => {
-              Alert.alert(
-                'Cerrar Turno',
-                '¿Deseas cerrar sesión para cambiar de usuario?',
-                [
-                  { text: 'Cancelar', style: 'cancel' },
-                  { text: 'Cerrar Sesión', style: 'destructive', onPress: () => logout() },
-                ]
-              );
+              Alert.alert('Cerrar Sesión', '¿Deseas cerrar tu sesión actual?', [
+                { text: 'Cancelar', style: 'cancel' },
+                {
+                  text: 'Cerrar Sesión',
+                  style: 'destructive',
+                  onPress: () => MobileApiService.logout(refreshToken),
+                },
+              ]);
             }}
           >
             <Text style={styles.logoutButtonText}>Salir</Text>
@@ -666,16 +764,15 @@ export const PosCheckoutScreen: React.FC = () => {
         </View>
       </View>
 
-      {/* 2. Fichero Superior de Ventas en Espera (Cuentas Paralelas) */}
+      {/* 2. Fichero Superior de Cuentas Paralelas */}
       <View style={styles.ticketsTabBar}>
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.ticketsScrollContent}
         >
-          {/* Ticket Activo Actual */}
           <View style={styles.activeTicketTab}>
-            <Text style={styles.activeTicketIcon}>🛒</Text>
+            <Text style={{ fontSize: 13 }}>🛒</Text>
             <View>
               <Text style={styles.activeTicketTitle}>
                 {activeCustomer ? activeCustomer.name.split(' ')[0] : 'Venta Activa'}
@@ -686,14 +783,13 @@ export const PosCheckoutScreen: React.FC = () => {
             </View>
           </View>
 
-          {/* Cuentas en Espera (Held Carts) */}
           {heldCarts.map((h) => (
             <TouchableOpacity
               key={h.id}
               style={styles.heldTicketTab}
               onPress={() => resumeHeldCart(h.id)}
             >
-              <Text style={styles.heldTicketIcon}>⏸️</Text>
+              <Text style={{ fontSize: 13 }}>⏸️</Text>
               <View style={{ marginRight: 6 }}>
                 <Text style={styles.heldTicketTitle}>{h.label}</Text>
                 <Text style={styles.heldTicketSubtitle}>
@@ -701,20 +797,7 @@ export const PosCheckoutScreen: React.FC = () => {
                 </Text>
               </View>
               <TouchableOpacity
-                onPress={() => {
-                  Alert.alert(
-                    'Descartar Cuenta',
-                    `¿Deseas descartar ${h.label}?`,
-                    [
-                      { text: 'Cancelar', style: 'cancel' },
-                      {
-                        text: 'Descartar',
-                        style: 'destructive',
-                        onPress: () => discardHeldCart(h.id),
-                      },
-                    ]
-                  );
-                }}
+                onPress={() => discardHeldCart(h.id)}
                 style={styles.discardTabBtn}
               >
                 <Text style={styles.discardTabBtnText}>✕</Text>
@@ -722,53 +805,56 @@ export const PosCheckoutScreen: React.FC = () => {
             </TouchableOpacity>
           ))}
 
-          {/* Botón "+ Otra Venta" */}
           <TouchableOpacity style={styles.newTicketBtn} onPress={handleCreateAnotherSale}>
-            <Text style={styles.newTicketBtnText}>➕ Otra Venta</Text>
+            <Text style={styles.newTicketBtnText}>+ Otra Venta</Text>
           </TouchableOpacity>
+
+          {onShowOnboarding && (
+            <TouchableOpacity style={styles.helpTabBtn} onPress={onShowOnboarding}>
+              <Text style={styles.helpTabBtnText}>❓ Guía</Text>
+            </TouchableOpacity>
+          )}
         </ScrollView>
       </View>
 
-      {/* 3. Barra de Escáner de Código de Barras con Cámara Física y Fallback a Nombre / SKU */}
+      {/* 3. Barra de Escáner y Búsqueda */}
       <View style={styles.barcodeScannerBar}>
         <TextInput
           style={styles.barcodeInput}
           placeholder="Código EAN o buscar producto..."
-          placeholderTextColor="#64748B"
+          placeholderTextColor={VUELTO_COLORS.subtle}
           value={quickBarcodeInput}
           onChangeText={setQuickBarcodeInput}
           onSubmitEditing={handleScanOrSearch}
           returnKeyType="search"
           autoCapitalize="none"
         />
-        <TouchableOpacity style={styles.cameraScanActionBtn} onPress={handleOpenPhysicalCamera}>
-          <Text style={styles.cameraScanActionBtnText}>📷 Cámara</Text>
+        <TouchableOpacity style={styles.cameraScanActionBtn} onPress={() => setShowCameraScanner(true)}>
+          <Text style={styles.cameraScanActionBtnText}>📷 Escáner</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.barcodeScanActionBtn} onPress={handleScanOrSearch}>
           <Text style={styles.barcodeScanActionBtnText}>Buscar</Text>
         </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.openCatalogIconBtn}
-          onPress={() => setShowCatalogModal(true)}
-        >
-          <Text style={styles.openCatalogIconBtnText}>🔍</Text>
+        <TouchableOpacity style={styles.openCatalogIconBtn} onPress={() => setShowCatalogModal(true)}>
+          <Text style={styles.openCatalogIconBtnText}>📦</Text>
         </TouchableOpacity>
       </View>
 
-      {/* 4. Barra de Cliente Activo */}
+      {scanFeedbackMsg ? (
+        <View style={styles.feedbackBanner}>
+          <Text style={styles.feedbackBannerText}>{scanFeedbackMsg}</Text>
+        </View>
+      ) : null}
+
+      {/* 4. Cliente Activo */}
       <View style={styles.customerBar}>
         <View style={{ flex: 1 }}>
-          <Text style={styles.customerLabel}>Cliente Asignado:</Text>
+          <Text style={styles.customerLabel}>Cliente Asignado</Text>
           <Text style={styles.customerName}>
             {activeCustomer
               ? `${activeCustomer.documentType}-${activeCustomer.documentNumber} ${activeCustomer.name}`
-              : 'Consumidor Final (Sin RIF)'}
+              : 'Consumidor Final (V-00000000)'}
           </Text>
-          {activeCustomer && activeCustomer.balanceDue < 0 && (
-            <Text style={styles.customerCredit}>
-              Saldo a Favor (Monedero): ${Math.abs(activeCustomer.balanceDue).toFixed(2)}
-            </Text>
-          )}
         </View>
 
         <TouchableOpacity
@@ -779,19 +865,29 @@ export const PosCheckoutScreen: React.FC = () => {
         </TouchableOpacity>
       </View>
 
-      {/* 4. Lista de Ítems en Carrito */}
+      {/* 5. Lista de Ítems en Carrito */}
       <View style={styles.cartContainer}>
         {activeLines.length === 0 ? (
           <View style={styles.emptyCart}>
             <Text style={styles.emptyCartText}>
-              Carrito listo para facturación.{'\n'}Agrega productos desde el catálogo o escanea con balanza.
+              {catalogProducts.length === 0 && !isSyncing
+                ? 'Catálogo vacío en tu comercio. Agrega productos desde Admin o escanea un código nuevo.'
+                : 'Carrito listo para facturación.\nEscanea un código de barras o abre el catálogo.'}
             </Text>
-            <TouchableOpacity
-              style={styles.scanSimBtn}
-              onPress={() => setShowCatalogModal(true)}
-            >
-              <Text style={styles.scanSimBtnText}>Abrir Catálogo de Productos</Text>
-            </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: 10 }}>
+              <TouchableOpacity
+                style={styles.scanSimBtn}
+                onPress={() => setShowCatalogModal(true)}
+              >
+                <Text style={styles.scanSimBtnText}>Abrir Catálogo ({catalogProducts.length})</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.scanSimBtn}
+                onPress={syncPosResources}
+              >
+                <Text style={styles.scanSimBtnText}>↻ Sincronizar</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         ) : (
           <FlatList
@@ -802,11 +898,11 @@ export const PosCheckoutScreen: React.FC = () => {
                 <View style={{ flex: 1 }}>
                   <Text style={styles.itemName}>{item.name}</Text>
                   <Text style={styles.itemPrice}>
-                    ${item.unitPriceUsd.toFixed(2)} USD / {item.unitOfMeasure || 'ud'} ≈ {(item.unitPriceUsd * rate).toFixed(2)} Bs
+                    ${item.unitPriceUsd.toFixed(2)} USD / {item.unitOfMeasure || 'ud'}
+                    {rate > 0 ? ` ≈ ${(item.unitPriceUsd * rate).toFixed(2)} Bs` : ''}
                   </Text>
                 </View>
 
-                {/* Controles de Cantidad (+ / -) */}
                 <View style={styles.qtyControls}>
                   <TouchableOpacity
                     style={styles.qtyBtn}
@@ -814,9 +910,7 @@ export const PosCheckoutScreen: React.FC = () => {
                   >
                     <Text style={styles.qtyBtnText}>-</Text>
                   </TouchableOpacity>
-
                   <Text style={styles.qtyText}>{item.quantity}</Text>
-
                   <TouchableOpacity
                     style={styles.qtyBtn}
                     onPress={() => updateQuantity(item.productId, item.quantity + 1)}
@@ -825,9 +919,11 @@ export const PosCheckoutScreen: React.FC = () => {
                   </TouchableOpacity>
                 </View>
 
-                <View style={{ alignItems: 'flex-end', minWidth: 70 }}>
+                <View style={{ alignItems: 'flex-end', minWidth: 72 }}>
                   <Text style={styles.itemTotal}>${item.totalUsd.toFixed(2)}</Text>
-                  <Text style={styles.itemTotalBs}>{(item.totalUsd * rate).toFixed(2)} Bs</Text>
+                  {rate > 0 && (
+                    <Text style={styles.itemTotalBs}>{(item.totalUsd * rate).toFixed(2)} Bs</Text>
+                  )}
                 </View>
               </View>
             )}
@@ -835,12 +931,14 @@ export const PosCheckoutScreen: React.FC = () => {
         )}
       </View>
 
-      {/* 5. Barra Inferior de Totales y Cobro */}
+      {/* 6. Totales y Cobro */}
       <View style={styles.footer}>
         <View style={styles.totalsRow}>
           <View>
             <Text style={styles.totalUsdText}>TOTAL: ${getTotalUsd().toFixed(2)} USD</Text>
-            <Text style={styles.totalBsText}>≈ {getTotalBs().toFixed(2)} Bs</Text>
+            <Text style={styles.totalBsText}>
+              {rate > 0 ? `≈ ${getTotalBs().toFixed(2)} Bs` : 'Tasa pendiente'}
+            </Text>
           </View>
           <Text style={styles.itemsCountBadge}>{activeLines.length} ítems</Text>
         </View>
@@ -868,7 +966,88 @@ export const PosCheckoutScreen: React.FC = () => {
         </View>
       </View>
 
-      {/* MODAL 1: CATÁLOGO Y CONSULTA DE PRECIOS (RBAC: SIN COSTOS NI MÁRGENES) */}
+      {/* MODAL CAJA (APERTURA / CIERRE) */}
+      <Modal visible={showCashModal} animationType="fade" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>
+              {cashSession ? '🔒 Cierre de Caja' : '🟢 Apertura de Caja'}
+            </Text>
+
+            {cashSession ? (
+              <>
+                <Text style={styles.modalSub}>
+                  Caja abierta desde {new Date(cashSession.openedAt).toLocaleString('es-VE')}
+                </Text>
+                <Text style={styles.fieldLabel}>Efectivo Declarado (USD):</Text>
+                <TextInput
+                  style={styles.input}
+                  keyboardType="numeric"
+                  value={cashClosingUsd}
+                  onChangeText={setCashClosingUsd}
+                />
+                <Text style={styles.fieldLabel}>Efectivo Declarado (Bs):</Text>
+                <TextInput
+                  style={styles.input}
+                  keyboardType="numeric"
+                  value={cashClosingBs}
+                  onChangeText={setCashClosingBs}
+                />
+              </>
+            ) : (
+              <>
+                <Text style={styles.modalSub}>
+                  Registra el fondo inicial para habilitar la facturación del turno.
+                </Text>
+                <Text style={styles.fieldLabel}>Fondo Inicial (USD):</Text>
+                <TextInput
+                  style={styles.input}
+                  keyboardType="numeric"
+                  value={cashOpeningUsd}
+                  onChangeText={setCashOpeningUsd}
+                />
+                <Text style={styles.fieldLabel}>Fondo Inicial (Bs):</Text>
+                <TextInput
+                  style={styles.input}
+                  keyboardType="numeric"
+                  value={cashOpeningBs}
+                  onChangeText={setCashOpeningBs}
+                />
+              </>
+            )}
+
+            <Text style={styles.fieldLabel}>Observaciones:</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="Opcional"
+              placeholderTextColor={VUELTO_COLORS.subtle}
+              value={cashNotes}
+              onChangeText={setCashNotes}
+            />
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity style={styles.cancelModalBtn} onPress={() => setShowCashModal(false)}>
+                <Text style={styles.cancelModalBtnText}>Cancelar</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.saveModalBtn}
+                disabled={cashLoading}
+                onPress={cashSession ? handleCloseCashSession : handleOpenCashSession}
+              >
+                {cashLoading ? (
+                  <ActivityIndicator color={VUELTO_COLORS.night} />
+                ) : (
+                  <Text style={styles.saveModalBtnText}>
+                    {cashSession ? 'Cerrar Turno' : 'Abrir Turno'}
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* MODAL CATÁLOGO */}
       <Modal visible={showCatalogModal} animationType="slide" transparent>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContentLarge}>
@@ -881,8 +1060,8 @@ export const PosCheckoutScreen: React.FC = () => {
 
             <TextInput
               style={styles.input}
-              placeholder="Buscar por nombre o código de barra (759...)"
-              placeholderTextColor="#64748B"
+              placeholder="Buscar por nombre o código de barra..."
+              placeholderTextColor={VUELTO_COLORS.subtle}
               value={catalogSearch}
               onChangeText={setCatalogSearch}
             />
@@ -895,49 +1074,40 @@ export const PosCheckoutScreen: React.FC = () => {
               )}
               keyExtractor={(item) => item.id}
               style={{ maxHeight: 380 }}
-              renderItem={({ item }) => {
-                const priceBs = (item.salePriceUsd * rate).toFixed(2);
-                return (
-                  <View style={styles.catalogItemRow}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.catalogItemName}>{item.name}</Text>
-                      <Text style={styles.catalogItemBarcode}>
-                        EAN-13: {item.barcode} • Medida: {(item as any).unitOfMeasure || 'unidad'}
-                      </Text>
-                      <View style={{ flexDirection: 'row', gap: 10, marginTop: 4 }}>
-                        <Text style={styles.catalogItemPriceUsd}>
-                          ${item.salePriceUsd.toFixed(2)} USD / {(item as any).unitOfMeasure || 'ud'}
-                        </Text>
-                        <Text style={styles.catalogItemPriceBs}>({priceBs} Bs)</Text>
-                      </View>
-                    </View>
-
-                    <TouchableOpacity
-                      style={styles.addToCartBtn}
-                      onPress={() => {
-                        addProduct({
-                          id: item.id,
-                          name: item.name,
-                          barcode: item.barcode,
-                          salePriceUsd: item.salePriceUsd,
-                          taxRate: item.taxRate,
-                          isExempt: item.isExempt,
-                          unitOfMeasure: (item as any).unitOfMeasure,
-                        });
-                        setShowCatalogModal(false);
-                      }}
-                    >
-                      <Text style={styles.addToCartBtnText}>+ Agregar</Text>
-                    </TouchableOpacity>
+              ListEmptyComponent={
+                <Text style={{ textAlign: 'center', color: VUELTO_COLORS.muted, padding: 20 }}>
+                  No hay productos registrados en este comercio.
+                </Text>
+              }
+              renderItem={({ item }) => (
+                <View style={styles.catalogItemRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.catalogItemName}>{item.name}</Text>
+                    <Text style={styles.catalogItemBarcode}>
+                      EAN: {item.barcode} • Stock: {item.stock} ({item.unitOfMeasure})
+                    </Text>
+                    <Text style={styles.catalogItemPriceUsd}>
+                      ${item.salePriceUsd.toFixed(2)} USD
+                      {rate > 0 ? ` (${(item.salePriceUsd * rate).toFixed(2)} Bs)` : ''}
+                    </Text>
                   </View>
-                );
-              }}
+                  <TouchableOpacity
+                    style={styles.addToCartBtn}
+                    onPress={() => {
+                      addProduct(item);
+                      setShowCatalogModal(false);
+                    }}
+                  >
+                    <Text style={styles.addToCartBtnText}>+ Agregar</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
             />
           </View>
         </View>
       </Modal>
 
-      {/* MODAL 2: BÚSQUEDA POR C.I. Y REGISTRO RÁPIDO DE CLIENTE */}
+      {/* MODAL CLIENTE RÁPIDO */}
       <Modal visible={showQuickCustomerModal} animationType="slide" transparent>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
@@ -950,19 +1120,16 @@ export const PosCheckoutScreen: React.FC = () => {
                   style={[styles.docTypeChip, docType === t && styles.docTypeChipActive]}
                   onPress={() => setDocType(t)}
                 >
-                  <Text style={[styles.docTypeText, docType === t && styles.docTypeTextActive]}>
-                    {t}
-                  </Text>
+                  <Text style={[styles.docTypeText, docType === t && styles.docTypeTextActive]}>{t}</Text>
                 </TouchableOpacity>
               ))}
             </View>
 
-            {/* Consulta directa por Cédula / RIF */}
             <View style={styles.ciSearchRow}>
               <TextInput
                 style={styles.ciInput}
-                placeholder="Número de Cédula o RIF"
-                placeholderTextColor="#64748B"
+                placeholder="Cédula o RIF"
+                placeholderTextColor={VUELTO_COLORS.subtle}
                 keyboardType="numeric"
                 value={docNumber}
                 onChangeText={(val) => {
@@ -970,12 +1137,11 @@ export const PosCheckoutScreen: React.FC = () => {
                   setCustomerSearchMsg({ type: null, text: '' });
                 }}
               />
-              <TouchableOpacity style={styles.ciSearchBtn} onPress={handleSearchCustomerByCi}>
-                <Text style={styles.ciSearchBtnText}>🔍 Buscar C.I.</Text>
+              <TouchableOpacity style={styles.ciSearchBtn} onPress={handleSearchCustomerByCi} disabled={lookingUpCustomer}>
+                <Text style={styles.ciSearchBtnText}>{lookingUpCustomer ? '...' : '🔍 Buscar'}</Text>
               </TouchableOpacity>
             </View>
 
-            {/* Banner de resultado de la búsqueda */}
             {customerSearchMsg.text ? (
               <View
                 style={[
@@ -998,29 +1164,27 @@ export const PosCheckoutScreen: React.FC = () => {
               </View>
             ) : null}
 
-            {/* Campos separados: Nombre y Apellido */}
             <View style={styles.nameRow}>
               <TextInput
                 style={[styles.input, { flex: 1, marginRight: 4 }]}
                 placeholder="Nombre(s) *"
-                placeholderTextColor="#64748B"
+                placeholderTextColor={VUELTO_COLORS.subtle}
                 value={customerFirstName}
                 onChangeText={setCustomerFirstName}
               />
               <TextInput
                 style={[styles.input, { flex: 1, marginLeft: 4 }]}
                 placeholder="Apellido(s)"
-                placeholderTextColor="#64748B"
+                placeholderTextColor={VUELTO_COLORS.subtle}
                 value={customerLastName}
                 onChangeText={setCustomerLastName}
               />
             </View>
 
-            {/* Teléfono WhatsApp */}
             <TextInput
               style={styles.input}
               placeholder="Teléfono WhatsApp (ej. 04141234567)"
-              placeholderTextColor="#64748B"
+              placeholderTextColor={VUELTO_COLORS.subtle}
               keyboardType="phone-pad"
               value={customerPhone}
               onChangeText={setCustomerPhone}
@@ -1037,69 +1201,54 @@ export const PosCheckoutScreen: React.FC = () => {
                 <Text style={styles.cancelModalBtnText}>Cancelar</Text>
               </TouchableOpacity>
 
-              <TouchableOpacity style={styles.saveModalBtn} onPress={handleSaveQuickCustomer}>
-                <Text style={styles.saveModalBtnText}>Asignar al Carrito</Text>
+              <TouchableOpacity
+                style={styles.saveModalBtn}
+                disabled={lookingUpCustomer}
+                onPress={handleSaveQuickCustomer}
+              >
+                <Text style={styles.saveModalBtnText}>Asignar</Text>
               </TouchableOpacity>
             </View>
           </View>
         </View>
       </Modal>
 
-      {/* MODAL 3: CUENTAS EN ESPERA */}
+      {/* MODAL CUENTAS EN ESPERA */}
       <Modal visible={showHeldCartsModal} animationType="fade" transparent>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>Cuentas en Espera ({heldCarts.length}/10)</Text>
-
-            {heldCarts.length === 0 ? (
-              <Text style={{ textAlign: 'center', color: '#64748B', marginVertical: 20 }}>
-                No hay cuentas en espera.
-              </Text>
-            ) : (
-              <FlatList
-                data={heldCarts}
-                keyExtractor={(item) => item.id}
-                renderItem={({ item }) => (
-                  <View style={styles.heldCard}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.heldLabel}>{item.label}</Text>
-                      <Text style={styles.heldInfo}>
-                        {item.lines.length} productos | ${item.totalUsd.toFixed(2)}
-                      </Text>
-                    </View>
-
-                    <TouchableOpacity
-                      style={styles.resumeBtn}
-                      onPress={() => {
-                        resumeHeldCart(item.id);
-                        setShowHeldCartsModal(false);
-                      }}
-                    >
-                      <Text style={styles.resumeBtnText}>Reanudar</Text>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-                      style={styles.discardBtn}
-                      onPress={() => discardHeldCart(item.id)}
-                    >
-                      <Text style={styles.discardBtnText}>✕</Text>
-                    </TouchableOpacity>
+            <FlatList
+              data={heldCarts}
+              keyExtractor={(item) => item.id}
+              renderItem={({ item }) => (
+                <View style={styles.heldCard}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.heldLabel}>{item.label}</Text>
+                    <Text style={styles.heldInfo}>
+                      {item.lines.length} productos | ${item.totalUsd.toFixed(2)}
+                    </Text>
                   </View>
-                )}
-              />
-            )}
-
-            <TouchableOpacity
-              style={[styles.cancelModalBtn, { marginTop: 15 }]}
-              onPress={() => setShowHeldCartsModal(false)}
-            >
+                  <TouchableOpacity
+                    style={styles.resumeBtn}
+                    onPress={() => {
+                      resumeHeldCart(item.id);
+                      setShowHeldCartsModal(false);
+                    }}
+                  >
+                    <Text style={styles.resumeBtnText}>Reanudar</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+            />
+            <TouchableOpacity style={[styles.cancelModalBtn, { marginTop: 14 }]} onPress={() => setShowHeldCartsModal(false)}>
               <Text style={styles.cancelModalBtnText}>Cerrar</Text>
             </TouchableOpacity>
           </View>
         </View>
       </Modal>
 
-      {/* MODAL 4: CONFIRMAR COBRO Y VUELTO (SENIAT) */}
+      {/* MODAL CONFIRMAR COBRO REAL */}
       <Modal visible={showCheckoutModal} animationType="slide" transparent>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
@@ -1107,24 +1256,28 @@ export const PosCheckoutScreen: React.FC = () => {
 
             <View style={styles.summaryBox}>
               <View style={styles.summaryLine}>
-                <Text style={styles.summaryLabel}>Subtotal Ítems:</Text>
+                <Text style={styles.summaryLabel}>Subtotal + IVA:</Text>
                 <Text style={styles.summaryValue}>${getTotalUsd().toFixed(2)} USD</Text>
               </View>
               {paymentCurrency === 'USD_CASH' && (
                 <View style={styles.summaryLine}>
-                  <Text style={[styles.summaryLabel, { color: '#F59E0B' }]}>IGTF 3% (Efectivo Divisas):</Text>
-                  <Text style={[styles.summaryValue, { color: '#F59E0B' }]}>+${(getTotalUsd() * 0.03).toFixed(2)} USD</Text>
+                  <Text style={[styles.summaryLabel, { color: VUELTO_COLORS.warning }]}>IGTF 3%:</Text>
+                  <Text style={[styles.summaryValue, { color: VUELTO_COLORS.warning }]}>
+                    +${(getTotalUsd() * 0.03).toFixed(2)} USD
+                  </Text>
                 </View>
               )}
-              <View style={[styles.summaryLine, { borderTopWidth: 1, borderTopColor: '#334155', paddingTop: 6, marginTop: 4 }]}>
-                <Text style={[styles.summaryLabel, { fontWeight: 'bold' }]}>TOTAL FACTURA:</Text>
-                <Text style={[styles.summaryValue, { color: '#10B981', fontWeight: 'bold', fontSize: 16 }]}>
+              <View style={[styles.summaryLine, { borderTopWidth: 1, borderTopColor: VUELTO_COLORS.borderMuted, paddingTop: 6, marginTop: 4 }]}>
+                <Text style={[styles.summaryLabel, { fontWeight: '800' }]}>TOTAL FACTURA:</Text>
+                <Text style={[styles.summaryValue, { color: VUELTO_COLORS.turquoise, fontWeight: '800', fontSize: 16 }]}>
                   ${(getTotalUsd() * (paymentCurrency === 'USD_CASH' ? 1.03 : 1)).toFixed(2)} USD
                 </Text>
               </View>
-              <Text style={{ textAlign: 'right', color: '#94A3B8', fontSize: 12 }}>
-                ≈ {(getTotalUsd() * (paymentCurrency === 'USD_CASH' ? 1.03 : 1) * rate).toFixed(2)} Bs
-              </Text>
+              {rate > 0 && (
+                <Text style={{ textAlign: 'right', color: VUELTO_COLORS.muted, fontSize: 12 }}>
+                  ≈ {(getTotalUsd() * (paymentCurrency === 'USD_CASH' ? 1.03 : 1) * rate).toFixed(2)} Bs
+                </Text>
+              )}
             </View>
 
             <Text style={styles.sectionHeader}>Método de Pago:</Text>
@@ -1146,13 +1299,23 @@ export const PosCheckoutScreen: React.FC = () => {
               ))}
             </View>
 
-            <Text style={styles.sectionHeader}>Destino del Vuelto / Cambio:</Text>
+            {paymentCurrency === 'BS_PAGO_MOVIL' && (
+              <TextInput
+                style={styles.input}
+                placeholder="Referencia Pago Móvil (últimos dígitos)"
+                placeholderTextColor={VUELTO_COLORS.subtle}
+                value={pagoMovilRef}
+                onChangeText={setPagoMovilRef}
+              />
+            )}
+
+            <Text style={styles.sectionHeader}>Destino del Vuelto:</Text>
             <View style={styles.vueltoRow}>
               {[
-                { type: 'WALLET_CREDIT', label: 'Monedero (Saldo)' },
-                { type: 'CHANGE_VOUCHER', label: 'Vale Impreso' },
-                { type: 'PAGO_MOVIL', label: 'Pago Móvil' },
                 { type: 'CASH', label: 'Efectivo' },
+                { type: 'WALLET_CREDIT', label: 'Monedero' },
+                { type: 'CHANGE_VOUCHER', label: 'Vale' },
+                { type: 'PAGO_MOVIL', label: 'Pago Móvil' },
               ].map((opt) => (
                 <TouchableOpacity
                   key={opt.type}
@@ -1169,48 +1332,68 @@ export const PosCheckoutScreen: React.FC = () => {
             <View style={styles.modalButtons}>
               <TouchableOpacity
                 style={styles.cancelModalBtn}
+                disabled={isSubmittingSale}
                 onPress={() => setShowCheckoutModal(false)}
               >
                 <Text style={styles.cancelModalBtnText}>Atrás</Text>
               </TouchableOpacity>
 
-              <TouchableOpacity style={styles.saveModalBtn} onPress={handleConfirmSale}>
-                <Text style={styles.saveModalBtnText}>Confirmar Venta</Text>
+              <TouchableOpacity
+                style={styles.saveModalBtn}
+                disabled={isSubmittingSale}
+                onPress={handleConfirmSale}
+              >
+                {isSubmittingSale ? (
+                  <ActivityIndicator color={VUELTO_COLORS.night} />
+                ) : (
+                  <Text style={styles.saveModalBtnText}>Confirmar Venta</Text>
+                )}
               </TouchableOpacity>
             </View>
           </View>
         </View>
       </Modal>
 
-      {/* MODAL 5: POST-VENTA (IMPRIMIR / COMPARTIR WHATSAPP) */}
+      {/* MODAL POST-VENTA */}
       <Modal visible={showPostSaleModal} animationType="fade" transparent>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
-            <Text style={[styles.modalTitle, { color: '#10B981' }]}>¡Factura Emitida con Éxito!</Text>
-            <Text style={{ textAlign: 'center', color: '#CBD5E1', marginBottom: 15 }}>
-              Factura SENIAT N° {confirmedInvoice?.invoiceNumber}{'\n'}
-              Monto: ${confirmedInvoice?.totalUsd} USD ({confirmedInvoice?.totalBs} Bs)
+            <Text style={[styles.modalTitle, { color: VUELTO_COLORS.turquoise }]}>
+              ¡Factura Emitida con Éxito!
+            </Text>
+            <Text style={{ textAlign: 'center', color: VUELTO_COLORS.muted, marginBottom: 16, lineHeight: 20 }}>
+              Factura N° {confirmedInvoice?.invoiceNumber}{'\n'}
+              Total: ${confirmedInvoice?.totalUsd} USD ({confirmedInvoice?.totalBs} Bs)
             </Text>
 
             <TouchableOpacity
               style={styles.postSaleBtnShare}
               onPress={async () => {
+                const token = useAuthStore.getState().accessToken || '';
+                const saleId = confirmedInvoice?.id;
+                if (!saleId || !token) return;
                 await NativeShareService.shareInvoice({
-                  saleId: confirmedInvoice?.invoiceNumber || 'VUELTO-01',
-                  invoiceNumber: confirmedInvoice?.invoiceNumber || 'A-000001',
-                  businessName: user?.businessName || 'Bodega Central C.A.',
-                  pdfDownloadUrl: `https://vuelto.onrender.com/api/v1/sales/demo/receipt/pdf`,
-                  jwtToken: 'session_token',
+                  saleId,
+                  invoiceNumber: confirmedInvoice.invoiceNumber,
+                  businessName: user?.businessName || 'Vuelto',
+                  pdfDownloadUrl: `${API_BASE_URL}/sales/${saleId}/receipt/pdf`,
+                  jwtToken: token,
+                  onAuditCallback: async (r) => {
+                    await MobileApiService.auditShare(saleId, r);
+                  },
                 });
               }}
             >
-              <Text style={styles.postSaleBtnShareText}>📲 Compartir por WhatsApp (Cero Costo)</Text>
+              <Text style={styles.postSaleBtnShareText}>📲 Compartir PDF por WhatsApp</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
               style={styles.postSaleBtnPrint}
-              onPress={() => {
-                Alert.alert('Impresora Bluetooth', 'Enviando comando ESC/POS a impresora térmica 58mm...');
+              onPress={async () => {
+                if (confirmedInvoice?.id) {
+                  await MobileApiService.auditPrint(confirmedInvoice.id);
+                }
+                Alert.alert('Impresora Térmica', 'Comprobante enviado y auditado.');
               }}
             >
               <Text style={styles.postSaleBtnPrintText}>🖨️ Imprimir Ticket Térmico</Text>
@@ -1226,7 +1409,7 @@ export const PosCheckoutScreen: React.FC = () => {
         </View>
       </Modal>
 
-      {/* MODAL: ESCÁNER CON CÁMARA FÍSICA DEL TELÉFONO (EXPO-CAMERA) */}
+      {/* ESCÁNER CON CÁMARA */}
       <BarcodeScannerModal
         visible={showCameraScanner}
         onClose={() => setShowCameraScanner(false)}
@@ -1235,18 +1418,18 @@ export const PosCheckoutScreen: React.FC = () => {
         title="Escáner POS Vuelto"
       />
 
-      {/* MINI-MODAL: CREACIÓN RÁPIDA DE PRODUCTO NO ENCONTRADO (404) */}
+      {/* MINI-MODAL CREACIÓN RÁPIDA DE PRODUCTO */}
       <Modal visible={showCreateProductModal} animationType="slide" transparent>
-        <View style={styles.quickProductOverlay}>
-          <View style={styles.quickProductCard}>
-            <Text style={styles.quickProductTitle}>📦 Crear Producto Nuevo</Text>
-            <Text style={styles.quickProductSubtitle}>
-              El código escaneado no existía. Regístrelo para agregarlo de inmediato:
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>📦 Crear Producto Nuevo</Text>
+            <Text style={styles.modalSub}>
+              Registra este código en PostgreSQL para agregarlo al carrito.
             </Text>
 
             <Text style={styles.fieldLabel}>Código de Barras:</Text>
             <TextInput
-              style={[styles.input, { backgroundColor: '#1E293B', color: '#38BDF8' }]}
+              style={[styles.input, { color: VUELTO_COLORS.turquoise }]}
               value={newProductBarcode}
               onChangeText={setNewProductBarcode}
             />
@@ -1254,8 +1437,8 @@ export const PosCheckoutScreen: React.FC = () => {
             <Text style={styles.fieldLabel}>Nombre del Producto (*):</Text>
             <TextInput
               style={styles.input}
-              placeholder="ej. Queso Paisa 500g"
-              placeholderTextColor="#64748B"
+              placeholder="Nombre del producto"
+              placeholderTextColor={VUELTO_COLORS.subtle}
               value={newProductName}
               onChangeText={setNewProductName}
             />
@@ -1265,8 +1448,6 @@ export const PosCheckoutScreen: React.FC = () => {
                 <Text style={styles.fieldLabel}>Precio Venta ($):</Text>
                 <TextInput
                   style={styles.input}
-                  placeholder="1.00"
-                  placeholderTextColor="#64748B"
                   keyboardType="numeric"
                   value={newProductPrice}
                   onChangeText={setNewProductPrice}
@@ -1276,8 +1457,6 @@ export const PosCheckoutScreen: React.FC = () => {
                 <Text style={styles.fieldLabel}>Stock Inicial:</Text>
                 <TextInput
                   style={styles.input}
-                  placeholder="10"
-                  placeholderTextColor="#64748B"
                   keyboardType="numeric"
                   value={newProductStock}
                   onChangeText={setNewProductStock}
@@ -1285,39 +1464,21 @@ export const PosCheckoutScreen: React.FC = () => {
               </View>
             </View>
 
-            <Text style={styles.fieldLabel}>Unidad de Medida:</Text>
-            <View style={{ flexDirection: 'row', gap: 6, marginVertical: 8, flexWrap: 'wrap' }}>
-              {['unidad', 'kg', 'paquete', 'L', 'botella'].map((u) => (
-                <TouchableOpacity
-                  key={u}
-                  style={[
-                    styles.unitChip,
-                    newProductUnit === u && styles.unitChipActive,
-                  ]}
-                  onPress={() => setNewProductUnit(u)}
-                >
-                  <Text style={[styles.unitChipText, newProductUnit === u && styles.unitChipTextActive]}>
-                    {u}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            <View style={{ flexDirection: 'row', gap: 10, marginTop: 14 }}>
+            <View style={styles.modalButtons}>
               <TouchableOpacity
-                style={[styles.modalActionBtn, { backgroundColor: '#334155' }]}
+                style={styles.cancelModalBtn}
                 onPress={() => setShowCreateProductModal(false)}
               >
-                <Text style={styles.modalActionBtnText}>Cancelar</Text>
+                <Text style={styles.cancelModalBtnText}>Cancelar</Text>
               </TouchableOpacity>
 
               <TouchableOpacity
-                style={[styles.modalActionBtn, { backgroundColor: '#00E599' }]}
+                style={styles.saveModalBtn}
                 onPress={handleSaveQuickProduct}
                 disabled={isSavingProduct}
               >
-                <Text style={[styles.modalActionBtnText, { color: '#002B1D', fontWeight: 'bold' }]}>
-                  {isSavingProduct ? 'Guardando...' : '✓ Guardar y Cargar'}
+                <Text style={styles.saveModalBtnText}>
+                  {isSavingProduct ? 'Guardando...' : '✓ Guardar'}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -1325,98 +1486,86 @@ export const PosCheckoutScreen: React.FC = () => {
         </View>
       </Modal>
 
-      {/* BOTÓN FLOTANTE FAB PARA ESCÁNER */}
       <TouchableOpacity
         style={styles.fabScannerBtn}
         onPress={() => setShowCameraScanner(true)}
         accessibilityLabel="Abrir escáner de cámara"
       >
-        <Text style={styles.fabScannerText}>📷</Text>
+        <Text style={{ fontSize: 22 }}>📷</Text>
       </TouchableOpacity>
     </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#071F27' },
+  container: { flex: 1, backgroundColor: VUELTO_COLORS.night },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     padding: 14,
-    backgroundColor: '#0B3B49',
+    backgroundColor: VUELTO_COLORS.deep,
     borderBottomWidth: 1,
-    borderBottomColor: '#155E75',
+    borderBottomColor: VUELTO_COLORS.border,
   },
-  title: { color: '#FFFFFF', fontSize: 18, fontWeight: 'bold', letterSpacing: 1 },
-  subtitle: { color: '#A3E635', fontSize: 11, fontWeight: '600', marginTop: 2 },
-  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  title: { color: VUELTO_COLORS.white, fontSize: 17, fontWeight: '800', letterSpacing: 0.8 },
+  subtitle: { color: VUELTO_COLORS.turquoise, fontSize: 11, fontWeight: '600', marginTop: 2 },
+  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   roleBadgeVendedor: {
-    backgroundColor: '#10B98122',
+    backgroundColor: 'rgba(0, 230, 195, 0.14)',
     borderWidth: 1,
-    borderColor: '#10B98155',
+    borderColor: 'rgba(0, 230, 195, 0.35)',
     paddingHorizontal: 6,
     paddingVertical: 2,
-    borderRadius: 4,
+    borderRadius: 6,
   },
-  roleBadgeVendedorText: { color: '#A3E635', fontSize: 10, fontWeight: 'bold' },
+  roleBadgeVendedorText: { color: VUELTO_COLORS.turquoise, fontSize: 10, fontWeight: '800' },
   roleBadgeAdmin: {
-    backgroundColor: '#0284C722',
+    backgroundColor: 'rgba(0, 191, 165, 0.16)',
     borderWidth: 1,
-    borderColor: '#0284C755',
+    borderColor: 'rgba(0, 230, 195, 0.45)',
     paddingHorizontal: 6,
     paddingVertical: 2,
-    borderRadius: 4,
+    borderRadius: 6,
   },
-  roleBadgeAdminText: { color: '#38BDF8', fontSize: 10, fontWeight: 'bold' },
+  roleBadgeAdminText: { color: VUELTO_COLORS.turquoise, fontSize: 10, fontWeight: '800' },
+  cashBadgeBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: 9,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  cashBadgeOpen: {
+    backgroundColor: 'rgba(16, 185, 129, 0.16)',
+    borderColor: 'rgba(16, 185, 129, 0.45)',
+  },
+  cashBadgeClosed: {
+    backgroundColor: 'rgba(239, 68, 68, 0.16)',
+    borderColor: 'rgba(239, 68, 68, 0.45)',
+  },
+  cashBadgeText: { color: VUELTO_COLORS.white, fontSize: 11, fontWeight: '700' },
   adminSwitchButton: {
-    backgroundColor: '#F59E0B',
+    backgroundColor: VUELTO_COLORS.turquoise,
     paddingVertical: 6,
     paddingHorizontal: 10,
-    borderRadius: 6,
+    borderRadius: 8,
   },
-  adminSwitchText: { color: '#071F27', fontSize: 12, fontWeight: 'bold' },
+  adminSwitchText: { color: VUELTO_COLORS.night, fontSize: 11, fontWeight: '800' },
   logoutButton: {
-    backgroundColor: '#1E293B',
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
     borderWidth: 1,
-    borderColor: '#334155',
+    borderColor: VUELTO_COLORS.borderMuted,
     paddingVertical: 6,
     paddingHorizontal: 10,
-    borderRadius: 6,
+    borderRadius: 8,
   },
-  logoutButtonText: { color: '#94A3B8', fontSize: 12, fontWeight: '600' },
-
-  quickBar: {
-    flexDirection: 'row',
-    padding: 10,
-    backgroundColor: '#0F172A',
-    gap: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1E293B',
-  },
-  quickCatalogBtn: {
-    flex: 1,
-    backgroundColor: '#0284C7',
-    paddingVertical: 8,
-    borderRadius: 6,
-    alignItems: 'center',
-  },
-  quickCatalogBtnText: { color: '#FFFFFF', fontWeight: 'bold', fontSize: 12 },
-  heldButton: {
-    backgroundColor: '#1E293B',
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  heldButtonText: { color: '#F8FAFC', fontSize: 12, fontWeight: '600' },
+  logoutButtonText: { color: VUELTO_COLORS.muted, fontSize: 11, fontWeight: '700' },
 
   ticketsTabBar: {
-    backgroundColor: '#0B2933',
+    backgroundColor: '#08182E',
     paddingVertical: 8,
     borderBottomWidth: 1,
-    borderBottomColor: '#164E63',
+    borderBottomColor: VUELTO_COLORS.borderMuted,
   },
   ticketsScrollContent: {
     paddingHorizontal: 10,
@@ -1427,191 +1576,181 @@ const styles = StyleSheet.create({
   activeTicketTab: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#0F766E',
+    backgroundColor: 'rgba(0, 191, 165, 0.16)',
     paddingVertical: 6,
     paddingHorizontal: 12,
-    borderRadius: 8,
+    borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#2DD4BF',
+    borderColor: VUELTO_COLORS.turquoise,
     gap: 6,
   },
-  activeTicketIcon: { fontSize: 14 },
-  activeTicketTitle: { color: '#FFFFFF', fontSize: 12, fontWeight: 'bold' },
-  activeTicketSubtitle: { color: '#A7F3D0', fontSize: 10 },
+  activeTicketTitle: { color: VUELTO_COLORS.white, fontSize: 12, fontWeight: '800' },
+  activeTicketSubtitle: { color: VUELTO_COLORS.turquoise, fontSize: 10 },
   heldTicketTab: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#1E293B',
+    backgroundColor: VUELTO_COLORS.deep,
     paddingVertical: 6,
     paddingHorizontal: 10,
-    borderRadius: 8,
+    borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#475569',
+    borderColor: VUELTO_COLORS.borderMuted,
     gap: 6,
   },
-  heldTicketIcon: { fontSize: 13 },
-  heldTicketTitle: { color: '#E2E8F0', fontSize: 12, fontWeight: '600' },
-  heldTicketSubtitle: { color: '#94A3B8', fontSize: 10 },
+  heldTicketTitle: { color: VUELTO_COLORS.white, fontSize: 12, fontWeight: '600' },
+  heldTicketSubtitle: { color: VUELTO_COLORS.muted, fontSize: 10 },
   discardTabBtn: {
-    backgroundColor: '#334155',
+    backgroundColor: 'rgba(239, 68, 68, 0.18)',
     width: 20,
     height: 20,
     borderRadius: 10,
     justifyContent: 'center',
     alignItems: 'center',
-    marginLeft: 4,
   },
-  discardTabBtnText: { color: '#F87171', fontSize: 10, fontWeight: 'bold' },
+  discardTabBtnText: { color: '#FCA5A5', fontSize: 10, fontWeight: '800' },
   newTicketBtn: {
-    backgroundColor: '#0284C7',
+    backgroundColor: VUELTO_COLORS.teal,
     paddingVertical: 8,
     paddingHorizontal: 12,
-    borderRadius: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
+    borderRadius: 10,
   },
-  newTicketBtnText: { color: '#FFFFFF', fontSize: 11, fontWeight: 'bold' },
+  newTicketBtnText: { color: VUELTO_COLORS.night, fontSize: 11, fontWeight: '800' },
+  helpTabBtn: {
+    backgroundColor: VUELTO_COLORS.deep,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: VUELTO_COLORS.border,
+  },
+  helpTabBtnText: { color: VUELTO_COLORS.turquoise, fontSize: 11, fontWeight: '700' },
 
   barcodeScannerBar: {
     flexDirection: 'row',
     alignItems: 'center',
     padding: 10,
-    backgroundColor: '#0F172A',
+    backgroundColor: VUELTO_COLORS.deep,
     gap: 6,
     borderBottomWidth: 1,
-    borderBottomColor: '#1E293B',
+    borderBottomColor: VUELTO_COLORS.borderMuted,
   },
   barcodeInput: {
     flex: 1,
-    backgroundColor: '#1E293B',
-    borderRadius: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    color: '#FFFFFF',
+    backgroundColor: VUELTO_COLORS.night,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    color: VUELTO_COLORS.white,
     fontSize: 12,
     borderWidth: 1,
-    borderColor: '#334155',
+    borderColor: VUELTO_COLORS.borderMuted,
   },
-  barcodeScanActionBtn: {
-    backgroundColor: '#10B981',
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 6,
-  },
-  barcodeScanActionBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: 'bold' },
-  openCatalogIconBtn: {
-    backgroundColor: '#334155',
-    paddingVertical: 8,
+  cameraScanActionBtn: {
+    backgroundColor: VUELTO_COLORS.turquoise,
+    paddingVertical: 9,
     paddingHorizontal: 10,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#475569',
+    borderRadius: 10,
   },
-  openCatalogIconBtnText: { color: '#E2E8F0', fontSize: 11, fontWeight: '600' },
+  cameraScanActionBtnText: { color: VUELTO_COLORS.night, fontSize: 11, fontWeight: '800' },
+  barcodeScanActionBtn: {
+    backgroundColor: VUELTO_COLORS.teal,
+    paddingVertical: 9,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+  },
+  barcodeScanActionBtnText: { color: VUELTO_COLORS.night, fontSize: 11, fontWeight: '800' },
+  openCatalogIconBtn: {
+    backgroundColor: VUELTO_COLORS.night,
+    paddingVertical: 9,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: VUELTO_COLORS.border,
+  },
+  openCatalogIconBtnText: { fontSize: 13 },
 
-  ciSearchRow: { flexDirection: 'row', gap: 6, marginBottom: 10 },
-  ciInput: {
-    flex: 1,
-    backgroundColor: '#0F172A',
-    borderWidth: 1,
-    borderColor: '#334155',
-    color: '#FFFFFF',
-    borderRadius: 8,
-    padding: 10,
-    fontSize: 13,
+  feedbackBanner: {
+    backgroundColor: 'rgba(0, 230, 195, 0.12)',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: VUELTO_COLORS.border,
   },
-  ciSearchBtn: {
-    backgroundColor: '#0284C7',
-    paddingHorizontal: 14,
-    borderRadius: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  ciSearchBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: 'bold' },
-  searchStatusBanner: {
-    padding: 8,
-    borderRadius: 6,
-    marginBottom: 10,
-  },
-  searchStatusBannerSuccess: {
-    backgroundColor: '#064E3B33',
-    borderWidth: 1,
-    borderColor: '#059669',
-  },
-  searchStatusBannerWarning: {
-    backgroundColor: '#78350F33',
-    borderWidth: 1,
-    borderColor: '#D97706',
-  },
-  searchStatusText: { fontSize: 11, fontWeight: '600' },
-  searchStatusTextSuccess: { color: '#34D399' },
-  searchStatusTextWarning: { color: '#FBBF24' },
-  nameRow: { flexDirection: 'row', marginBottom: 2 },
+  feedbackBannerText: { color: VUELTO_COLORS.turquoise, fontSize: 11, fontWeight: '700' },
 
   customerBar: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     padding: 12,
-    backgroundColor: '#0F172A',
+    backgroundColor: '#08182E',
     borderBottomWidth: 1,
-    borderBottomColor: '#1E293B',
+    borderBottomColor: VUELTO_COLORS.borderMuted,
   },
-  customerLabel: { color: '#94A3B8', fontSize: 10 },
-  customerName: { color: '#F8FAFC', fontSize: 13, fontWeight: '600' },
-  customerCredit: { color: '#4ADE80', fontSize: 11, fontWeight: 'bold' },
+  customerLabel: { color: VUELTO_COLORS.muted, fontSize: 10 },
+  customerName: { color: VUELTO_COLORS.white, fontSize: 13, fontWeight: '700' },
   quickCustomerBtn: {
-    backgroundColor: '#10B981',
-    paddingVertical: 6,
+    backgroundColor: 'rgba(0, 230, 195, 0.14)',
+    borderWidth: 1,
+    borderColor: VUELTO_COLORS.turquoise,
+    paddingVertical: 7,
     paddingHorizontal: 12,
-    borderRadius: 6,
+    borderRadius: 8,
   },
-  quickCustomerBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: 'bold' },
+  quickCustomerBtnText: { color: VUELTO_COLORS.turquoise, fontSize: 11, fontWeight: '800' },
 
   cartContainer: { flex: 1, padding: 12 },
   emptyCart: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
-  emptyCartText: { color: '#64748B', textAlign: 'center', fontSize: 14, marginBottom: 16, lineHeight: 20 },
-  scanSimBtn: {
-    backgroundColor: '#0B3B49',
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#155E75',
+  emptyCartText: {
+    color: VUELTO_COLORS.muted,
+    textAlign: 'center',
+    fontSize: 13,
+    marginBottom: 16,
+    lineHeight: 20,
   },
-  scanSimBtnText: { color: '#A3E635', fontSize: 13, fontWeight: 'bold' },
+  scanSimBtn: {
+    backgroundColor: VUELTO_COLORS.deep,
+    paddingVertical: 11,
+    paddingHorizontal: 16,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: VUELTO_COLORS.border,
+  },
+  scanSimBtnText: { color: VUELTO_COLORS.turquoise, fontSize: 12, fontWeight: '800' },
 
   cartItemRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#1E293B',
+    backgroundColor: VUELTO_COLORS.deep,
     padding: 12,
-    borderRadius: 8,
+    borderRadius: 12,
     marginBottom: 8,
     borderWidth: 1,
-    borderColor: '#334155',
+    borderColor: VUELTO_COLORS.borderMuted,
   },
-  itemName: { color: '#F8FAFC', fontSize: 14, fontWeight: '600' },
-  itemPrice: { color: '#94A3B8', fontSize: 11, marginTop: 2 },
+  itemName: { color: VUELTO_COLORS.white, fontSize: 14, fontWeight: '700' },
+  itemPrice: { color: VUELTO_COLORS.muted, fontSize: 11, marginTop: 2 },
   qtyControls: { flexDirection: 'row', alignItems: 'center', marginHorizontal: 10 },
   qtyBtn: {
-    backgroundColor: '#334155',
+    backgroundColor: VUELTO_COLORS.night,
+    borderWidth: 1,
+    borderColor: VUELTO_COLORS.border,
     width: 28,
     height: 28,
     borderRadius: 14,
     justifyContent: 'center',
     alignItems: 'center',
   },
-  qtyBtnText: { color: '#F8FAFC', fontSize: 15, fontWeight: 'bold' },
-  qtyText: { color: '#F8FAFC', marginHorizontal: 8, fontSize: 13, fontWeight: 'bold' },
-  itemTotal: { color: '#10B981', fontSize: 14, fontWeight: 'bold' },
-  itemTotalBs: { color: '#64748B', fontSize: 10 },
+  qtyBtnText: { color: VUELTO_COLORS.turquoise, fontSize: 15, fontWeight: '800' },
+  qtyText: { color: VUELTO_COLORS.white, marginHorizontal: 8, fontSize: 13, fontWeight: '800' },
+  itemTotal: { color: VUELTO_COLORS.turquoise, fontSize: 14, fontWeight: '800' },
+  itemTotalBs: { color: VUELTO_COLORS.muted, fontSize: 10 },
 
   footer: {
     padding: 16,
-    backgroundColor: '#0F172A',
+    backgroundColor: VUELTO_COLORS.deep,
     borderTopWidth: 1,
-    borderTopColor: '#1E293B',
+    borderTopColor: VUELTO_COLORS.border,
   },
   totalsRow: {
     flexDirection: 'row',
@@ -1619,62 +1758,62 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 12,
   },
-  totalUsdText: { color: '#F8FAFC', fontSize: 18, fontWeight: 'bold' },
-  totalBsText: { color: '#10B981', fontSize: 13, fontWeight: '600' },
+  totalUsdText: { color: VUELTO_COLORS.white, fontSize: 18, fontWeight: '800' },
+  totalBsText: { color: VUELTO_COLORS.turquoise, fontSize: 13, fontWeight: '700' },
   itemsCountBadge: {
-    backgroundColor: '#1E293B',
-    color: '#94A3B8',
-    paddingHorizontal: 8,
+    backgroundColor: VUELTO_COLORS.night,
+    color: VUELTO_COLORS.muted,
+    paddingHorizontal: 10,
     paddingVertical: 4,
     borderRadius: 12,
     fontSize: 11,
-    fontWeight: 'bold',
+    fontWeight: '700',
   },
-
   actionButtonsRow: { flexDirection: 'row', gap: 10 },
   parkButton: {
     flex: 1,
-    backgroundColor: '#334155',
+    backgroundColor: VUELTO_COLORS.night,
+    borderWidth: 1,
+    borderColor: VUELTO_COLORS.borderMuted,
     paddingVertical: 14,
-    borderRadius: 8,
+    borderRadius: 12,
     alignItems: 'center',
   },
-  parkButtonText: { color: '#FFFFFF', fontSize: 14, fontWeight: 'bold' },
+  parkButtonText: { color: VUELTO_COLORS.white, fontSize: 14, fontWeight: '700' },
   checkoutButton: {
     flex: 2,
-    backgroundColor: '#10B981',
+    backgroundColor: VUELTO_COLORS.turquoise,
     paddingVertical: 14,
-    borderRadius: 8,
+    borderRadius: 12,
     alignItems: 'center',
   },
-  checkoutButtonText: { color: '#FFFFFF', fontSize: 14, fontWeight: 'bold' },
-  disabledBtn: { opacity: 0.4 },
+  checkoutButtonText: { color: VUELTO_COLORS.night, fontSize: 14, fontWeight: '800' },
+  disabledBtn: { opacity: 0.45 },
 
-  // Modales
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.75)',
+    backgroundColor: 'rgba(3, 10, 20, 0.82)',
     justifyContent: 'center',
     alignItems: 'center',
     padding: 16,
   },
   modalContent: {
-    backgroundColor: '#1E293B',
-    borderRadius: 16,
+    backgroundColor: VUELTO_COLORS.deep,
+    borderRadius: 20,
     padding: 20,
     width: '100%',
-    maxWidth: 400,
+    maxWidth: 420,
     borderWidth: 1,
-    borderColor: '#334155',
+    borderColor: VUELTO_COLORS.border,
   },
   modalContentLarge: {
-    backgroundColor: '#1E293B',
-    borderRadius: 16,
+    backgroundColor: VUELTO_COLORS.deep,
+    borderRadius: 20,
     padding: 20,
     width: '100%',
     maxWidth: 480,
     borderWidth: 1,
-    borderColor: '#334155',
+    borderColor: VUELTO_COLORS.border,
   },
   modalHeaderRow: {
     flexDirection: 'row',
@@ -1682,405 +1821,169 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 14,
   },
-  modalTitle: { fontSize: 18, fontWeight: 'bold', color: '#F8FAFC' },
-  closeModalText: { color: '#94A3B8', fontSize: 13, fontWeight: 'bold' },
-  docTypeRow: { flexDirection: 'row', gap: 8, marginBottom: 12 },
-  docTypeChip: {
-    flex: 1,
-    paddingVertical: 8,
-    borderRadius: 6,
-    backgroundColor: '#0F172A',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  docTypeChipActive: { backgroundColor: '#0284C7', borderColor: '#0284C7' },
-  docTypeText: { color: '#94A3B8', fontWeight: 'bold' },
-  docTypeTextActive: { color: '#FFFFFF' },
+  modalTitle: { fontSize: 18, fontWeight: '800', color: VUELTO_COLORS.white, marginBottom: 8 },
+  modalSub: { fontSize: 12, color: VUELTO_COLORS.muted, marginBottom: 12, lineHeight: 17 },
+  closeModalText: { color: VUELTO_COLORS.muted, fontSize: 13, fontWeight: '700' },
+  fieldLabel: { color: VUELTO_COLORS.muted, fontSize: 12, fontWeight: '700', marginBottom: 4 },
   input: {
-    backgroundColor: '#0F172A',
+    backgroundColor: VUELTO_COLORS.night,
     borderWidth: 1,
-    borderColor: '#334155',
-    color: '#FFFFFF',
-    borderRadius: 8,
+    borderColor: VUELTO_COLORS.borderMuted,
+    color: VUELTO_COLORS.white,
+    borderRadius: 10,
     padding: 10,
     marginBottom: 12,
     fontSize: 13,
   },
-  modalButtons: { flexDirection: 'row', gap: 10, marginTop: 12 },
-  cancelModalBtn: { flex: 1, padding: 12, borderRadius: 8, backgroundColor: '#334155', alignItems: 'center' },
-  cancelModalBtnText: { color: '#CBD5E1', fontWeight: 'bold' },
-  saveModalBtn: { flex: 1, padding: 12, borderRadius: 8, backgroundColor: '#0284C7', alignItems: 'center' },
-  saveModalBtnText: { color: '#FFFFFF', fontWeight: 'bold' },
+  modalButtons: { flexDirection: 'row', gap: 10, marginTop: 10 },
+  cancelModalBtn: {
+    flex: 1,
+    padding: 13,
+    borderRadius: 12,
+    backgroundColor: VUELTO_COLORS.night,
+    borderWidth: 1,
+    borderColor: VUELTO_COLORS.borderMuted,
+    alignItems: 'center',
+  },
+  cancelModalBtnText: { color: VUELTO_COLORS.muted, fontWeight: '700' },
+  saveModalBtn: {
+    flex: 1,
+    padding: 13,
+    borderRadius: 12,
+    backgroundColor: VUELTO_COLORS.turquoise,
+    alignItems: 'center',
+  },
+  saveModalBtnText: { color: VUELTO_COLORS.night, fontWeight: '800' },
 
-  // Catálogo
   catalogItemRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingVertical: 10,
-    paddingHorizontal: 8,
     borderBottomWidth: 1,
-    borderBottomColor: '#334155',
+    borderBottomColor: VUELTO_COLORS.borderMuted,
   },
-  catalogItemName: { color: '#F8FAFC', fontSize: 13, fontWeight: 'bold' },
-  catalogItemBarcode: { color: '#64748B', fontSize: 11, fontFamily: 'monospace' },
-  catalogItemPriceUsd: { color: '#10B981', fontSize: 13, fontWeight: 'bold' },
-  catalogItemPriceBs: { color: '#94A3B8', fontSize: 11 },
+  catalogItemName: { color: VUELTO_COLORS.white, fontSize: 14, fontWeight: '700' },
+  catalogItemBarcode: { color: VUELTO_COLORS.muted, fontSize: 11 },
+  catalogItemPriceUsd: { color: VUELTO_COLORS.turquoise, fontSize: 13, fontWeight: '800', marginTop: 2 },
   addToCartBtn: {
-    backgroundColor: '#10B981',
+    backgroundColor: VUELTO_COLORS.turquoise,
     paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 6,
+    paddingVertical: 8,
+    borderRadius: 8,
+    marginLeft: 10,
   },
-  addToCartBtnText: { color: '#FFFFFF', fontSize: 12, fontWeight: 'bold' },
+  addToCartBtnText: { color: VUELTO_COLORS.night, fontSize: 12, fontWeight: '800' },
 
-  // Cuentas en Espera
+  docTypeRow: { flexDirection: 'row', gap: 8, marginBottom: 12 },
+  docTypeChip: {
+    flex: 1,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: VUELTO_COLORS.night,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: VUELTO_COLORS.borderMuted,
+  },
+  docTypeChipActive: { backgroundColor: VUELTO_COLORS.turquoise, borderColor: VUELTO_COLORS.turquoise },
+  docTypeText: { color: VUELTO_COLORS.muted, fontWeight: '800' },
+  docTypeTextActive: { color: VUELTO_COLORS.night },
+  ciSearchRow: { flexDirection: 'row', gap: 6, marginBottom: 10 },
+  ciInput: {
+    flex: 1,
+    backgroundColor: VUELTO_COLORS.night,
+    borderWidth: 1,
+    borderColor: VUELTO_COLORS.borderMuted,
+    color: VUELTO_COLORS.white,
+    borderRadius: 10,
+    padding: 10,
+    fontSize: 13,
+  },
+  ciSearchBtn: {
+    backgroundColor: VUELTO_COLORS.teal,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  ciSearchBtnText: { color: VUELTO_COLORS.night, fontSize: 12, fontWeight: '800' },
+  searchStatusBanner: { padding: 8, borderRadius: 8, marginBottom: 10, borderWidth: 1 },
+  searchStatusBannerSuccess: { backgroundColor: 'rgba(16, 185, 129, 0.14)', borderColor: VUELTO_COLORS.success },
+  searchStatusBannerWarning: { backgroundColor: VUELTO_COLORS.warningBg, borderColor: VUELTO_COLORS.warning },
+  searchStatusText: { fontSize: 11, fontWeight: '700' },
+  searchStatusTextSuccess: { color: '#6EE7B7' },
+  searchStatusTextWarning: { color: '#FCD34D' },
+  nameRow: { flexDirection: 'row', marginBottom: 2 },
+
   heldCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#0F172A',
-    padding: 10,
-    borderRadius: 8,
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  heldLabel: { fontSize: 13, fontWeight: 'bold', color: '#F8FAFC' },
-  heldInfo: { fontSize: 11, color: '#94A3B8' },
-  resumeBtn: { backgroundColor: '#10B981', paddingVertical: 6, paddingHorizontal: 10, borderRadius: 6, marginRight: 6 },
-  resumeBtnText: { color: '#FFF', fontSize: 11, fontWeight: 'bold' },
-  discardBtn: { backgroundColor: '#EF4444', width: 26, height: 26, borderRadius: 13, justifyContent: 'center', alignItems: 'center' },
-  discardBtnText: { color: '#FFF', fontWeight: 'bold', fontSize: 12 },
-
-  // Cobro
-  summaryBox: {
-    backgroundColor: '#0F172A',
+    backgroundColor: VUELTO_COLORS.night,
     padding: 12,
-    borderRadius: 8,
-    marginBottom: 14,
+    borderRadius: 10,
+    marginBottom: 8,
+  },
+  heldLabel: { color: VUELTO_COLORS.white, fontWeight: '700' },
+  heldInfo: { color: VUELTO_COLORS.muted, fontSize: 11 },
+  resumeBtn: { backgroundColor: VUELTO_COLORS.turquoise, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 8 },
+  resumeBtnText: { color: VUELTO_COLORS.night, fontWeight: '800', fontSize: 12 },
+
+  summaryBox: {
+    backgroundColor: VUELTO_COLORS.night,
+    borderRadius: 12,
+    padding: 12,
     borderWidth: 1,
-    borderColor: '#334155',
+    borderColor: VUELTO_COLORS.borderMuted,
+    marginBottom: 14,
   },
   summaryLine: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
-  summaryLabel: { color: '#94A3B8', fontSize: 12 },
-  summaryValue: { color: '#F8FAFC', fontSize: 12 },
+  summaryLabel: { color: VUELTO_COLORS.muted, fontSize: 13 },
+  summaryValue: { color: VUELTO_COLORS.white, fontSize: 13, fontWeight: '700' },
+  sectionHeader: { color: VUELTO_COLORS.muted, fontSize: 12, fontWeight: '700', marginBottom: 8 },
+  vueltoRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 12 },
+  vueltoChip: {
+    backgroundColor: VUELTO_COLORS.night,
+    borderWidth: 1,
+    borderColor: VUELTO_COLORS.borderMuted,
+    paddingVertical: 7,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+  },
+  vueltoChipActive: { backgroundColor: 'rgba(0, 230, 195, 0.18)', borderColor: VUELTO_COLORS.turquoise },
+  vueltoChipText: { color: VUELTO_COLORS.muted, fontSize: 11, fontWeight: '700' },
+  vueltoChipTextActive: { color: VUELTO_COLORS.turquoise },
 
-  sectionHeader: { fontSize: 12, fontWeight: '600', color: '#94A3B8', marginBottom: 6 },
-  vueltoRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 14 },
-  vueltoChip: { backgroundColor: '#0F172A', paddingVertical: 6, paddingHorizontal: 10, borderRadius: 6, borderWidth: 1, borderColor: '#334155' },
-  vueltoChipActive: { backgroundColor: '#10B981', borderColor: '#10B981' },
-  vueltoChipText: { color: '#94A3B8', fontSize: 11, fontWeight: '600' },
-  vueltoChipTextActive: { color: '#FFFFFF', fontWeight: 'bold' },
+  postSaleBtnShare: {
+    backgroundColor: VUELTO_COLORS.turquoise,
+    padding: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  postSaleBtnShareText: { color: VUELTO_COLORS.night, fontWeight: '800', fontSize: 14 },
+  postSaleBtnPrint: {
+    backgroundColor: VUELTO_COLORS.night,
+    borderWidth: 1,
+    borderColor: VUELTO_COLORS.border,
+    padding: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  postSaleBtnPrintText: { color: VUELTO_COLORS.white, fontWeight: '700', fontSize: 14 },
 
-  postSaleBtnPrint: { backgroundColor: '#0284C7', padding: 14, borderRadius: 8, alignItems: 'center', marginBottom: 10 },
-  postSaleBtnPrintText: { color: '#FFF', fontWeight: 'bold', fontSize: 13 },
-  postSaleBtnShare: { backgroundColor: '#10B981', padding: 14, borderRadius: 8, alignItems: 'center', marginBottom: 10 },
-  postSaleBtnShareText: { color: '#FFF', fontWeight: 'bold', fontSize: 13 },
-
-  // Botón Cámara en Barra de Búsqueda
-  cameraScanActionBtn: {
-    backgroundColor: '#10B981',
-    paddingHorizontal: 12,
-    borderRadius: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  cameraScanActionBtnText: {
-    color: '#071F27',
-    fontWeight: 'bold',
-    fontSize: 12,
-  },
-
-  // Modal de Cámara Físico (expo-camera)
-  cameraModalContainer: {
-    flex: 1,
-    backgroundColor: '#000000',
-  },
-  cameraHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    backgroundColor: '#071F27',
-    borderBottomWidth: 1,
-    borderBottomColor: '#155E75',
-  },
-  cameraHeaderTitle: {
-    color: '#A3E635',
-    fontWeight: 'bold',
-    fontSize: 16,
-  },
-  cameraHeaderSubtitle: {
-    color: '#94A3B8',
-    fontSize: 11,
-    marginTop: 2,
-  },
-  cameraCloseBtn: {
-    backgroundColor: '#334155',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 6,
-  },
-  cameraCloseBtnText: {
-    color: '#F8FAFC',
-    fontWeight: 'bold',
-    fontSize: 12,
-  },
-  cameraViewWrapper: {
-    flex: 1,
-    position: 'relative',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  viewfinderOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  viewfinderBox: {
-    width: 280,
-    height: 180,
-    position: 'relative',
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(16, 185, 129, 0.4)',
-    backgroundColor: 'rgba(0, 0, 0, 0.05)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  cornerBracket: {
-    position: 'absolute',
-    width: 24,
-    height: 24,
-    borderColor: '#A3E635',
-  },
-  topLeftBracket: {
-    top: -2,
-    left: -2,
-    borderTopWidth: 4,
-    borderLeftWidth: 4,
-    borderTopLeftRadius: 10,
-  },
-  topRightBracket: {
-    top: -2,
-    right: -2,
-    borderTopWidth: 4,
-    borderRightWidth: 4,
-    borderTopRightRadius: 10,
-  },
-  bottomLeftBracket: {
-    bottom: -2,
-    left: -2,
-    borderBottomWidth: 4,
-    borderLeftWidth: 4,
-    borderBottomLeftRadius: 10,
-  },
-  bottomRightBracket: {
-    bottom: -2,
-    right: -2,
-    borderBottomWidth: 4,
-    borderRightWidth: 4,
-    borderBottomRightRadius: 10,
-  },
-  laserLine: {
-    width: '90%',
-    height: 2,
-    backgroundColor: '#A3E635',
-    shadowColor: '#A3E635',
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.9,
-    shadowRadius: 8,
-    elevation: 6,
-  },
-  scanFeedbackToast: {
-    position: 'absolute',
-    top: 24,
-    backgroundColor: '#071F27EE',
-    borderWidth: 1,
-    borderColor: '#10B981',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.4,
-    shadowRadius: 6,
-    elevation: 8,
-  },
-  scanFeedbackToastText: {
-    color: '#A3E635',
-    fontWeight: 'bold',
-    fontSize: 13,
-  },
-  cameraFooter: {
-    backgroundColor: '#071F27',
-    padding: 16,
-    borderTopWidth: 1,
-    borderTopColor: '#155E75',
-  },
-  cameraControlsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  torchToggleBtn: {
-    backgroundColor: '#062F3B',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#155E75',
-  },
-  torchToggleBtnActive: {
-    backgroundColor: '#EAB30833',
-    borderColor: '#EAB308',
-  },
-  torchToggleBtnText: {
-    color: '#F8FAFC',
-    fontWeight: 'bold',
-    fontSize: 12,
-  },
-  scannedCountBadge: {
-    backgroundColor: '#062F3B',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#10B98155',
-  },
-  scannedCountBadgeText: {
-    color: '#A3E635',
-    fontWeight: 'bold',
-    fontSize: 12,
-  },
-  cameraManualRow: {
-    flexDirection: 'row',
-    gap: 8,
-    marginBottom: 12,
-  },
-  cameraManualInput: {
-    flex: 1,
-    backgroundColor: '#062F3B',
-    borderWidth: 1,
-    borderColor: '#155E75',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    color: '#FFFFFF',
-    fontSize: 13,
-  },
-  cameraManualBtn: {
-    backgroundColor: '#0284C7',
-    paddingHorizontal: 16,
-    borderRadius: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  cameraManualBtnText: {
-    color: '#FFFFFF',
-    fontWeight: 'bold',
-    fontSize: 12,
-  },
-  cameraDoneBtn: {
-    backgroundColor: '#10B981',
-    paddingVertical: 14,
-    borderRadius: 10,
-    alignItems: 'center',
-  },
-  cameraDoneBtnText: {
-    color: '#071F27',
-    fontWeight: 'bold',
-    fontSize: 14,
-  },
-  // Mini Modal de Creación Rápida
-  quickProductOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.85)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20,
-  },
-  quickProductCard: {
-    backgroundColor: '#0B3B49',
-    width: '100%',
-    maxWidth: 420,
-    borderRadius: 16,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: '#155E75',
-  },
-  quickProductTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#00E599',
-    marginBottom: 4,
-  },
-  quickProductSubtitle: {
-    fontSize: 12,
-    color: '#94A3B8',
-    marginBottom: 14,
-  },
-  fieldLabel: {
-    color: '#94A3B8',
-    fontSize: 12,
-    fontWeight: '600',
-    marginBottom: 4,
-    marginTop: 6,
-  },
-  unitChip: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 6,
-    backgroundColor: '#062F3B',
-    borderWidth: 1,
-    borderColor: '#155E75',
-  },
-  unitChipActive: {
-    backgroundColor: '#00E599',
-    borderColor: '#00E599',
-  },
-  unitChipText: {
-    color: '#94A3B8',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  unitChipTextActive: {
-    color: '#002B1D',
-    fontWeight: 'bold',
-  },
-  modalActionBtn: {
-    flex: 1,
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  modalActionBtnText: {
-    color: '#FFFFFF',
-    fontWeight: 'bold',
-    fontSize: 13,
-  },
-  // Botón Flotante FAB
   fabScannerBtn: {
     position: 'absolute',
-    bottom: 24,
-    right: 20,
-    width: 62,
-    height: 62,
-    borderRadius: 31,
-    backgroundColor: '#00E599',
+    right: 18,
+    bottom: 116,
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+    backgroundColor: VUELTO_COLORS.turquoise,
     justifyContent: 'center',
     alignItems: 'center',
     elevation: 8,
-    shadowColor: '#00E599',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.45,
+    shadowColor: VUELTO_COLORS.turquoise,
+    shadowOpacity: 0.4,
     shadowRadius: 8,
-    zIndex: 999,
-  },
-  fabScannerText: {
-    fontSize: 28,
   },
 });

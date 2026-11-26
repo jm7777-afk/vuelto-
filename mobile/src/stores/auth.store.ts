@@ -2,7 +2,7 @@ import { create } from 'zustand';
 
 export interface MobileUserProfile {
   id: string;
-  tenantId: string;
+  tenantId: string | null;
   username: string;
   fullName: string;
   roleId: 'SUPER_ADMIN' | 'ADMIN' | 'VENDEDOR' | 'CONSULTA';
@@ -13,10 +13,10 @@ interface AuthState {
   user: MobileUserProfile | null;
   accessToken: string | null;
   refreshToken: string | null;
-  // Modo activo en la interfaz móvil
   activeMode: 'POS' | 'ADMIN';
 
   setAuth: (user: MobileUserProfile, accessToken: string, refreshToken: string) => void;
+  updateTokens: (accessToken: string, refreshToken?: string) => void;
   logout: () => void;
   toggleMode: (mode: 'POS' | 'ADMIN') => boolean;
 }
@@ -32,8 +32,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       user,
       accessToken,
       refreshToken,
-      activeMode: 'POS', // Inicia por defecto en modo POS para rápida atención
+      activeMode: user.roleId === 'SUPER_ADMIN' ? 'ADMIN' : 'POS',
     });
+  },
+
+  updateTokens: (accessToken, refreshToken) => {
+    set((state) => ({
+      accessToken,
+      refreshToken: refreshToken ?? state.refreshToken,
+    }));
   },
 
   logout: () => {
@@ -51,7 +58,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     if (!user) return false;
 
     if (mode === 'ADMIN' && user.roleId !== 'ADMIN' && user.roleId !== 'SUPER_ADMIN') {
-      // VENDEDOR tiene prohibido acceder al Modo Administrador
       return false;
     }
 
